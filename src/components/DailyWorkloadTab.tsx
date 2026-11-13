@@ -1,0 +1,1468 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  DailyWorkload, 
+  StaffMember, 
+  WorkShift, 
+  IN_TIME_CLINICS, 
+  OUT_TIME_CLINICS, 
+  LeaveType,
+  REGULAR_LEAVE_TYPES,
+  formatPositionLabel,
+  getEffectiveTotalPt
+} from '../types';
+import { 
+  ClipboardPen, 
+  Users, 
+  Plus, 
+  Minus, 
+  Sparkles, 
+  Calendar, 
+  Clock, 
+  Building, 
+  Bed, 
+  Activity, 
+  Trash2, 
+  FileCheck2,
+  CheckCircle2,
+  HelpCircle,
+  ArrowRightLeft,
+  Lock,
+  ShieldCheck,
+  Pencil,
+  X,
+  Save,
+  Search,
+  CheckSquare,
+  Square,
+  GraduationCap,
+  CalendarOff
+} from 'lucide-react';
+
+interface DailyWorkloadTabProps {
+  workloads: DailyWorkload[];
+  staffList: StaffMember[];
+  inTimeClinics?: string[];
+  outTimeClinics?: string[];
+  onSaveWorkload: (
+    entry: DailyWorkload, 
+    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
+    crossCoverageData?: { staffName: string; targetClinic: string } | null,
+    trainingData?: { staffName: string; topic: string; note: string }[] | null
+  ) => void;
+  onUpdateWorkload?: (updated: DailyWorkload) => void;
+  onDeleteWorkload: (id: string) => void;
+  defaultReporter?: string;
+  isAdmin?: boolean;
+  onPromptAdminUnlock?: () => void;
+}
+
+export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
+  workloads,
+  staffList,
+  inTimeClinics = [...IN_TIME_CLINICS],
+  outTimeClinics = [...OUT_TIME_CLINICS],
+  onSaveWorkload,
+  onUpdateWorkload,
+  onDeleteWorkload,
+  defaultReporter = '',
+  isAdmin = false,
+  onPromptAdminUnlock,
+}) => {
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  const [date, setDate] = useState<string>(todayStr);
+  const [shift, setShift] = useState<WorkShift>('ในเวลา 08:00-16:00');
+  const [clinic, setClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
+
+  // Admin Editing Modal State
+  const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
+  
+  // Patients & Admit
+  const [totalPt, setTotalPt] = useState<number>(0);
+  const [adultPt, setAdultPt] = useState<number>(0);
+  const [childPt, setChildPt] = useState<number>(0);
+  const [admit, setAdmit] = useState<number>(0);
+
+  // Staff on duty (supports 0.5 steps)
+  const [hn, setHn] = useState<number>(1);
+  const [rn, setRn] = useState<number>(2);
+  const [pn, setPn] = useState<number>(1);
+  const [na, setNa] = useState<number>(1);
+  const [clerk, setClerk] = useState<number>(1);
+  const [serviceWorker, setServiceWorker] = useState<number>(1);
+
+  // Notes & Reporter (empty by default & required)
+  const [note, setNote] = useState<string>('');
+  const [reporter, setReporter] = useState<string>(defaultReporter);
+
+  // Section 4: Leave / Training-Meeting / Cross-Coverage
+  const [hasStaffLeave, setHasStaffLeave] = useState<boolean>(false);
+  const [selectedLeaveStaffIds, setSelectedLeaveStaffIds] = useState<string[]>([]);
+  const [leaveSearch, setLeaveSearch] = useState<string>('');
+  const [leaveType, setLeaveType] = useState<LeaveType>('ลาป่วย');
+  const [leaveNote, setLeaveNote] = useState<string>('');
+
+  const [hasTraining, setHasTraining] = useState<boolean>(false);
+  const [selectedTrainingStaffIds, setSelectedTrainingStaffIds] = useState<string[]>([]);
+  const [trainingSearch, setTrainingSearch] = useState<string>('');
+  const [trainingTopic, setTrainingTopic] = useState<string>('');
+  const [trainingNote, setTrainingNote] = useState<string>('');
+
+  const [hasCrossCover, setHasCrossCover] = useState<boolean>(false);
+  const [crossStaffSearch, setCrossStaffSearch] = useState<string>('');
+  const [crossStaffName, setCrossStaffName] = useState<string>('');
+  const [crossTargetClinic, setCrossTargetClinic] = useState<string>('');
+
+  // Shift & Clinics logic
+  const isOutTime = shift !== 'ในเวลา 08:00-16:00';
+  const availableClinics = isOutTime ? outTimeClinics : inTimeClinics;
+  const isEchoClinic = clinic === 'Echo';
+
+  useEffect(() => {
+    if (availableClinics.length > 0 && !availableClinics.includes(clinic)) {
+      setClinic(availableClinics[0]);
+    }
+  }, [availableClinics, clinic]);
+
+  // Handle shift change
+  const handleShiftChange = (newShift: WorkShift) => {
+    setShift(newShift);
+    const newClinics = newShift !== 'ในเวลา 08:00-16:00' ? outTimeClinics : inTimeClinics;
+    if (newClinics.length > 0 && !newClinics.includes(clinic)) {
+      setClinic(newClinics[0]);
+    }
+  };
+
+  // Adjust patient counts so adult + child always sum into totalPt
+  const handleTotalPtChange = (val: number) => {
+    const v = Math.max(0, val);
+    setTotalPt(v);
+    if (!isEchoClinic) {
+      setAdultPt(Math.max(0, v - childPt));
+    }
+  };
+
+  const handleAdultPtChange = (val: number) => {
+    const v = Math.max(0, val);
+    setAdultPt(v);
+    setTotalPt(v + childPt);
+  };
+
+  const handleChildPtChange = (val: number) => {
+    const v = Math.max(0, val);
+    setChildPt(v);
+    setTotalPt(adultPt + v);
+  };
+
+  // Filter staff by selected clinic
+  const clinicStaff = staffList.filter(s => s.status === 'Active' && s.homeClinic === clinic);
+  const activeStaffAll = staffList.filter(s => s.status === 'Active');
+
+  const adjustStaff = (setter: React.Dispatch<React.SetStateAction<number>>, delta: number) => {
+    setter(prev => Math.max(0, Math.round((prev + delta) * 10) / 10));
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!reporter.trim()) {
+      alert('กรุณาระบุชื่อผู้รายงาน');
+      return;
+    }
+
+    const finalTotal = Math.max(Number(totalPt) || 0, (Number(adultPt) || 0) + (Number(childPt) || 0));
+    const calculatedChild = Number(childPt) || 0;
+    const calculatedAdult = isEchoClinic ? (Number(adultPt) || 0) : Math.max(0, finalTotal - calculatedChild);
+
+    const newEntry: DailyWorkload = {
+      id: `WL-${Date.now()}`,
+      date,
+      shift,
+      clinic,
+      totalPt: finalTotal,
+      adultPt: calculatedAdult,
+      childPt: calculatedChild,
+      admit: Number(admit) || 0,
+      hn: Number(hn) || 0,
+      rn: Number(rn) || 0,
+      pn: Number(pn) || 0,
+      na: Number(na) || 0,
+      pca: Number(na) || 0,
+      clerk: Number(clerk) || 0,
+      serviceWorker: Number(serviceWorker) || 0,
+      note,
+      reporter,
+      timestamp: new Date().toISOString(),
+    };
+
+    let leaveData = null;
+    if (hasStaffLeave && selectedLeaveStaffIds.length > 0) {
+      leaveData = selectedLeaveStaffIds.map(staffId => {
+        const staff = staffList.find(s => s.staffId === staffId);
+        return {
+          staffName: staff?.name || staffId,
+          leaveType,
+          note: leaveNote || `บันทึกอัตโนมัติจากห้องตรวจ ${clinic}`,
+        };
+      });
+    }
+
+    let trainingData = null;
+    if (hasTraining && selectedTrainingStaffIds.length > 0) {
+      trainingData = selectedTrainingStaffIds.map(staffId => {
+        const staff = staffList.find(s => s.staffId === staffId);
+        return {
+          staffName: staff?.name || staffId,
+          topic: trainingTopic.trim() || 'ไปอบรม/ประชุม',
+          note: trainingNote.trim(),
+        };
+      });
+    }
+
+    let crossCoverageData = null;
+    if (hasCrossCover && crossStaffName && crossTargetClinic) {
+      crossCoverageData = {
+        staffName: crossStaffName,
+        targetClinic: crossTargetClinic,
+      };
+    }
+
+    onSaveWorkload(newEntry, leaveData, crossCoverageData, trainingData);
+
+    // Reset sensitive fields
+    setTotalPt(0);
+    setAdultPt(0);
+    setChildPt(0);
+    setAdmit(0);
+    setNote('');
+    setHasStaffLeave(false);
+    setSelectedLeaveStaffIds([]);
+    setLeaveSearch('');
+    setLeaveNote('');
+    setHasTraining(false);
+    setSelectedTrainingStaffIds([]);
+    setTrainingSearch('');
+    setTrainingTopic('');
+    setTrainingNote('');
+    setHasCrossCover(false);
+    setCrossStaffSearch('');
+    setCrossStaffName('');
+    setCrossTargetClinic('');
+  };
+
+  // Filter workloads for selected date
+  const todayWorkloads = workloads.filter(w => w.date === date);
+
+  return (
+    <div className="space-y-6">
+      {/* Top Banner Notice */}
+      <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 border border-emerald-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+            <ClipboardPen className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-emerald-950">
+              เมนูที่ 1: บันทึกภาระงานประจำวัน (Daily Clinic Workload Entry)
+            </h2>
+            <p className="text-xs text-emerald-800">
+              บันทึกสถิติผู้ป่วย, Admit, และกำลังคนปฏิบัติงานจริง (รองรับ 0.5 แรง) พร้อมซิงค์ชีทอัตโนมัติ
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 text-xs font-medium text-emerald-800 bg-white/80 px-3 py-1.5 rounded-lg border border-emerald-200">
+          <Calendar className="w-4 h-4 text-emerald-600" />
+          <span>วันที่เลือก: {date}</span>
+          <span className="text-emerald-400">|</span>
+          <span className="text-emerald-700 font-bold">{todayWorkloads.length} รายการ</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Form: 7 cols */}
+        <div className="lg:col-span-7">
+          <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 sm:p-6 space-y-5">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                ข้อมูลห้องตรวจและกะเวลา
+              </h3>
+              <span className="text-xs font-medium text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full">
+                {isOutTime ? `กะนอกเวลา (${outTimeClinics.length} ห้อง)` : `กะในเวลา (${inTimeClinics.length} ห้อง)`}
+              </span>
+            </div>
+
+            {/* Row 1: Date, Shift, Clinic */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-gray-400" />
+                  วันที่ปฏิบัติงาน <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  required
+                  className="w-full text-sm rounded-lg border-gray-300 shadow-2xs focus:border-emerald-500 focus:ring-emerald-500 py-2 px-3 border"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1 flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5 text-gray-400" />
+                  กะเวลา <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={shift}
+                  onChange={(e) => handleShiftChange(e.target.value as WorkShift)}
+                  required
+                  className="w-full text-sm rounded-lg border-gray-300 shadow-2xs focus:border-emerald-500 focus:ring-emerald-500 py-2 px-3 border bg-white"
+                >
+                  <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                  <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                  <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1 flex items-center gap-1">
+                  <Building className="w-3.5 h-3.5 text-gray-400" />
+                  ห้องตรวจ / แผนก <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={clinic}
+                  onChange={(e) => setClinic(e.target.value)}
+                  required
+                  className="w-full text-sm rounded-lg border-gray-300 shadow-2xs focus:border-emerald-500 focus:ring-emerald-500 py-2 px-3 border bg-white font-medium text-emerald-950"
+                >
+                  {availableClinics.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Echo Notice */}
+            {isEchoClinic && (
+              <div className="bg-amber-50 border border-amber-200/90 rounded-xl p-3 flex items-start gap-2.5">
+                <Sparkles className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-900">
+                  <span className="font-bold">ระบบตรวจพบคลินิก Echo:</span> เปิดช่องแยกกรอกจำนวนผู้ใหญ่และเด็กพิเศษอัตโนมัติ โดยยอดรวมผู้ป่วยจะคำนวณจาก (ผู้ใหญ่ + เด็ก)
+                </div>
+              </div>
+            )}
+
+            {/* Row 2: Patient Counts & Admit */}
+            <div className="bg-slate-50/80 p-4 rounded-xl border border-slate-200/80 space-y-3">
+              <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                <Activity className="w-4 h-4 text-emerald-600" />
+                ภาระงานผู้ป่วย (Patients & Admissions)
+              </h4>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    จำนวนผู้ป่วยทั้งหมด (คน) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={totalPt || ''}
+                    onChange={(e) => handleTotalPtChange(Number(e.target.value) || 0)}
+                    disabled={isEchoClinic}
+                    placeholder="0"
+                    className={`w-full text-base font-bold rounded-lg border py-2 px-3 shadow-2xs ${
+                      isEchoClinic 
+                        ? 'bg-amber-100/50 border-amber-300 text-amber-950' 
+                        : 'border-slate-300 bg-white text-emerald-900 focus:border-emerald-500 focus:ring-emerald-500'
+                    }`}
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    = ผู้ใหญ่ ({adultPt}) + เด็ก ({childPt})
+                  </span>
+                </div>
+
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isEchoClinic ? 'text-amber-800' : 'text-slate-700'}`}>
+                    ผู้ป่วยผู้ใหญ่ (คน)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={adultPt || ''}
+                    onChange={(e) => handleAdultPtChange(Number(e.target.value) || 0)}
+                    placeholder="0"
+                    className={`w-full text-sm font-semibold rounded-lg border py-2 px-3 shadow-2xs ${
+                      isEchoClinic
+                        ? 'border-amber-300 bg-white text-amber-900 focus:border-amber-500 focus:ring-amber-500'
+                        : 'border-slate-300 bg-white text-slate-800'
+                    }`}
+                  />
+                </div>
+
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isEchoClinic ? 'text-amber-800' : 'text-slate-700'}`}>
+                    ผู้ป่วยเด็ก
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={childPt || ''}
+                    onChange={(e) => handleChildPtChange(Number(e.target.value) || 0)}
+                    placeholder="0"
+                    className={`w-full text-sm font-semibold rounded-lg border py-2 px-3 shadow-2xs ${
+                      isEchoClinic
+                        ? 'border-amber-300 bg-white text-amber-900 focus:border-amber-500 focus:ring-amber-500'
+                        : 'border-slate-300 bg-white text-slate-800'
+                    }`}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-red-700 mb-1 flex items-center gap-1">
+                    <Bed className="w-3.5 h-3.5 text-red-500" />
+                    ยอดรับไว้รักษา (Admit)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={admit || ''}
+                    onChange={(e) => setAdmit(Math.max(0, Number(e.target.value) || 0))}
+                    placeholder="0"
+                    className="w-full text-base font-bold rounded-lg border border-red-200 bg-red-50/40 text-red-900 py-2 px-3 shadow-2xs focus:border-red-400 focus:ring-red-400"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Row 3: Staff Counts with 0.5 Support */}
+            <div className="border border-emerald-100 bg-emerald-50/30 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-emerald-600" />
+                  จำนวนบุคลากรปฏิบัติงานจริง (รองรับ 0.5 แรง ช่วยข้ามห้องตรวจ)
+                </h4>
+                <span className="text-[11px] font-semibold text-emerald-800">
+                  กำลังคนการพยาบาล (RN+PN+NA): {(rn + pn + na).toFixed(1)} แรง
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {/* HN */}
+                <div className="bg-white p-2.5 rounded-lg border border-gray-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-gray-700">HN (หัวหน้าเวร)</span>
+                    <span className="text-xs font-bold text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">
+                      {hn.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setHn, -0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={hn}
+                      onChange={(e) => setHn(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-gray-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setHn, 0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* RN */}
+                <div className="bg-white p-2.5 rounded-lg border border-blue-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-blue-700">RN (พยาบาลวิชาชีพ)</span>
+                    <span className="text-xs font-bold text-blue-800 bg-blue-50 px-1.5 py-0.5 rounded">
+                      {rn.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setRn, -0.5)}
+                      className="p-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={rn}
+                      onChange={(e) => setRn(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-blue-200 text-blue-900"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setRn, 0.5)}
+                      className="p-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* PN */}
+                <div className="bg-white p-2.5 rounded-lg border border-teal-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-teal-700">PN (ผู้ช่วยพยาบาล)</span>
+                    <span className="text-xs font-bold text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded">
+                      {pn.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setPn, -0.5)}
+                      className="p-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={pn}
+                      onChange={(e) => setPn(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-teal-200 text-teal-900"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setPn, 0.5)}
+                      className="p-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* NA */}
+                <div className="bg-white p-2.5 rounded-lg border border-emerald-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-emerald-700">NA (ผู้ช่วยคนไข้)</span>
+                    <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded">
+                      {na.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setNa, -0.5)}
+                      className="p-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={na}
+                      onChange={(e) => setNa(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-emerald-200 text-emerald-900"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setNa, 0.5)}
+                      className="p-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Clerk -> ผู้ปฏิบัติงานทั่วไป */}
+                <div className="bg-white p-2.5 rounded-lg border border-gray-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-gray-700">ผู้ปฏิบัติงานทั่วไป</span>
+                    <span className="text-xs font-bold text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">
+                      {clerk.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setClerk, -0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={clerk}
+                      onChange={(e) => setClerk(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-gray-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setClerk, 0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Service Worker -> พนักงานบริการ */}
+                <div className="bg-white p-2.5 rounded-lg border border-gray-200 shadow-2xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-bold text-gray-700">พนักงานบริการ</span>
+                    <span className="text-xs font-bold text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">
+                      {serviceWorker.toFixed(1)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setServiceWorker, -0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={serviceWorker}
+                      onChange={(e) => setServiceWorker(Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full text-center text-xs font-bold py-1 border rounded border-gray-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustStaff(setServiceWorker, 0.5)}
+                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 4: Redesigned Cohesive Section — Staff Leave, Training/Meeting, Cross-Coverage */}
+            <div className="rounded-2xl border border-teal-200/80 bg-gradient-to-br from-emerald-50/50 via-teal-50/40 to-cyan-50/30 p-4 space-y-3.5 shadow-2xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                    <ArrowRightLeft className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-teal-950 block">
+                      การเชื่อมโยงวันลา, ไปอบรม/ประชุม หรือช่วยงานห้องอื่นในวันนี้
+                    </span>
+                    <span className="text-[11px] text-teal-700/80">
+                      เลือกได้มากกว่า 1 หัวข้อและระบุรายชื่อได้หลายคนพร้อมกัน
+                    </span>
+                  </div>
+                </div>
+
+                {/* Toggle Pill Buttons */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setHasStaffLeave(!hasStaffLeave)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      hasStaffLeave
+                        ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-amber-300 hover:bg-amber-50/50'
+                    }`}
+                  >
+                    <CalendarOff className="w-3.5 h-3.5" />
+                    <span>มีเจ้าหน้าที่ลา</span>
+                    {selectedLeaveStaffIds.length > 0 && (
+                      <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasStaffLeave ? 'bg-white/25 text-white' : 'bg-amber-100 text-amber-800'}`}>
+                        {selectedLeaveStaffIds.length}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setHasTraining(!hasTraining)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      hasTraining
+                        ? 'bg-cyan-700 text-white border-cyan-700 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-cyan-300 hover:bg-cyan-50/50'
+                    }`}
+                  >
+                    <GraduationCap className="w-3.5 h-3.5" />
+                    <span>ไปอบรม/ประชุม</span>
+                    {selectedTrainingStaffIds.length > 0 && (
+                      <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasTraining ? 'bg-white/25 text-white' : 'bg-cyan-100 text-cyan-800'}`}>
+                        {selectedTrainingStaffIds.length}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setHasCrossCover(!hasCrossCover)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      hasCrossCover
+                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-emerald-300 hover:bg-emerald-50/50'
+                    }`}
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5" />
+                    <span>ไปช่วยห้องอื่น</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Block 1: Staff Leave (Multi-select + Type-to-search) */}
+              {hasStaffLeave && (
+                <div className="bg-white rounded-xl border border-amber-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
+                  <div className="flex items-center justify-between border-b border-amber-100 pb-2">
+                    <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                      <CalendarOff className="w-4 h-4 text-amber-600" />
+                      1. รายชื่อเจ้าหน้าที่ที่ลาวันนี้ (เลือกได้หลายคน)
+                    </span>
+                    <span className="text-[11px] font-semibold text-amber-700">
+                      เลือกแล้ว {selectedLeaveStaffIds.length} คน
+                    </span>
+                  </div>
+
+                  {/* Selected Chips */}
+                  {selectedLeaveStaffIds.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedLeaveStaffIds.map(id => {
+                        const s = staffList.find(st => st.staffId === id);
+                        if (!s) return null;
+                        return (
+                          <span
+                            key={id}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-[11px]"
+                          >
+                            <span>{s.name} ({formatPositionLabel(s.position)})</span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedLeaveStaffIds(prev => prev.filter(x => x !== id))}
+                              className="text-amber-600 hover:text-red-600 cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Search Input */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="พิมพ์ค้นหาชื่อ, ตำแหน่ง, หรือคลินิก..."
+                      value={leaveSearch}
+                      onChange={(e) => setLeaveSearch(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 bg-slate-50/60 focus:bg-white pl-8 pr-8 py-1.5 text-xs outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
+                    />
+                    {leaveSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setLeaveSearch('')}
+                        className="absolute right-2.5 top-2 text-gray-400 hover:text-gray-600 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Clean Scrollable Picker */}
+                  <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                    {activeStaffAll
+                      .filter(s => {
+                        const q = leaveSearch.toLowerCase().trim();
+                        if (!q) return true;
+                        return (
+                          s.name.toLowerCase().includes(q) ||
+                          s.position.toLowerCase().includes(q) ||
+                          formatPositionLabel(s.position).toLowerCase().includes(q) ||
+                          s.homeClinic.toLowerCase().includes(q)
+                        );
+                      })
+                      .map(s => {
+                        const checked = selectedLeaveStaffIds.includes(s.staffId);
+                        return (
+                          <div
+                            key={s.staffId}
+                            onClick={() => {
+                              setSelectedLeaveStaffIds(prev =>
+                                checked ? prev.filter(id => id !== s.staffId) : [...prev, s.staffId]
+                              );
+                            }}
+                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-all ${
+                              checked
+                                ? 'bg-amber-50/90 border-amber-300 text-amber-950 font-semibold'
+                                : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              {checked ? (
+                                <CheckSquare className="w-4 h-4 text-amber-600 shrink-0" />
+                              ) : (
+                                <Square className="w-4 h-4 text-gray-300 shrink-0" />
+                              )}
+                              <span>{s.name}</span>
+                              <span className="text-[10px] text-gray-400">({s.homeClinic})</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold">
+                              {formatPositionLabel(s.position)}
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">ประเภทการลา</label>
+                      <select
+                        value={leaveType}
+                        onChange={(e) => setLeaveType(e.target.value as LeaveType)}
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                      >
+                        {REGULAR_LEAVE_TYPES.map(lt => (
+                          <option key={lt} value={lt}>{lt}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">หมายเหตุการลา</label>
+                      <input
+                        type="text"
+                        value={leaveNote}
+                        onChange={(e) => setLeaveNote(e.target.value)}
+                        placeholder="เช่น มีไข้หวัด, กิจธุระส่วนตัว"
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Block 2: Training / Meeting (Multi-select + Type-to-search) */}
+              {hasTraining && (
+                <div className="bg-white rounded-xl border border-cyan-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
+                  <div className="flex items-center justify-between border-b border-cyan-100 pb-2">
+                    <span className="font-bold text-cyan-950 flex items-center gap-1.5">
+                      <GraduationCap className="w-4 h-4 text-cyan-600" />
+                      2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (เลือกได้หลายคน & พิมพ์ค้นหา)
+                    </span>
+                    <span className="text-[11px] font-semibold text-cyan-700">
+                      เลือกแล้ว {selectedTrainingStaffIds.length} คน
+                    </span>
+                  </div>
+
+                  {/* Selected Chips */}
+                  {selectedTrainingStaffIds.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedTrainingStaffIds.map(id => {
+                        const s = staffList.find(st => st.staffId === id);
+                        if (!s) return null;
+                        return (
+                          <span
+                            key={id}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-cyan-50 border border-cyan-200 text-cyan-900 font-semibold text-[11px]"
+                          >
+                            <span>{s.name} ({formatPositionLabel(s.position)})</span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTrainingStaffIds(prev => prev.filter(x => x !== id))}
+                              className="text-cyan-600 hover:text-red-600 cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Search Input */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="พิมพ์ค้นหาชื่อเจ้าหน้าที่เพื่อเลือกไปอบรม/ประชุม..."
+                      value={trainingSearch}
+                      onChange={(e) => setTrainingSearch(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 bg-slate-50/60 focus:bg-white pl-8 pr-8 py-1.5 text-xs outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+                    />
+                    {trainingSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setTrainingSearch('')}
+                        className="absolute right-2.5 top-2 text-gray-400 hover:text-gray-600 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Clean Scrollable Picker */}
+                  <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                    {activeStaffAll
+                      .filter(s => {
+                        const q = trainingSearch.toLowerCase().trim();
+                        if (!q) return true;
+                        return (
+                          s.name.toLowerCase().includes(q) ||
+                          s.position.toLowerCase().includes(q) ||
+                          formatPositionLabel(s.position).toLowerCase().includes(q) ||
+                          s.homeClinic.toLowerCase().includes(q)
+                        );
+                      })
+                      .map(s => {
+                        const checked = selectedTrainingStaffIds.includes(s.staffId);
+                        return (
+                          <div
+                            key={s.staffId}
+                            onClick={() => {
+                              setSelectedTrainingStaffIds(prev =>
+                                checked ? prev.filter(id => id !== s.staffId) : [...prev, s.staffId]
+                              );
+                            }}
+                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-all ${
+                              checked
+                                ? 'bg-cyan-50/90 border-cyan-300 text-cyan-950 font-semibold'
+                                : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              {checked ? (
+                                <CheckSquare className="w-4 h-4 text-cyan-600 shrink-0" />
+                              ) : (
+                                <Square className="w-4 h-4 text-gray-300 shrink-0" />
+                              )}
+                              <span>{s.name}</span>
+                              <span className="text-[10px] text-gray-400">({s.homeClinic})</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold">
+                              {formatPositionLabel(s.position)}
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">หัวข้อการอบรม / ประชุม</label>
+                      <input
+                        type="text"
+                        value={trainingTopic}
+                        onChange={(e) => setTrainingTopic(e.target.value)}
+                        placeholder="เช่น ประชุม HA, อบรม CPR ประจำปี"
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">สถานที่ / หมายเหตุ</label>
+                      <input
+                        type="text"
+                        value={trainingNote}
+                        onChange={(e) => setTrainingNote(e.target.value)}
+                        placeholder="เช่น ห้องประชุมชั้น 4, เต็มวัน"
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Block 3: Cross-Coverage input block */}
+              {hasCrossCover && (
+                <div className="bg-white rounded-xl border border-emerald-200/90 p-3.5 space-y-2.5 shadow-2xs text-xs">
+                  <div className="font-bold text-emerald-950 flex items-center gap-1.5 border-b border-emerald-100 pb-2">
+                    <ArrowRightLeft className="w-4 h-4 text-emerald-600" />
+                    <span>3. เจ้าหน้าที่ไปช่วยปฏิบัติงานห้องตรวจอื่น</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="block font-semibold text-gray-700">เจ้าหน้าที่ไปช่วยงาน</label>
+                      <div className="relative">
+                        <Search className="w-3 h-3 text-gray-400 absolute left-2.5 top-2" />
+                        <input
+                          type="text"
+                          value={crossStaffSearch}
+                          onChange={(e) => setCrossStaffSearch(e.target.value)}
+                          placeholder="พิมพ์กรองชื่อเจ้าหน้าที่..."
+                          className="w-full rounded-lg border border-gray-200 bg-slate-50/70 pl-7 pr-2 py-1 text-[11px]"
+                        />
+                      </div>
+                      <select
+                        value={crossStaffName}
+                        onChange={(e) => setCrossStaffName(e.target.value)}
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                      >
+                        <option value="">-- เลือกเจ้าหน้าที่ --</option>
+                        {(clinicStaff.length > 0 && !crossStaffSearch.trim() ? clinicStaff : activeStaffAll)
+                          .filter(s => {
+                            const q = crossStaffSearch.toLowerCase().trim();
+                            return !q || s.name.toLowerCase().includes(q) || s.homeClinic.toLowerCase().includes(q);
+                          })
+                          .map(s => (
+                            <option key={s.staffId} value={s.name}>
+                              {s.name} ({formatPositionLabel(s.position)} - {s.homeClinic})
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">ห้องตรวจที่ไปปฏิบัติงาน</label>
+                      <select
+                        value={crossTargetClinic}
+                        onChange={(e) => setCrossTargetClinic(e.target.value)}
+                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white mt-7"
+                      >
+                        <option value="">-- เลือกห้องตรวจเป้าหมาย --</option>
+                        {availableClinics.filter(c => c !== clinic).map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Row 5: Notes & Reporter */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  หมายเหตุ / กิจกรรมพิเศษ
+                </label>
+                <input
+                  type="text"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="เช่น ทำหัตถการพิเศษ, ผู้ป่วยส่งต่อฉุกเฉิน"
+                  className="w-full text-xs rounded-lg border-gray-300 shadow-2xs py-2 px-3 border"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  ผู้บันทึกรายงาน <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={reporter}
+                  onChange={(e) => setReporter(e.target.value)}
+                  placeholder="ระบุชื่อ-สกุล และตำแหน่ง"
+                  required
+                  className="w-full text-xs rounded-lg border-gray-300 shadow-2xs py-2 px-3 border font-medium"
+                />
+              </div>
+            </div>
+
+            {/* Submit Button */}
+            <div className="pt-2 flex justify-end">
+              <button
+                type="submit"
+                className="inline-flex items-center gap-2 px-6 py-2.5 bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg"
+              >
+                <FileCheck2 className="w-4 h-4" />
+                <span>บันทึกภาระงานห้องตรวจนี้</span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* Right Info & Today's Records: 5 cols */}
+        <div className="lg:col-span-5 space-y-4">
+          {/* Quick Summary Card */}
+          <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4">
+            <h3 className="text-xs font-bold text-gray-800 mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                รายการที่บันทึกแล้วในวันที่ {date}
+              </span>
+              <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded text-[11px]">
+                {todayWorkloads.length} คลินิก
+              </span>
+            </h3>
+
+            {todayWorkloads.length === 0 ? (
+              <div className="py-8 text-center text-gray-400 text-xs">
+                ยังไม่มีข้อมูลการบันทึกภาระงานในวันที่เลือก
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
+                {todayWorkloads.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-3 rounded-xl border border-gray-100 hover:border-emerald-200 bg-slate-50/70 hover:bg-emerald-50/20 transition-all text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-1.5">
+                      <div>
+                        <span className="font-bold text-gray-900 text-sm">{item.clinic}</span>
+                        <div className="text-[11px] text-gray-500">{item.shift}</div>
+                      </div>
+                      {isAdmin && (
+                        <div className="flex items-center gap-1">
+                          {onUpdateWorkload && (
+                            <button
+                              type="button"
+                              onClick={() => setEditingWorkload({ ...item, totalPt: getEffectiveTotalPt(item) })}
+                              className="text-gray-400 hover:text-blue-600 p-1 rounded transition-colors cursor-pointer"
+                              title="แก้ไขรายการนี้ (ผู้ดูแลระบบ Admin)"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onDeleteWorkload(item.id)}
+                            className="text-gray-400 hover:text-red-500 p-1 rounded transition-colors cursor-pointer"
+                            title="ลบรายการนี้ (เฉพาะผู้ดูแลระบบ Admin)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 text-center my-2">
+                      <div className="bg-white p-1.5 rounded border border-gray-200">
+                        <span className="block text-[10px] text-gray-500">ผู้ป่วย</span>
+                        <span className="font-bold text-emerald-800 text-sm">{getEffectiveTotalPt(item)}</span>
+                      </div>
+                      <div className="bg-white p-1.5 rounded border border-gray-200">
+                        <span className="block text-[10px] text-gray-500">Admit</span>
+                        <span className="font-bold text-red-600 text-sm">{item.admit}</span>
+                      </div>
+                      <div className="bg-white p-1.5 rounded border border-gray-200">
+                        <span className="block text-[10px] text-gray-500">RN+PN+NA</span>
+                        <span className="font-bold text-blue-800 text-sm">
+                          {(item.rn + item.pn + (item.na ?? item.pca ?? 0)).toFixed(1)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] text-gray-500 border-t border-gray-200/60 pt-1.5">
+                      <span>ผู้รายงาน: {item.reporter}</span>
+                      {item.note && <span className="text-gray-600 truncate max-w-[120px]" title={item.note}>{item.note}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {todayWorkloads.length > 0 && (
+              <div className="mt-2.5 pt-2 border-t border-gray-100">
+                {isAdmin ? (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg py-1 px-2 text-center flex items-center justify-center gap-1.5 text-[11px] text-emerald-800 font-medium">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>โหมด Admin: แสดงปุ่มถังขยะสำหรับลบรายการบันทึกแล้ว</span>
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-2 text-center flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <Lock className="w-3 h-3 text-slate-400" />
+                      รูปถังขยะอนุญาตให้เห็นเฉพาะ Admin
+                    </span>
+                    {onPromptAdminUnlock && (
+                      <button
+                        type="button"
+                        onClick={onPromptAdminUnlock}
+                        className="text-emerald-700 font-bold hover:underline cursor-pointer"
+                      >
+                        ปลดล็อกด้วยรหัสผ่าน
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Clinical Informatics Reference Card */}
+          <div className="bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-2xl p-4 shadow-sm text-xs space-y-2.5">
+            <div className="flex items-center gap-2 text-emerald-400 font-bold">
+              <HelpCircle className="w-4 h-4" />
+              <span>หลักการคำนวณกำลังคนทางการพยาบาล OPD</span>
+            </div>
+            <p className="text-slate-300 text-[11px] leading-relaxed">
+              • <strong>อัตรากำลังปฏิบัติงาน (Input):</strong> นับรวมเฉพาะผู้ปฏิบัติงานทางการพยาบาล ได้แก่ <strong>RN + PN + NA</strong> โดยไม่รวม HN ตามเกณฑ์จำแนกภาระงาน
+            </p>
+            <p className="text-slate-300 text-[11px] leading-relaxed">
+              • <strong>การเกลี่ยอัตรากำลัง 0.5:</strong> สำหรับเจ้าหน้าที่ที่หมุนเวียนปฏิบัติงานครึ่งวัน หรือช่วยงานข้ามแผนกในชั่วโมงเร่งด่วน
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Admin Edit Workload Modal */}
+      {editingWorkload && onUpdateWorkload && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <Pencil className="w-5 h-5 text-blue-600" />
+                <h3 className="text-base font-bold text-gray-900">
+                  แก้ไขข้อมูลภาระงานห้องตรวจ (เฉพาะ Admin)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingWorkload(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              {/* Row 1: Clinic, Shift, Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">วันที่</label>
+                  <input
+                    type="date"
+                    value={editingWorkload.date}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, date: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">ห้องตรวจ / แผนก</label>
+                  <input
+                    type="text"
+                    value={editingWorkload.clinic}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, clinic: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold bg-gray-50"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">กะเวลา</label>
+                  <select
+                    value={editingWorkload.shift}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, shift: e.target.value as WorkShift })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  >
+                    <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                    <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                    <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Row 2: Patient counts & Admit */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-xl border border-gray-200">
+                <div>
+                  <label className="block font-semibold text-blue-900 mb-1">ผู้ป่วยทั้งหมด</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editingWorkload.totalPt}
+                    onChange={(e) => {
+                      const nextTotal = Math.max(0, Number(e.target.value) || 0);
+                      setEditingWorkload({
+                        ...editingWorkload,
+                        totalPt: nextTotal,
+                        adultPt: Math.max(0, nextTotal - (editingWorkload.childPt || 0)),
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-blue-300 rounded-lg text-xs font-bold text-blue-900"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">ผู้ใหญ่</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editingWorkload.adultPt}
+                    onChange={(e) => {
+                      const nextAdult = Math.max(0, Number(e.target.value) || 0);
+                      setEditingWorkload({
+                        ...editingWorkload,
+                        adultPt: nextAdult,
+                        totalPt: nextAdult + (editingWorkload.childPt || 0),
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">เด็ก</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editingWorkload.childPt}
+                    onChange={(e) => {
+                      const nextChild = Math.max(0, Number(e.target.value) || 0);
+                      setEditingWorkload({
+                        ...editingWorkload,
+                        childPt: nextChild,
+                        totalPt: (editingWorkload.adultPt || 0) + nextChild,
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-red-600 mb-1">Admit (คน)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editingWorkload.admit}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, admit: Number(e.target.value) || 0 })}
+                    className="w-full px-2.5 py-1.5 border border-red-300 rounded-lg text-xs font-bold text-red-600"
+                  />
+                </div>
+              </div>
+
+              {/* Row 3: Staffing (HN, RN, PN, NA, Clerk, Service Worker) */}
+              <div>
+                <label className="block font-semibold text-gray-800 mb-1.5">
+                  กำลังคนปฏิบัติงาน (รองรับ 0.5 แรง)
+                </label>
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                  <div>
+                    <span className="block text-[11px] text-gray-500 mb-1">HN</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.hn}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, hn: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[11px] font-bold text-blue-800 mb-1">RN *</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.rn}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, rn: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-blue-300 rounded text-center text-xs font-bold text-blue-900"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[11px] font-bold text-teal-800 mb-1">PN *</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.pn}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, pn: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-teal-300 rounded text-center text-xs font-bold text-teal-900"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[11px] font-bold text-emerald-800 mb-1">NA *</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.na ?? editingWorkload.pca ?? 0}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, na: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-emerald-300 rounded text-center text-xs font-bold text-emerald-900"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[11px] text-gray-500 mb-1">ผู้ปฏิบัติงานทั่วไป</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.clerk}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, clerk: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[11px] text-gray-500 mb-1">พนักงานบริการ</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={editingWorkload.serviceWorker}
+                      onChange={(e) => setEditingWorkload({ ...editingWorkload, serviceWorker: Number(e.target.value) || 0 })}
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 4: Reporter & Note */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">
+                    ผู้บันทึกรายงาน <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={editingWorkload.reporter}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, reporter: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    placeholder="เช่น พว.สุดารัตน์ ศิริพรหม"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">หมายเหตุ</label>
+                  <input
+                    type="text"
+                    value={editingWorkload.note || ''}
+                    onChange={(e) => setEditingWorkload({ ...editingWorkload, note: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    placeholder="หมายเหตุเพิ่มเติม"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-2.5 border-t pt-3">
+              <button
+                type="button"
+                onClick={() => setEditingWorkload(null)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!editingWorkload.reporter.trim()) {
+                    alert('กรุณาระบุชื่อผู้บันทึกรายงาน');
+                    return;
+                  }
+                  onUpdateWorkload(editingWorkload);
+                  setEditingWorkload(null);
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>บันทึกการแก้ไข</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

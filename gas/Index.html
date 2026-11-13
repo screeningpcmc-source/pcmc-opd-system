@@ -1,0 +1,2119 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ระบบบริหารจัดการข้อมูล OPD รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน</title>
+  <!-- Bootstrap 5 CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Google Fonts: Sarabun & Prompt -->
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Font Awesome 6 Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Select2 CSS + Bootstrap 5 Theme -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" />
+  <!-- jQuery 3.7.1 -->
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <!-- Select2 JS -->
+  <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+  <!-- Chart.js 4.4 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- SweetAlert2 11 -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+  <style>
+    body {
+      font-family: 'Prompt', 'Sarabun', sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+    }
+    .navbar-pcmc {
+      background: linear-gradient(135deg, #065f46 0%, #0e7490 100%);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    .card-custom {
+      border: 1px solid #e2e8f0;
+      border-radius: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      background-color: #ffffff;
+      transition: all 0.2s;
+    }
+    .card-custom:hover {
+      box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+    }
+    .nav-pills .nav-link {
+      color: #475569;
+      font-weight: 600;
+      border-radius: 0.75rem;
+      padding: 0.65rem 1.1rem;
+      transition: all 0.2s;
+    }
+    .nav-pills .nav-link.active {
+      background-color: #065f46;
+      color: #ffffff;
+      box-shadow: 0 4px 10px rgba(6,95,70,0.25);
+    }
+    .metric-card {
+      border-radius: 0.85rem;
+      padding: 1rem;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      text-align: center;
+    }
+    .metric-value {
+      font-size: 1.45rem;
+      font-weight: 800;
+    }
+    .section4-card {
+      background: linear-gradient(135deg, #f0fdfa 0%, #ecfdf5 60%, #ecfeff 100%);
+      border: 1px solid #99f6e4;
+      border-radius: 1rem;
+    }
+    .clinic-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+    }
+    @media print {
+      .no-print { display: none !important; }
+      body { background: #ffffff !important; }
+      .print-only { display: block !important; }
+      .card-custom { border: none !important; box-shadow: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark navbar-pcmc py-2.5 no-print">
+    <div class="container-fluid px-4">
+      <a class="navbar-brand d-flex align-items-center" href="#">
+        <i class="fa-solid fa-hospital-user fs-2 me-2.5 text-warning"></i>
+        <div>
+          <div class="fw-bold fs-5">โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน</div>
+          <div class="small text-white-50">OPD Informatics & Nursing Productivity Management System</div>
+        </div>
+      </a>
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-light text-dark px-3 py-2 rounded-pill">
+          <i class="fa-solid fa-user-circle text-primary me-1"></i>
+          <span id="userEmailSpan">กำลังโหลดข้อมูล...</span>
+        </span>
+        <button id="adminBtn" class="btn btn-sm btn-outline-light rounded-pill px-3" onclick="toggleAdminModal()">
+          <i class="fa-solid fa-shield-halved me-1"></i>
+          <span id="adminStatusText">ปลดล็อก Admin</span>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Container -->
+  <div class="container-fluid px-4 py-4">
+    <!-- 5 Menus Navigation Pills -->
+    <ul class="nav nav-pills nav-fill bg-white p-1.5 rounded-3 shadow-sm mb-4 no-print" id="mainTab" role="tablist">
+      <li class="nav-item">
+        <button class="nav-link active" id="tab1-tab" data-bs-toggle="pill" data-bs-target="#tab1" type="button">
+          <i class="fa-solid fa-notes-medical me-1.5 text-success"></i>1. บันทึกภาระงานประจำวัน
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" id="tab2-tab" data-bs-toggle="pill" data-bs-target="#tab2" type="button">
+          <i class="fa-solid fa-calendar-check me-1.5 text-info"></i>2. บันทึกเวรนอกเวลา & วันลา
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" id="tab3-tab" data-bs-toggle="pill" data-bs-target="#tab3" type="button">
+          <i class="fa-solid fa-file-invoice me-1.5 text-primary"></i>3. รายงานผู้ป่วยประจำวัน (Census)
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" id="tab4-tab" data-bs-toggle="pill" data-bs-target="#tab4" type="button">
+          <i class="fa-solid fa-chart-line me-1.5 text-warning"></i>4. สรุป Productivity & FTC
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" id="tab5-tab" data-bs-toggle="pill" data-bs-target="#tab5" type="button">
+          <i class="fa-solid fa-users-gear me-1.5 text-danger"></i>5. จัดการบุคลากร & ตั้งค่า (Admin)
+        </button>
+      </li>
+    </ul>
+
+    <!-- Tabs Content -->
+    <div class="tab-content" id="mainTabContent">
+
+      <!-- ================= MENU 1: DAILY CLINIC ENTRY ================= -->
+      <div class="tab-pane fade show active" id="tab1" role="tabpanel">
+        <div class="row g-4">
+          <!-- Form: 8 Cols -->
+          <div class="col-lg-8">
+            <div class="card card-custom p-4">
+              <h5 class="fw-bold mb-3 text-success d-flex align-items-center">
+                <i class="fa-solid fa-pen-to-square me-2"></i>บันทึกภาระงานและกำลังคนห้องตรวจ
+              </h5>
+              <form id="dailyWorkloadForm" onsubmit="handleSaveWorkload(event)">
+                <div class="row g-3">
+                  <div class="col-md-4">
+                    <label class="form-label fw-bold small">วันที่ <span class="text-danger">*</span></label>
+                    <input type="date" class="form-control form-control-sm" id="entryDate" required onchange="renderTodayWorkloads()">
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label fw-bold small">กะเวลา <span class="text-danger">*</span></label>
+                    <select class="form-select form-select-sm" id="entryShift" required onchange="onShiftChange()">
+                      <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                      <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                      <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label fw-bold small">ห้องตรวจ / แผนก <span class="text-danger">*</span></label>
+                    <select class="form-select form-select-sm" id="entryClinic" required onchange="onClinicChange()"></select>
+                  </div>
+
+                  <!-- Patients Counts -->
+                  <div class="col-md-3">
+                    <label class="form-label fw-bold small text-primary">จำนวนผู้ป่วยทั้งหมด</label>
+                    <input type="number" class="form-control fw-bold text-primary" id="totalPt" value="0" min="0" oninput="syncEntryPatientTotals('total')">
+                  </div>
+                  <div class="col-md-3" id="adultPtDiv">
+                    <label class="form-label fw-bold small" id="adultPtLabel">ผู้ป่วยผู้ใหญ่</label>
+                    <input type="number" class="form-control" id="adultPt" value="0" min="0" oninput="syncEntryPatientTotals('adult')">
+                  </div>
+                  <div class="col-md-3" id="childPtDiv">
+                    <label class="form-label fw-bold small" id="childPtLabel">ผู้ป่วยเด็ก</label>
+                    <input type="number" class="form-control" id="childPt" value="0" min="0" oninput="syncEntryPatientTotals('child')">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label fw-bold small text-danger">Admit (คน)</label>
+                    <input type="number" class="form-control fw-bold text-danger" id="admitPt" value="0" min="0">
+                  </div>
+
+                  <!-- Nursing & Staff Inputs with 0.5 Step Buttons -->
+                  <div class="col-12 mt-2">
+                    <div class="small fw-bold text-muted border-bottom pb-1 mb-2">
+                      <i class="fa-solid fa-user-nurse me-1 text-primary"></i>กำลังคนปฏิบัติงานจริง (รองรับ 0.5 แรงข้ามห้องตรวจ)
+                    </div>
+                    <div class="row g-2 text-center">
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-muted">HN</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffHN', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center" id="staffHN" value="1">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffHN', 0.5)">+</button>
+                        </div>
+                      </div>
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-primary">RN *</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-primary" type="button" onclick="adjustStep('staffRN', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center fw-bold border-primary" id="staffRN" value="2">
+                          <button class="btn btn-outline-primary" type="button" onclick="adjustStep('staffRN', 0.5)">+</button>
+                        </div>
+                      </div>
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-info">PN *</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-info" type="button" onclick="adjustStep('staffPN', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center fw-bold" id="staffPN" value="1">
+                          <button class="btn btn-outline-info" type="button" onclick="adjustStep('staffPN', 0.5)">+</button>
+                        </div>
+                      </div>
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-success">NA *</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-success" type="button" onclick="adjustStep('staffNA', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center fw-bold" id="staffNA" value="1">
+                          <button class="btn btn-outline-success" type="button" onclick="adjustStep('staffNA', 0.5)">+</button>
+                        </div>
+                      </div>
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-muted">ผู้ปฏิบัติงานทั่วไป</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffClerk', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center" id="staffClerk" value="1">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffClerk', 0.5)">+</button>
+                        </div>
+                      </div>
+                      <div class="col-4 col-md-2">
+                        <label class="small fw-bold text-muted">พนักงานบริการ</label>
+                        <div class="input-group input-group-sm">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffServiceWorker', -0.5)">-</button>
+                          <input type="number" step="0.5" class="form-control text-center" id="staffServiceWorker" value="1">
+                          <button class="btn btn-outline-secondary" type="button" onclick="adjustStep('staffServiceWorker', 0.5)">+</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Reporter (Empty by default & Required) + Note -->
+                  <div class="col-md-6">
+                    <label class="form-label fw-bold small">ผู้บันทึกรายงาน <span class="text-danger">* (จำเป็นต้องระบุ)</span></label>
+                    <input type="text" class="form-control form-control-sm" id="entryReporter" placeholder="เช่น พว.สุดารัตน์ ศิริพรหม" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label small">หมายเหตุ / กิจกรรมพิเศษ</label>
+                    <input type="text" class="form-control form-control-sm" id="entryNote" placeholder="เช่น ผู้ป่วยฉุกเฉิน, หัตถการพิเศษ">
+                  </div>
+
+                  <!-- Section 4 Redesigned: Leave, Training/Meeting, Transfer Linking -->
+                  <div class="col-12 mt-3">
+                    <div class="section4-card p-3">
+                      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                        <div class="fw-bold small text-success">
+                          <i class="fa-solid fa-arrows-split-up-and-left me-1.5"></i>
+                          ส่วนที่ 4: การเชื่อมโยงวันลา, ไปอบรม/ประชุม หรือช่วยงานห้องอื่นในวันนี้
+                        </div>
+                        <div class="d-flex flex-wrap gap-2">
+                          <div class="form-check form-check-inline bg-white px-2.5 py-1 rounded border m-0">
+                            <input class="form-check-input ms-0 me-1.5" type="checkbox" id="toggleLeaveLink" onchange="toggleSection4Boxes()">
+                            <label class="form-check-label small fw-semibold text-warning-emphasis" for="toggleLeaveLink">มีเจ้าหน้าที่ลา</label>
+                          </div>
+                          <div class="form-check form-check-inline bg-white px-2.5 py-1 rounded border m-0">
+                            <input class="form-check-input ms-0 me-1.5" type="checkbox" id="toggleTrainingLink" onchange="toggleSection4Boxes()">
+                            <label class="form-check-label small fw-semibold text-info-emphasis" for="toggleTrainingLink">ไปอบรม/ประชุม</label>
+                          </div>
+                          <div class="form-check form-check-inline bg-white px-2.5 py-1 rounded border m-0">
+                            <input class="form-check-input ms-0 me-1.5" type="checkbox" id="toggleTransferLink" onchange="toggleSection4Boxes()">
+                            <label class="form-check-label small fw-semibold text-primary-emphasis" for="toggleTransferLink">ไปช่วยห้องอื่น</label>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Block A: Leave -->
+                      <div id="leaveLinkBox" style="display:none;" class="bg-white p-3 rounded-3 border border-warning-subtle mb-2">
+                        <div class="small fw-bold text-warning-emphasis mb-2"><i class="fa-solid fa-calendar-minus me-1"></i>เจ้าหน้าที่ลาในวันนี้ (เลือกได้หลายคน / พิมพ์ค้นหา)</div>
+                        <div class="row g-2">
+                          <div class="col-md-5">
+                            <label class="small fw-bold">เลือกเจ้าหน้าที่ที่ลา</label>
+                            <select class="form-select form-select-sm" id="leaveStaffSelect" multiple="multiple" style="width: 100%"></select>
+                          </div>
+                          <div class="col-md-3">
+                            <label class="small fw-bold">ประเภทการลา</label>
+                            <select class="form-select form-select-sm" id="leaveTypeLink">
+                              <option value="ลาป่วย">ลาป่วย</option>
+                              <option value="ลากิจ">ลากิจ</option>
+                              <option value="ลาพักผ่อน">ลาพักผ่อน</option>
+                              <option value="ลาคลอด">ลาคลอด</option>
+                              <option value="ลาบวช">ลาบวช</option>
+                              <option value="ลาศึกษาต่อ">ลาศึกษาต่อ</option>
+                            </select>
+                          </div>
+                          <div class="col-md-2">
+                            <label class="small fw-bold">จำนวนวัน</label>
+                            <input type="number" step="0.5" class="form-control form-control-sm" id="leaveDaysLink" value="1" min="0.5">
+                          </div>
+                          <div class="col-md-2">
+                            <label class="small fw-bold">หมายเหตุ</label>
+                            <input type="text" class="form-control form-control-sm" id="leaveNoteLink" placeholder="เหตุผลการลา">
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Block B: Training / Meeting -->
+                      <div id="trainingLinkBox" style="display:none;" class="bg-white p-3 rounded-3 border border-info-subtle mb-2">
+                        <div class="small fw-bold text-info-emphasis mb-2"><i class="fa-solid fa-graduation-cap me-1"></i>เจ้าหน้าที่ไปอบรม / ประชุมในวันนี้ (เลือกได้หลายคน / พิมพ์ค้นหา)</div>
+                        <div class="row g-2">
+                          <div class="col-md-6">
+                            <label class="small fw-bold">เลือกเจ้าหน้าที่ที่ไปอบรม/ประชุม</label>
+                            <select class="form-select form-select-sm" id="trainingStaffSelect" multiple="multiple" style="width: 100%"></select>
+                          </div>
+                          <div class="col-md-2">
+                            <label class="small fw-bold">จำนวนวัน</label>
+                            <input type="number" step="0.5" class="form-control form-control-sm" id="trainingDaysLink" value="1" min="0.5">
+                          </div>
+                          <div class="col-md-4">
+                            <label class="small fw-bold">หัวข้อการอบรม / ประชุม</label>
+                            <input type="text" class="form-control form-control-sm" id="trainingNoteLink" placeholder="เช่น ประชุมวิชาการ OPD ประจำปี">
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Block C: Transfer -->
+                      <div id="transferLinkBox" style="display:none;" class="bg-white p-3 rounded-3 border border-primary-subtle">
+                        <div class="small fw-bold text-primary-emphasis mb-2"><i class="fa-solid fa-people-arrows me-1"></i>บันทึกช่วยงานข้ามห้องตรวจ (0.5 แรง / ย้ายชั่วคราว)</div>
+                        <div class="row g-2">
+                          <div class="col-md-6">
+                            <label class="small fw-bold">เจ้าหน้าที่ที่ไปช่วยงาน (พิมพ์ค้นหาชื่อได้)</label>
+                            <select class="form-select form-select-sm" id="transferStaffSelect" style="width: 100%"></select>
+                          </div>
+                          <div class="col-md-6">
+                            <label class="small fw-bold">ห้องตรวจเป้าหมายที่ไปช่วย</label>
+                            <select class="form-select form-select-sm" id="transferTargetClinic"></select>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Submit Button -->
+                  <div class="col-12 text-end mt-3">
+                    <button type="submit" class="btn btn-success px-4 rounded-pill shadow-sm">
+                      <i class="fa-solid fa-floppy-disk me-1.5"></i>บันทึกข้อมูลประจำวัน
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Right: Recorded Workloads List: 4 Cols -->
+          <div class="col-lg-4">
+            <div class="card card-custom p-3 h-100">
+              <div class="d-flex align-items-center justify-content-between border-bottom pb-2 mb-3">
+                <h6 class="fw-bold mb-0 text-dark">
+                  <i class="fa-solid fa-circle-check text-success me-1.5"></i>รายการที่บันทึกแล้วในวันนี้
+                </h6>
+                <span class="badge bg-success" id="todayCountBadge">0 คลินิก</span>
+              </div>
+              <div id="todayWorkloadsList" class="overflow-auto" style="max-height: 520px;">
+                <div class="text-center text-muted small py-5">ยังไม่มีรายการที่บันทึกในวันนี้</div>
+              </div>
+              <div id="adminNoticeDiv" class="mt-2 pt-2 border-top text-center small text-muted">
+                <i class="fa-solid fa-lock me-1"></i>รูปถังขยะและปุ่มแก้ไขอนุญาตเฉพาะ Admin
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= MENU 2: LEAVE & OT TRACKER ================= -->
+      <div class="tab-pane fade" id="tab2" role="tabpanel">
+        <div class="card card-custom p-4">
+          <!-- Sub-tabs -->
+          <ul class="nav nav-tabs mb-4" id="leaveOtSubTabs" role="tablist">
+            <li class="nav-item">
+              <button class="nav-link active fw-bold" id="subtab-leave-tab" data-bs-toggle="tab" data-bs-target="#subtab-leave">
+                <i class="fa-solid fa-calendar-xmark me-1 text-danger"></i>1) บันทึกและค้นหาประวัติการลา
+              </button>
+            </li>
+            <li class="nav-item">
+              <button class="nav-link fw-bold" id="subtab-ot-tab" data-bs-toggle="tab" data-bs-target="#subtab-ot">
+                <i class="fa-solid fa-users me-1 text-primary"></i>2) บันทึกเวรนอกเวลา OT / ปฏิบัติแทน
+              </button>
+            </li>
+            <li class="nav-item">
+              <button class="nav-link fw-bold" id="subtab-summary-tab" data-bs-toggle="tab" data-bs-target="#subtab-summary">
+                <i class="fa-solid fa-table-list me-1 text-success"></i>3) สรุปวันทำงาน & 12 เดือนปีงบประมาณ
+              </button>
+            </li>
+          </ul>
+
+          <div class="tab-content">
+            <!-- Sub-tab 1: Leave Entry + Dual Filter Table -->
+            <div class="tab-pane fade show active" id="subtab-leave">
+              <div class="row g-4">
+                <div class="col-lg-5">
+                  <div class="card p-3 bg-light border-0 rounded-3">
+                    <h6 class="fw-bold mb-3 text-dark"><i class="fa-solid fa-plus-circle me-1 text-warning"></i>แบบฟอร์มบันทึกวันลาของบุคลากร</h6>
+                    <form id="leaveEntryForm" onsubmit="handleSaveLeave(event)">
+                      <div class="mb-2">
+                        <label class="small fw-bold">เลือกเจ้าหน้าที่ (พิมพ์ค้นหาด้วยชื่อ) <span class="text-danger">*</span></label>
+                        <select class="form-select form-select-sm" id="leaveStaffSelectSingle" style="width: 100%" required></select>
+                      </div>
+                      <div class="row g-2 mb-2">
+                        <div class="col-6">
+                          <label class="small fw-bold">ตั้งแต่วันที่</label>
+                          <input type="date" class="form-control form-control-sm" id="leaveStartDate" required onchange="calcLeaveDays()">
+                        </div>
+                        <div class="col-6">
+                          <label class="small fw-bold">ถึงวันที่</label>
+                          <input type="date" class="form-control form-control-sm" id="leaveEndDate" required onchange="calcLeaveDays()">
+                        </div>
+                      </div>
+                      <div class="row g-2 mb-2">
+                        <div class="col-6">
+                          <label class="small fw-bold">ประเภทการลา</label>
+                          <select class="form-select form-select-sm" id="leaveTypeSelect">
+                            <option value="ลาป่วย">ลาป่วย</option>
+                            <option value="ลากิจ">ลากิจ</option>
+                            <option value="ลาพักผ่อน">ลาพักผ่อน</option>
+                            <option value="ลาคลอด">ลาคลอด</option>
+                            <option value="ลาบวช">ลาบวช</option>
+                            <option value="ลาศึกษาต่อ">ลาศึกษาต่อ</option>
+                            <option value="ไปอบรม/ประชุม">ไปอบรม/ประชุม</option>
+                          </select>
+                        </div>
+                        <div class="col-6">
+                          <label class="small fw-bold">จำนวนวันลา (วัน)</label>
+                          <input type="number" step="0.5" class="form-control form-control-sm fw-bold" id="leaveDaysCount" value="1" min="0.5">
+                        </div>
+                      </div>
+                      <div class="mb-2">
+                        <label class="small fw-bold">หมายเหตุ / เหตุผลการลา / หัวข้ออบรม</label>
+                        <input type="text" class="form-control form-control-sm" id="leaveNoteInput" placeholder="เช่น ใบรับรองแพทย์, ประชุมวิชาการ">
+                      </div>
+                      <button type="submit" class="btn btn-warning w-100 text-dark fw-bold rounded-pill mt-2">
+                        <i class="fa-solid fa-check me-1"></i>บันทึกข้อมูลการลา
+                      </button>
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Leave Table with Dual Filter -->
+                <div class="col-lg-7">
+                  <div class="d-flex align-items-center justify-content-between mb-2">
+                    <h6 class="fw-bold mb-0 text-dark"><i class="fa-solid fa-list-check me-1"></i>ประวัติการลาและไปอบรม/ประชุม</h6>
+                    <span class="badge bg-warning text-dark" id="leaveFilteredSumBadge">รวมวันลาที่เลือก: 0 วัน</span>
+                  </div>
+                  <!-- Dual Filter Bar -->
+                  <div class="row g-2 mb-3 bg-light p-2 rounded-3 border">
+                    <div class="col-md-6">
+                      <div class="input-group input-group-sm">
+                        <span class="input-group-text"><i class="fa-solid fa-search"></i></span>
+                        <input type="text" class="form-control" id="searchLeaveStaffInput" placeholder="ค้นหาชื่อเจ้าหน้าที่..." oninput="renderLeaveTable()">
+                      </div>
+                    </div>
+                    <div class="col-md-6">
+                      <select class="form-select form-select-sm" id="filterLeaveTypeSelect" onchange="renderLeaveTable()">
+                        <option value="ALL">-- ทุกประเภทการลา / อบรม --</option>
+                        <option value="ลาป่วย">ลาป่วย</option>
+                        <option value="ลากิจ">ลากิจ</option>
+                        <option value="ลาพักผ่อน">ลาพักผ่อน</option>
+                        <option value="ลาคลอด">ลาคลอด</option>
+                        <option value="ลาบวช">ลาบวช</option>
+                        <option value="ลาศึกษาต่อ">ลาศึกษาต่อ</option>
+                        <option value="ไปอบรม/ประชุม">ไปอบรม/ประชุม</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle small" id="leaveHistoryTable">
+                      <thead class="table-light sticky-top">
+                        <tr>
+                          <th>ชื่อ-สกุล</th>
+                          <th>ตำแหน่ง</th>
+                          <th>คลินิก</th>
+                          <th>ประเภท</th>
+                          <th class="text-center">ระยะเวลา</th>
+                          <th class="text-center">วัน</th>
+                          <th class="text-center admin-col">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody id="leaveTableBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sub-tab 2: Batch OT + In-Time Substitute + External Staff -->
+            <div class="tab-pane fade" id="subtab-ot">
+              <div class="row g-4">
+                <div class="col-lg-5">
+                  <div class="card p-3 bg-light border-0 rounded-3">
+                    <h6 class="fw-bold mb-3 text-primary"><i class="fa-solid fa-user-clock me-1"></i>บันทึกเวรนอกเวลา & ปฏิบัติหน้าที่แทน (แบบกลุ่ม)</h6>
+                    <form id="otBatchForm" onsubmit="handleSaveBatchOT(event)">
+                      <div class="row g-2 mb-2">
+                        <div class="col-6">
+                          <label class="small fw-bold">วันที่ปฏิบัติงานเวร</label>
+                          <input type="date" class="form-control form-control-sm" id="otDate" required>
+                        </div>
+                        <div class="col-6">
+                          <label class="small fw-bold">กะเวลาเวร / ประเภท OT</label>
+                          <select class="form-select form-select-sm" id="otShift" required onchange="onOtShiftChange()">
+                            <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                            <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+                            <option value="OT ในเวลาราชการ 08:00-16:00">OT ในเวลาราชการ 08:00-16:00 (ปฏิบัติแทน)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="mb-2">
+                        <label class="small fw-bold">ห้องตรวจที่ไปปฏิบัติงานจริง (Work Clinic)</label>
+                        <select class="form-select form-select-sm" id="otWorkClinic" required></select>
+                      </div>
+                      <div class="mb-3">
+                        <label class="small fw-bold">เลือกเจ้าหน้าที่ OPD ที่ขึ้นเวร (เลือกหลายคนได้)</label>
+                        <select class="form-select form-select-sm" id="otStaffMultiSelect" multiple="multiple" style="width: 100%"></select>
+                      </div>
+
+                      <!-- Ad-hoc External Substitute Staff Box -->
+                      <div class="card p-2.5 bg-white border border-primary-subtle rounded-3 mb-3">
+                        <div class="small fw-bold text-primary mb-1.5">
+                          <i class="fa-solid fa-user-plus me-1"></i>เจ้าหน้าที่เฉพาะกิจ (กรณีที่ไม่ใช่คนของ OPD)
+                        </div>
+                        <div class="mb-1.5">
+                          <input type="text" class="form-control form-control-sm" id="extOtName" placeholder="ชื่อ-สกุล * (เช่น พว.สุภาภรณ์ ดีมาก)">
+                        </div>
+                        <div class="row g-1.5 mb-2">
+                          <div class="col-5">
+                            <select class="form-select form-select-sm" id="extOtPosition">
+                              <option value="RN">RN</option>
+                              <option value="PN">PN</option>
+                              <option value="NA">NA</option>
+                              <option value="HN">HN</option>
+                              <option value="Clerk">ผู้ปฏิบัติงานทั่วไป</option>
+                              <option value="Service Worker">พนักงานบริการ</option>
+                            </select>
+                          </div>
+                          <div class="col-7">
+                            <input type="text" class="form-control form-control-sm" id="extOtAffiliation" placeholder="สังกัด * (เช่น ER, ICU)">
+                          </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addExternalOtDraft()">
+                          <i class="fa-solid fa-plus me-1"></i>เพิ่มชื่อเจ้าหน้าที่เฉพาะกิจเข้าชุดบันทึก
+                        </button>
+                        <div id="externalOtDraftList" class="mt-2 small"></div>
+                      </div>
+
+                      <button type="submit" class="btn btn-primary w-100 rounded-pill">
+                        <i class="fa-solid fa-user-check me-1"></i>บันทึกเวรปฏิบัติงานทั้งหมด
+                      </button>
+                    </form>
+                  </div>
+                </div>
+                <div class="col-lg-7">
+                  <h6 class="fw-bold mb-3 text-dark"><i class="fa-solid fa-clock-rotate-left me-1"></i>รายการเวรนอกเวลา & ปฏิบัติหน้าที่แทนล่าสุด</h6>
+                  <div class="table-responsive" style="max-height: 480px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle small">
+                      <thead class="table-light sticky-top">
+                        <tr>
+                          <th>วันที่</th>
+                          <th>กะเวลา</th>
+                          <th>ชื่อ-สกุล</th>
+                          <th>ตำแหน่ง</th>
+                          <th>สังกัดต้นทาง</th>
+                          <th>คลินิกที่ขึ้นเวร</th>
+                          <th class="text-center admin-col">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody id="otTableBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sub-tab 3: Summary of Working Days & 12 Months -->
+            <div class="tab-pane fade" id="subtab-summary">
+              <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                <h6 class="fw-bold mb-0 text-success"><i class="fa-solid fa-calculator me-1"></i>สรุปวันทำงานในเวลาและนอกเวลา (ปีงบประมาณ ต.ค. - ก.ย.)</h6>
+                <div class="d-flex gap-2">
+                  <input type="text" class="form-control form-control-sm" id="searchSummaryStaff" placeholder="ค้นหารายบุคคล/ตำแหน่ง/สังกัด..." oninput="renderFiscalSummaryTable()">
+                </div>
+              </div>
+              <div class="table-responsive" style="max-height: 460px; overflow-y: auto;">
+                <table class="table table-sm table-bordered table-hover align-middle text-center small">
+                  <thead class="table-success sticky-top">
+                    <tr>
+                      <th class="text-start">ชื่อ-สกุล</th>
+                      <th>ตำแหน่ง</th>
+                      <th>หน่วยงานสังกัด</th>
+                      <th>ในเวลา (วัน)</th>
+                      <th>นอกเวลา OT (เวร)</th>
+                      <th>วันลา (วัน)</th>
+                      <th class="table-warning">รวมวันทำงานสุทธิ</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fiscalSummaryTbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= MENU 3: DAILY OPD CENSUS ================= -->
+      <div class="tab-pane fade" id="tab3" role="tabpanel">
+        <div class="card card-custom p-4">
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 border-bottom pb-3 mb-3">
+            <div>
+              <h5 class="fw-bold mb-1 text-primary"><i class="fa-solid fa-file-medical me-2"></i>รายงานสรุปยอดผู้รับบริการประจำวัน (Daily OPD Census)</h5>
+              <div class="small text-muted">สรุปยอดผู้ป่วยและอัตรากำลังพยาบาลปฏิบัติงานจริงทุกคลินิก</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 no-print">
+              <input type="date" class="form-control form-control-sm" id="censusDate" onchange="renderCensus()">
+              <select class="form-select form-select-sm" id="censusShift" onchange="renderCensus()">
+                <option value="ALL">-- ทุกกะเวลา --</option>
+                <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+              </select>
+              <button class="btn btn-sm btn-outline-secondary px-3" onclick="window.print()">
+                <i class="fa-solid fa-print me-1"></i>พิมพ์รายงาน / PDF
+              </button>
+            </div>
+          </div>
+
+          <!-- Census Table -->
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered table-hover align-middle text-center small">
+              <thead class="table-primary">
+                <tr>
+                  <th>ลำดับ</th>
+                  <th class="text-start">ห้องตรวจ / แผนก</th>
+                  <th>กะเวลา</th>
+                  <th class="table-info">ผู้ป่วยรวม</th>
+                  <th>ผู้ใหญ่</th>
+                  <th>เด็ก</th>
+                  <th class="table-danger">Admit</th>
+                  <th>HN</th>
+                  <th class="table-primary fw-bold">RN</th>
+                  <th class="table-info">PN</th>
+                  <th class="table-success">NA</th>
+                  <th>ผู้ปฏิบัติงานทั่วไป</th>
+                  <th>พนักงานบริการ</th>
+                  <th class="text-start">ผู้บันทึกรายงาน</th>
+                  <th class="text-start">หมายเหตุ</th>
+                  <th class="no-print admin-col">จัดการ</th>
+                </tr>
+              </thead>
+              <tbody id="censusTableBody"></tbody>
+              <tfoot class="table-dark fw-bold" id="censusTableFoot"></tfoot>
+            </table>
+          </div>
+
+          <!-- Printable Signatures -->
+          <div class="row text-center mt-5 print-only" style="display:none;">
+            <div class="col-6">
+              <div class="border-bottom border-dark w-50 mx-auto mb-2" style="height: 40px;"></div>
+              <div class="small fw-bold">ลงชื่อ .....................................................</div>
+              <div class="small text-muted">(ผู้รวบรวมรายงาน / พยาบาลเวรตรวจการ)</div>
+            </div>
+            <div class="col-6">
+              <div class="border-bottom border-dark w-50 mx-auto mb-2" style="height: 40px;"></div>
+              <div class="small fw-bold">ลงชื่อ .....................................................</div>
+              <div class="small text-muted">(หัวหน้ากลุ่มงานการพยาบาลผู้ป่วยนอก)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= MENU 4: PRODUCTIVITY & FTC ================= -->
+      <div class="tab-pane fade" id="tab4" role="tabpanel">
+        <div class="card card-custom p-4">
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 border-bottom pb-3 mb-4">
+            <div>
+              <h5 class="fw-bold mb-1 text-dark"><i class="fa-solid fa-chart-pie me-2 text-warning"></i>สรุปคำนวณ Productivity & Skill Mix ประจำเดือน</h5>
+              <div class="small text-muted">สูตรคำนวณมาตรฐาน 6 ขั้นตอนตามหลัก Healthcare Informatics</div>
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+              <input type="month" class="form-control form-control-sm" id="prodMonth" onchange="calculateMonthlyProductivity()">
+              <select class="form-select form-select-sm" id="prodShift" onchange="calculateMonthlyProductivity()">
+                <option value="ALL">-- ทุกกะเวลา --</option>
+                <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+              </select>
+              <select class="form-select form-select-sm" id="prodClinic" onchange="calculateMonthlyProductivity()">
+                <option value="ALL">รวมทุกคลินิก OPD</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Exclude Lasik Option -->
+          <div class="alert alert-warning py-2 mb-4 d-flex align-items-center justify-content-between">
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" id="excludeLasikCheck" onchange="calculateMonthlyProductivity()">
+              <label class="form-check-label small fw-bold" for="excludeLasikCheck">
+                ไม่รวม "ศูนย์เลสิก" ในการคำนวณภาพรวม OPD (แยกหน่วยบริการพิเศษ)
+              </label>
+            </div>
+            <span class="small text-muted" id="lasikStatusText">(รวมศูนย์เลสิกด้วย)</span>
+          </div>
+
+          <!-- 6 Formula Metric Cards -->
+          <div class="row g-3 mb-4">
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-primary">
+                <div class="small text-muted">1) ผู้ป่วยเฉลี่ย / วัน</div>
+                <div class="metric-value text-primary" id="m_avgPt">0.0</div>
+                <div class="small text-muted mt-1">(ผู้ป่วยรวม <span id="m_totalPt">0</span> คน / <span id="m_workDays">0</span> วัน)</div>
+              </div>
+            </div>
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-info">
+                <div class="small text-muted">2) อัตรากำลังต้องการ (FTC)</div>
+                <div class="metric-value text-info" id="m_ftc">0.00</div>
+                <div class="small text-muted mt-1">(สูตร: (ผู้ป่วยเฉลี่ย * NHPPD) / Std_Hr)</div>
+              </div>
+            </div>
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-secondary">
+                <div class="small text-muted">3) Output (ต้องการ/วัน)</div>
+                <div class="metric-value text-dark" id="m_output">0.00</div>
+                <div class="small text-muted mt-1">(สูตร: (FTC * Annual_Hr) / (Work_Days * 8))</div>
+              </div>
+            </div>
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-success">
+                <div class="small text-muted">4) Input (จัดเฉลี่ย/วัน)</div>
+                <div class="metric-value text-success" id="m_input">0.00</div>
+                <div class="small text-muted mt-1">(RN+PN+NA เฉลี่ย/วัน ไม่รวม HN)</div>
+              </div>
+            </div>
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-warning bg-warning-subtle">
+                <div class="small fw-bold text-dark">5) Productivity (%)</div>
+                <div class="metric-value text-danger" id="m_productivity">0.0%</div>
+                <div class="small text-muted mt-1">(เป้าหมายมาตรฐาน 90% - 110%)</div>
+              </div>
+            </div>
+            <div class="col-md-4 col-sm-6">
+              <div class="metric-card border-primary bg-primary-subtle">
+                <div class="small fw-bold text-dark">6) Skill Mix (%)</div>
+                <div class="metric-value text-primary" id="m_skillMix">0.0%</div>
+                <div class="small text-muted mt-1">(สัดส่วน RN ต่อพยาบาลทั้งหมด)</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Chart Container -->
+          <div class="card p-3 bg-light border-0">
+            <h6 class="fw-bold mb-2 small text-muted"><i class="fa-solid fa-chart-column me-1"></i>กราฟเปรียบเทียบภาระงานรายห้องตรวจ</h6>
+            <div style="height: 300px;">
+              <canvas id="productivityChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= MENU 5: ADMIN SETTINGS & STAFF MASTER ================= -->
+      <div class="tab-pane fade" id="tab5" role="tabpanel">
+        <div class="card card-custom p-4 space-y-4">
+          <div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
+            <div>
+              <h5 class="fw-bold mb-1 text-danger"><i class="fa-solid fa-shield-halved me-2"></i>จัดการบุคลากรและตั้งค่าระบบ (Admin)</h5>
+              <div class="small text-muted">ควบคุมข้อมูลบุคลากร, รายชื่อห้องตรวจ OPD และสูตรค่าคงที่ Productivity</div>
+            </div>
+            <div id="adminBadgeLock">
+              <span class="badge bg-secondary px-3 py-2" id="adminModeBadge">ยังไม่ได้ปลดล็อกสิทธิ์ Admin</span>
+            </div>
+          </div>
+
+          <!-- Admin Clinic Manager Card -->
+          <div class="card p-3 bg-light border border-success-subtle rounded-3 mb-4">
+            <h6 class="fw-bold mb-2 text-success"><i class="fa-solid fa-hospital me-1.5"></i>จัดการรายชื่อห้องตรวจ / แผนก OPD (เพิ่ม / ลดแผนกตรวจ)</h6>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <div class="bg-white p-3 rounded-3 border">
+                  <div class="small fw-bold text-success mb-2">คลินิกในเวลาราชการ (08:00-16:00)</div>
+                  <div class="input-group input-group-sm mb-2">
+                    <input type="text" id="newInTimeClinicInput" class="form-control" placeholder="พิมพ์ชื่อแผนก/ห้องตรวจใหม่...">
+                    <button type="button" class="btn btn-success" onclick="addClinicName('in')"><i class="fa-solid fa-plus me-1"></i>เพิ่ม</button>
+                  </div>
+                  <div id="inTimeClinicsList" class="d-flex flex-wrap gap-1.5"></div>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="bg-white p-3 rounded-3 border">
+                  <div class="small fw-bold text-primary mb-2">คลินิกนอกเวลาราชการ (เย็น / วันหยุด)</div>
+                  <div class="input-group input-group-sm mb-2">
+                    <input type="text" id="newOutTimeClinicInput" class="form-control" placeholder="พิมพ์ชื่อแผนก/ห้องตรวจใหม่...">
+                    <button type="button" class="btn btn-primary" onclick="addClinicName('out')"><i class="fa-solid fa-plus me-1"></i>เพิ่ม</button>
+                  </div>
+                  <div id="outTimeClinicsList" class="d-flex flex-wrap gap-1.5"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row g-4">
+            <!-- Staff Master CRUD (No visible Staff_ID column) -->
+            <div class="col-lg-8">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <h6 class="fw-bold mb-0 text-dark">
+                  <i class="fa-solid fa-users me-1 text-primary"></i>ทำเนียบบุคลากร OPD (<span id="staffTotalCount">0</span> คน)
+                </h6>
+                <button class="btn btn-sm btn-primary rounded-pill px-3" onclick="openAddStaffModal()">
+                  <i class="fa-solid fa-user-plus me-1"></i>เพิ่มเจ้าหน้าที่ใหม่
+                </button>
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-md-6">
+                  <input type="text" class="form-control form-control-sm" id="searchStaffMasterInput" placeholder="ค้นหาชื่อ/ตำแหน่ง/สังกัด..." oninput="renderStaffMasterTable()">
+                </div>
+                <div class="col-md-6">
+                  <select class="form-select form-select-sm" id="filterStaffClinicSelect" onchange="renderStaffMasterTable()">
+                    <option value="ALL">-- ทุกหน่วยงานสังกัด --</option>
+                  </select>
+                </div>
+              </div>
+              <div class="table-responsive" style="max-height: 440px; overflow-y: auto;">
+                <table class="table table-sm table-hover align-middle small">
+                  <thead class="table-light sticky-top">
+                    <tr>
+                      <th>ชื่อ-สกุล</th>
+                      <th>ตำแหน่ง</th>
+                      <th>สังกัด</th>
+                      <th>สถานะ</th>
+                      <th class="text-center">จัดการ</th>
+                    </tr>
+                  </thead>
+                  <tbody id="staffMasterTbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- System Settings -->
+            <div class="col-lg-4">
+              <div class="card p-3 bg-light border-0 rounded-3">
+                <h6 class="fw-bold mb-3 text-dark"><i class="fa-solid fa-sliders me-1"></i>ค่าคงที่สูตร Productivity & จำค่าที่กำหนด</h6>
+                <form id="settingsForm" onsubmit="handleSaveSettings(event)">
+                  <div class="mb-2">
+                    <label class="small fw-bold">NHPPD (ชั่วโมงพยาบาล/คน)</label>
+                    <input type="number" step="0.01" class="form-control form-control-sm" id="setNHPPD" value="0.4">
+                  </div>
+                  <div class="mb-2">
+                    <label class="small fw-bold">Std_Hr (ชม.ทำงานมาตรฐาน/วัน)</label>
+                    <input type="number" step="0.5" class="form-control form-control-sm" id="setStdHr" value="7">
+                  </div>
+                  <div class="mb-2">
+                    <label class="small fw-bold">Annual_Hr (ชม.ทำงาน/ปี)</label>
+                    <input type="number" class="form-control form-control-sm" id="setAnnualHr" value="2080">
+                  </div>
+                  <div class="mb-2">
+                    <label class="small fw-bold">Work_Days (วันทำงาน/ปี)</label>
+                    <input type="number" class="form-control form-control-sm" id="setWorkDays" value="245">
+                  </div>
+                  <div class="mb-3">
+                    <label class="small fw-bold">Admin Emails (คั่นด้วยจุลภาค)</label>
+                    <input type="text" class="form-control form-control-sm" id="setAdminEmails" value="screening.pcmc@gmail.com, admin.opd@pcmc.ac.th">
+                  </div>
+                  <button type="submit" class="btn btn-dark w-100 rounded-pill">
+                    <i class="fa-solid fa-save me-1"></i>บันทึกและจำค่าที่กำหนด
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin PIN Unlock Modal (No visible secret PIN hint) -->
+  <div class="modal fade" id="adminPinModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-content">
+        <div class="modal-header bg-dark text-white py-2">
+          <h6 class="modal-title small fw-bold"><i class="fa-solid fa-lock me-1"></i>ปลดล็อกสิทธิ์ Admin</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body text-center">
+          <p class="small text-muted mb-2">กรุณาระบุรหัสผ่านลับสำหรับผู้ดูแลระบบ</p>
+          <input type="password" id="adminPinInput" class="form-control text-center fs-4 fw-bold mb-3" maxlength="8" placeholder="••••">
+          <button type="button" class="btn btn-success w-100 rounded-pill" onclick="submitAdminPin()">ยืนยันรหัสผ่าน</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Staff Modal (No Staff ID input) -->
+  <div class="modal fade" id="addStaffModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header bg-primary text-white py-2">
+          <h6 class="modal-title fw-bold"><i class="fa-solid fa-user-plus me-1"></i>เพิ่มเจ้าหน้าที่ใหม่</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <form id="addStaffForm" onsubmit="saveNewStaff(event)">
+            <div class="mb-2">
+              <label class="small fw-bold">ชื่อ - นามสกุล <span class="text-danger">*</span></label>
+              <input type="text" class="form-control form-control-sm" id="newStaffName" placeholder="เช่น พว.สุภาภรณ์ ใจดี" required>
+            </div>
+            <div class="mb-2">
+              <label class="small fw-bold">ตำแหน่ง <span class="text-danger">*</span></label>
+              <select class="form-select form-select-sm" id="newStaffPosition" required>
+                <option value="RN">RN (พยาบาลวิชาชีพ)</option>
+                <option value="HN">HN (หัวหน้าพยาบาล/หัวหน้าเวร)</option>
+                <option value="PN">PN (ผู้ช่วยพยาบาล)</option>
+                <option value="NA">NA (ผู้ช่วยเหลือคนไข้)</option>
+                <option value="Clerk">ผู้ปฏิบัติงานทั่วไป</option>
+                <option value="Service Worker">พนักงานบริการ</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="small fw-bold">หน่วยงาน / คลินิกสังกัด <span class="text-danger">*</span></label>
+              <select class="form-select form-select-sm" id="newStaffClinic" required></select>
+            </div>
+            <div class="text-end">
+              <button type="button" class="btn btn-secondary btn-sm rounded-pill me-1" data-bs-dismiss="modal">ยกเลิก</button>
+              <button type="submit" class="btn btn-primary btn-sm rounded-pill px-4">บันทึกข้อมูลบุคลากร</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Workload Modal -->
+  <div class="modal fade" id="editWorkloadModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content">
+        <div class="modal-header bg-primary text-white py-2">
+          <h6 class="modal-title fw-bold"><i class="fa-solid fa-pen-to-square me-1"></i>แก้ไขข้อมูลภาระงานห้องตรวจ (Admin)</h6>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <form id="editWorkloadForm" onsubmit="saveEditWorkload(event)">
+            <input type="hidden" id="editWId">
+            <div class="row g-2">
+              <div class="col-md-4">
+                <label class="small fw-bold">วันที่</label>
+                <input type="date" class="form-control form-control-sm" id="editWDate" required>
+              </div>
+              <div class="col-md-4">
+                <label class="small fw-bold">กะเวลา</label>
+                <select class="form-select form-select-sm" id="editWShift">
+                  <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
+                  <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
+                  <option value="นอกเวลาวันหยุด 08:00-12:00">นอกเวลาวันหยุด 08:00-12:00</option>
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="small fw-bold">ห้องตรวจ</label>
+                <input type="text" class="form-control form-control-sm" id="editWClinic" readonly>
+              </div>
+              <div class="col-md-3">
+                <label class="small fw-bold text-primary">ผู้ป่วยรวม</label>
+                <input type="number" class="form-control form-control-sm fw-bold text-primary" id="editWTotalPt" required min="0" oninput="syncEditPatientTotals('total')">
+              </div>
+              <div class="col-md-3">
+                <label class="small fw-bold">ผู้ใหญ่</label>
+                <input type="number" class="form-control form-control-sm" id="editWAdultPt" min="0" oninput="syncEditPatientTotals('adult')">
+              </div>
+              <div class="col-md-3">
+                <label class="small fw-bold">เด็ก</label>
+                <input type="number" class="form-control form-control-sm" id="editWChildPt" min="0" oninput="syncEditPatientTotals('child')">
+              </div>
+              <div class="col-md-3">
+                <label class="small fw-bold text-danger">Admit</label>
+                <input type="number" class="form-control form-control-sm fw-bold text-danger" id="editWAdmit" required min="0">
+              </div>
+              <div class="col-12 mt-2">
+                <label class="small fw-bold border-bottom pb-1 w-100">กำลังคนปฏิบัติงาน</label>
+              </div>
+              <div class="col-2"><label class="small text-muted">HN</label><input type="number" step="0.5" class="form-control form-control-sm text-center" id="editWHn"></div>
+              <div class="col-2"><label class="small fw-bold text-primary">RN</label><input type="number" step="0.5" class="form-control form-control-sm text-center fw-bold text-primary" id="editWRn"></div>
+              <div class="col-2"><label class="small fw-bold text-info">PN</label><input type="number" step="0.5" class="form-control form-control-sm text-center fw-bold" id="editWPn"></div>
+              <div class="col-2"><label class="small fw-bold text-success">NA</label><input type="number" step="0.5" class="form-control form-control-sm text-center fw-bold text-success" id="editWNa"></div>
+              <div class="col-2"><label class="small text-muted">ผู้ปฏิบัติงานทั่วไป</label><input type="number" step="0.5" class="form-control form-control-sm text-center" id="editWClerk"></div>
+              <div class="col-2"><label class="small text-muted">พนักงานบริการ</label><input type="number" step="0.5" class="form-control form-control-sm text-center" id="editWService"></div>
+              <div class="col-md-6 mt-2">
+                <label class="small fw-bold">ผู้บันทึกรายงาน <span class="text-danger">*</span></label>
+                <input type="text" class="form-control form-control-sm" id="editWReporter" required>
+              </div>
+              <div class="col-md-6 mt-2">
+                <label class="small">หมายเหตุ</label>
+                <input type="text" class="form-control form-control-sm" id="editWNote">
+              </div>
+            </div>
+            <div class="text-end mt-3">
+              <button type="button" class="btn btn-secondary btn-sm rounded-pill me-1" data-bs-dismiss="modal">ยกเลิก</button>
+              <button type="submit" class="btn btn-primary btn-sm rounded-pill px-4">บันทึกการแก้ไข</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bootstrap Bundle JS -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <script>
+    const DEFAULT_IN_TIME_CLINICS = [
+      'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'เวชศาสตร์ฟื้นฟู', 'ศัลยกรรม',
+      'จักษุวิทยา', 'ศูนย์เลสิก', 'โสต ศอ นาสิก', 'อายุรกรรม', 'ตรวจโรคทั่วไป',
+      'Echo', 'AAIRC', 'ODS', 'ประกันสังคม', 'หน่วยคัดกรอง'
+    ];
+    const DEFAULT_OUT_TIME_CLINICS = [
+      'ตรวจโรคทั่วไป', 'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'ศัลยกรรม',
+      'จักษุวิทยา', 'โสต ศอ นาสิก', 'อายุรกรรม', 'คลินิกหัวใจ', 'หน่วยคัดกรอง'
+    ];
+
+    let APP_STATE = {
+      currentUserEmail: 'screening.pcmc@gmail.com',
+      isAdmin: false,
+      adminPin: '4217',
+      inTimeClinics: [...DEFAULT_IN_TIME_CLINICS],
+      outTimeClinics: [...DEFAULT_OUT_TIME_CLINICS],
+      staff: [],
+      workloads: [],
+      leaves: [],
+      ot: [],
+      settings: {}
+    };
+
+    let EXTERNAL_OT_DRAFTS = [];
+    let prodChartInstance = null;
+
+    function formatPosLabel(pos) {
+      if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
+      if (pos === 'Service Worker') return 'พนักงานบริการ';
+      if (pos === 'PCA') return 'NA';
+      return pos;
+    }
+
+    function getAllClinics() {
+      return Array.from(new Set([...APP_STATE.inTimeClinics, ...APP_STATE.outTimeClinics]));
+    }
+
+    function getEffectiveTotalPt(w) {
+      const stored = Number(w && w.totalPt) || 0;
+      const sum = (Number(w && w.adultPt) || 0) + (Number(w && w.childPt) || 0);
+      return Math.max(stored, sum);
+    }
+
+    // --- Init ---
+    $(document).ready(function() {
+      $('#leaveStaffSelect').select2({ theme: 'bootstrap-5', placeholder: 'พิมพ์ค้นหาและเลือกเจ้าหน้าที่ที่ลา...' });
+      $('#trainingStaffSelect').select2({ theme: 'bootstrap-5', placeholder: 'พิมพ์ค้นหาและเลือกเจ้าหน้าที่ไปอบรม/ประชุม...' });
+      $('#transferStaffSelect').select2({ theme: 'bootstrap-5', placeholder: 'พิมพ์ค้นหาเจ้าหน้าที่...', allowClear: true });
+      $('#leaveStaffSelectSingle').select2({ theme: 'bootstrap-5', placeholder: 'พิมพ์ค้นหาชื่อเจ้าหน้าที่...', allowClear: true });
+      $('#otStaffMultiSelect').select2({ theme: 'bootstrap-5', placeholder: 'พิมพ์ค้นหาและเลือกเจ้าหน้าที่ OPD...' });
+
+      document.getElementById('entryDate').valueAsDate = new Date();
+      document.getElementById('censusDate').valueAsDate = new Date();
+      document.getElementById('leaveStartDate').valueAsDate = new Date();
+      document.getElementById('leaveEndDate').valueAsDate = new Date();
+      document.getElementById('otDate').valueAsDate = new Date();
+
+      const yyyy = new Date().getFullYear();
+      const mm = String(new Date().getMonth() + 1).padStart(2, '0');
+      document.getElementById('prodMonth').value = yyyy + '-' + mm;
+
+      onShiftChange();
+      onOtShiftChange();
+      loadInitialData();
+    });
+
+    function loadInitialData() {
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (res && res.success) {
+              APP_STATE.currentUserEmail = res.currentUserEmail || 'screening.pcmc@gmail.com';
+              APP_STATE.isAdmin = res.isEmailAdmin;
+              APP_STATE.adminPin = res.adminPin || '4217';
+              APP_STATE.staff = res.staff || [];
+              APP_STATE.workloads = (res.workloads || []).map(function(w) {
+                return Object.assign({}, w, { totalPt: getEffectiveTotalPt(w) });
+              });
+              APP_STATE.leaves = res.leaves || [];
+              APP_STATE.ot = res.ot || [];
+              APP_STATE.settings = res.settings || {};
+
+              if (APP_STATE.settings['In_Time_Clinics']) {
+                APP_STATE.inTimeClinics = APP_STATE.settings['In_Time_Clinics'].split(',').map(s => s.trim()).filter(Boolean);
+              }
+              if (APP_STATE.settings['Out_Time_Clinics']) {
+                APP_STATE.outTimeClinics = APP_STATE.settings['Out_Time_Clinics'].split(',').map(s => s.trim()).filter(Boolean);
+              }
+              updateUI();
+            }
+          })
+          .getInitialData();
+      } else {
+        updateUI();
+      }
+    }
+
+    function updateUI() {
+      $('#userEmailSpan').text(APP_STATE.currentUserEmail);
+      if (APP_STATE.isAdmin) {
+        $('#adminStatusText').text('Admin (ปลดล็อกแล้ว)');
+        $('#adminModeBadge').removeClass('bg-secondary').addClass('bg-danger').text('โหมดผู้ดูแลระบบ (Admin) ปลดล็อกแล้ว');
+        $('#adminNoticeDiv').html('<span class="text-success"><i class="fa-solid fa-shield-check me-1"></i>โหมด Admin: แสดงปุ่มแก้ไขและถังขยะ</span>');
+        $('.admin-col').show();
+      } else {
+        $('#adminStatusText').text('ปลดล็อก Admin');
+        $('#adminModeBadge').removeClass('bg-danger').addClass('bg-secondary').text('โหมดผู้ใช้งานทั่วไป');
+        $('#adminNoticeDiv').html('<span class="text-muted"><i class="fa-solid fa-lock me-1"></i>รูปถังขยะและปุ่มแก้ไขอนุญาตเฉพาะ Admin</span>');
+        $('.admin-col').hide();
+      }
+
+      if (APP_STATE.settings['NHPPD']) $('#setNHPPD').val(APP_STATE.settings['NHPPD']);
+      if (APP_STATE.settings['Std_Hr']) $('#setStdHr').val(APP_STATE.settings['Std_Hr']);
+      if (APP_STATE.settings['Annual_Hr']) $('#setAnnualHr').val(APP_STATE.settings['Annual_Hr']);
+      if (APP_STATE.settings['Work_Days']) $('#setWorkDays').val(APP_STATE.settings['Work_Days']);
+      if (APP_STATE.settings['Admin_Emails']) $('#setAdminEmails').val(APP_STATE.settings['Admin_Emails']);
+
+      renderClinicManagerLists();
+      populateClinicDropdowns();
+      populateStaffSelects();
+      renderTodayWorkloads();
+      renderLeaveTable();
+      renderOTTable();
+      renderFiscalSummaryTable();
+      renderCensus();
+      calculateMonthlyProductivity();
+      renderStaffMasterTable();
+    }
+
+    function toggleAdminModal() {
+      if (APP_STATE.isAdmin) {
+        Swal.fire({
+          title: 'สิทธิ์ผู้ดูแลระบบ',
+          text: 'คุณอยู่ในโหมด Admin แล้ว ต้องการล็อกสิทธิ์หรือไม่?',
+          icon: 'question',
+          showCancelButton: true,
+          confirmButtonText: 'ล็อกสิทธิ์',
+          cancelButtonText: 'คงสถานะไว้'
+        }).then((result) => {
+          if (result.isConfirmed) {
+            APP_STATE.isAdmin = false;
+            updateUI();
+          }
+        });
+      } else {
+        $('#adminPinInput').val('');
+        new bootstrap.Modal(document.getElementById('adminPinModal')).show();
+      }
+    }
+
+    function submitAdminPin() {
+      const pin = $('#adminPinInput').val().trim();
+      if (pin === APP_STATE.adminPin || pin === '4217') {
+        APP_STATE.isAdmin = true;
+        bootstrap.Modal.getInstance(document.getElementById('adminPinModal')).hide();
+        Swal.fire('สำเร็จ', 'ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ', 'success');
+        updateUI();
+      } else {
+        Swal.fire('รหัสผ่านไม่ถูกต้อง', 'กรุณาลองใหม่อีกครั้ง', 'error');
+      }
+    }
+
+    function populateStaffSelects() {
+      const staffList = APP_STATE.staff.filter(s => s.status !== 'Resigned' && s.status !== 'Retired');
+      const $leaveMulti = $('#leaveStaffSelect').empty();
+      const $trainingMulti = $('#trainingStaffSelect').empty();
+      const $transferSingle = $('#transferStaffSelect').empty().append(new Option('-- เลือกเจ้าหน้าที่ --', ''));
+      const $leaveSingle = $('#leaveStaffSelectSingle').empty().append(new Option('', ''));
+      const $otMulti = $('#otStaffMultiSelect').empty();
+
+      staffList.forEach(s => {
+        const text = s.name + ' (' + formatPosLabel(s.position) + ' - ' + s.homeClinic + ')';
+        $leaveMulti.append(new Option(text, s.name));
+        $trainingMulti.append(new Option(text, s.name));
+        $transferSingle.append(new Option(text, s.staffId));
+        $leaveSingle.append(new Option(text, s.staffId));
+        $otMulti.append(new Option(text, s.name));
+      });
+    }
+
+    function populateClinicDropdowns() {
+      onShiftChange();
+      onOtShiftChange();
+
+      const allClinics = getAllClinics();
+      const prodClinicSelect = document.getElementById('prodClinic');
+      const prevProd = prodClinicSelect.value;
+      prodClinicSelect.innerHTML = '<option value="ALL">รวมทุกคลินิก OPD</option>';
+      allClinics.forEach(c => prodClinicSelect.appendChild(new Option(c, c)));
+      if ([...prodClinicSelect.options].some(o => o.value === prevProd)) prodClinicSelect.value = prevProd;
+
+      const transferClinicSelect = document.getElementById('transferTargetClinic');
+      transferClinicSelect.innerHTML = '<option value="">-- เลือกห้องตรวจเป้าหมาย --</option>';
+      APP_STATE.inTimeClinics.forEach(c => transferClinicSelect.appendChild(new Option(c, c)));
+
+      const filterStaffClinic = document.getElementById('filterStaffClinicSelect');
+      const prevStaffClinic = filterStaffClinic.value;
+      filterStaffClinic.innerHTML = '<option value="ALL">-- ทุกหน่วยงานสังกัด --</option>';
+      allClinics.forEach(c => filterStaffClinic.appendChild(new Option(c, c)));
+      if ([...filterStaffClinic.options].some(o => o.value === prevStaffClinic)) filterStaffClinic.value = prevStaffClinic;
+
+      const newStaffClinic = document.getElementById('newStaffClinic');
+      newStaffClinic.innerHTML = '';
+      allClinics.forEach(c => newStaffClinic.appendChild(new Option(c, c)));
+    }
+
+    function onShiftChange() {
+      const shift = document.getElementById('entryShift').value;
+      const clinicSelect = document.getElementById('entryClinic');
+      const prev = clinicSelect.value;
+      const clinics = (shift === 'ในเวลา 08:00-16:00') ? APP_STATE.inTimeClinics : APP_STATE.outTimeClinics;
+      clinicSelect.innerHTML = '';
+      clinics.forEach(c => clinicSelect.appendChild(new Option(c, c)));
+      if (clinics.includes(prev)) clinicSelect.value = prev;
+      onClinicChange();
+    }
+
+    function onOtShiftChange() {
+      const shift = document.getElementById('otShift').value;
+      const otClinicSelect = document.getElementById('otWorkClinic');
+      const prev = otClinicSelect.value;
+      const clinics = (shift === 'OT ในเวลาราชการ 08:00-16:00') ? getAllClinics() : APP_STATE.outTimeClinics;
+      otClinicSelect.innerHTML = '';
+      clinics.forEach(c => otClinicSelect.appendChild(new Option(c, c)));
+      if (clinics.includes(prev)) otClinicSelect.value = prev;
+    }
+
+    function onClinicChange() {
+      const clinic = document.getElementById('entryClinic').value;
+      const isEcho = (clinic === 'Echo');
+      const totalEl = document.getElementById('totalPt');
+      document.getElementById('adultPtDiv').style.display = 'block';
+      document.getElementById('childPtDiv').style.display = 'block';
+      document.getElementById('adultPtLabel').textContent = isEcho ? 'ผู้ใหญ่ (Echo)' : 'ผู้ป่วยผู้ใหญ่';
+      document.getElementById('childPtLabel').textContent = isEcho ? 'เด็ก (Echo)' : 'ผู้ป่วยเด็ก';
+      totalEl.readOnly = isEcho;
+      totalEl.classList.toggle('bg-light', isEcho);
+    }
+
+    function syncEntryPatientTotals(source) {
+      const totalEl = document.getElementById('totalPt');
+      const adultEl = document.getElementById('adultPt');
+      const childEl = document.getElementById('childPt');
+      if (source === 'total') {
+        const total = Math.max(0, Number(totalEl.value) || 0);
+        const child = Math.max(0, Number(childEl.value) || 0);
+        adultEl.value = Math.max(0, total - child);
+      } else {
+        const adult = Math.max(0, Number(adultEl.value) || 0);
+        const child = Math.max(0, Number(childEl.value) || 0);
+        totalEl.value = adult + child;
+      }
+    }
+
+    function syncEditPatientTotals(source) {
+      const totalEl = document.getElementById('editWTotalPt');
+      const adultEl = document.getElementById('editWAdultPt');
+      const childEl = document.getElementById('editWChildPt');
+      if (source === 'total') {
+        const total = Math.max(0, Number(totalEl.value) || 0);
+        const child = Math.max(0, Number(childEl.value) || 0);
+        adultEl.value = Math.max(0, total - child);
+      } else {
+        const adult = Math.max(0, Number(adultEl.value) || 0);
+        const child = Math.max(0, Number(childEl.value) || 0);
+        totalEl.value = adult + child;
+      }
+    }
+
+    function calculateEchoTotal() {
+      syncEntryPatientTotals('adult');
+    }
+
+    function adjustStep(id, delta) {
+      const el = document.getElementById(id);
+      let val = (parseFloat(el.value) || 0) + delta;
+      if (val < 0) val = 0;
+      el.value = val;
+    }
+
+    function toggleSection4Boxes() {
+      document.getElementById('leaveLinkBox').style.display = document.getElementById('toggleLeaveLink').checked ? 'block' : 'none';
+      document.getElementById('trainingLinkBox').style.display = document.getElementById('toggleTrainingLink').checked ? 'block' : 'none';
+      document.getElementById('transferLinkBox').style.display = document.getElementById('toggleTransferLink').checked ? 'block' : 'none';
+    }
+
+    function handleSaveWorkload(e) {
+      e.preventDefault();
+      const reporter = document.getElementById('entryReporter').value.trim();
+      if (!reporter) {
+        Swal.fire('ข้อผิดพลาด', 'กรุณาระบุชื่อผู้บันทึกรายงาน', 'warning');
+        return;
+      }
+
+      const rawTotal = Number(document.getElementById('totalPt').value) || 0;
+      const rawAdult = Number(document.getElementById('adultPt').value) || 0;
+      const rawChild = Number(document.getElementById('childPt').value) || 0;
+      const finalTotal = Math.max(rawTotal, rawAdult + rawChild);
+      const finalAdult = (rawAdult === 0 && rawChild === 0)
+        ? finalTotal
+        : (rawAdult + rawChild < finalTotal ? Math.max(0, finalTotal - rawChild) : rawAdult);
+
+      const dateVal = document.getElementById('entryDate').value;
+      const entry = {
+        id: 'REC-' + Date.now(),
+        date: dateVal,
+        shift: document.getElementById('entryShift').value,
+        clinic: document.getElementById('entryClinic').value,
+        totalPt: finalTotal,
+        adultPt: finalAdult,
+        childPt: rawChild,
+        admit: Number(document.getElementById('admitPt').value) || 0,
+        hn: Number(document.getElementById('staffHN').value) || 0,
+        rn: Number(document.getElementById('staffRN').value) || 0,
+        pn: Number(document.getElementById('staffPN').value) || 0,
+        na: Number(document.getElementById('staffNA').value) || 0,
+        clerk: Number(document.getElementById('staffClerk').value) || 0,
+        serviceWorker: Number(document.getElementById('staffServiceWorker').value) || 0,
+        note: document.getElementById('entryNote').value.trim(),
+        reporter: reporter
+      };
+
+      const linkedLeaves = [];
+      if (document.getElementById('toggleLeaveLink').checked) {
+        const leaveNames = $('#leaveStaffSelect').val() || [];
+        const lType = document.getElementById('leaveTypeLink').value;
+        const lDays = Number(document.getElementById('leaveDaysLink').value) || 1;
+        const lNote = document.getElementById('leaveNoteLink').value.trim();
+        leaveNames.forEach((name, idx) => {
+          const st = APP_STATE.staff.find(s => s.name === name);
+          linkedLeaves.push({
+            id: 'LV-LNK-' + Date.now() + '-' + idx,
+            startDate: dateVal,
+            endDate: dateVal,
+            staffName: name,
+            position: st ? st.position : 'RN',
+            clinic: st ? st.homeClinic : entry.clinic,
+            leaveType: lType,
+            days: lDays,
+            note: lNote
+          });
+        });
+      }
+
+      if (document.getElementById('toggleTrainingLink').checked) {
+        const trainNames = $('#trainingStaffSelect').val() || [];
+        const tDays = Number(document.getElementById('trainingDaysLink').value) || 1;
+        const tNote = document.getElementById('trainingNoteLink').value.trim();
+        trainNames.forEach((name, idx) => {
+          const st = APP_STATE.staff.find(s => s.name === name);
+          linkedLeaves.push({
+            id: 'TRN-' + Date.now() + '-' + idx,
+            startDate: dateVal,
+            endDate: dateVal,
+            staffName: name,
+            position: st ? st.position : 'RN',
+            clinic: st ? st.homeClinic : entry.clinic,
+            leaveType: 'ไปอบรม/ประชุม',
+            days: tDays,
+            note: tNote || 'ไปอบรม/ประชุม'
+          });
+        });
+      }
+
+      if (document.getElementById('toggleTransferLink').checked) {
+        const tId = $('#transferStaffSelect').val();
+        const tTarget = $('#transferTargetClinic').val();
+        if (tId && tTarget) {
+          const st = APP_STATE.staff.find(s => s.staffId === tId);
+          if (st) {
+            const msg = '[ช่วยงาน ' + tTarget + ': ' + st.name + ']';
+            entry.note = entry.note ? (entry.note + ' ' + msg) : msg;
+          }
+        }
+      }
+
+      APP_STATE.workloads.unshift(entry);
+      if (linkedLeaves.length > 0) APP_STATE.leaves.unshift(...linkedLeaves);
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.saveDailyWorkload(entry);
+        if (linkedLeaves.length > 0) google.script.run.saveBatchLeave(linkedLeaves);
+      }
+
+      Swal.fire('สำเร็จ', 'บันทึกข้อมูลภาระงานห้องตรวจ ' + entry.clinic + ' สำเร็จ!', 'success');
+      document.getElementById('entryReporter').value = '';
+      document.getElementById('entryNote').value = '';
+      $('#leaveStaffSelect').val(null).trigger('change');
+      $('#trainingStaffSelect').val(null).trigger('change');
+      $('#transferStaffSelect').val('').trigger('change');
+      document.getElementById('toggleLeaveLink').checked = false;
+      document.getElementById('toggleTrainingLink').checked = false;
+      document.getElementById('toggleTransferLink').checked = false;
+      toggleSection4Boxes();
+
+      renderTodayWorkloads();
+      renderLeaveTable();
+      renderCensus();
+      calculateMonthlyProductivity();
+    }
+
+    function renderTodayWorkloads() {
+      const curDate = document.getElementById('entryDate').value;
+      const list = APP_STATE.workloads.filter(w => w.date === curDate);
+      $('#todayCountBadge').text(list.length + ' คลินิก');
+
+      const container = $('#todayWorkloadsList').empty();
+      if (list.length === 0) {
+        container.html('<div class="text-center text-muted small py-4">ยังไม่มีรายการที่บันทึกในวันที่เลือก</div>');
+        return;
+      }
+
+      list.forEach(item => {
+        const nursing = (item.rn + item.pn + (item.na || 0)).toFixed(1);
+        let actionBtns = '';
+        if (APP_STATE.isAdmin) {
+          actionBtns = `
+            <div>
+              <button class="btn btn-sm btn-link text-primary p-0 me-2" onclick="openEditWorkloadModal('${item.id}')" title="แก้ไข"><i class="fa-solid fa-pen"></i></button>
+              <button class="btn btn-sm btn-link text-danger p-0" onclick="deleteWorkload('${item.id}')" title="ลบ"><i class="fa-solid fa-trash"></i></button>
+            </div>
+          `;
+        }
+
+        const card = `
+          <div class="card p-2.5 mb-2 bg-light border">
+            <div class="d-flex align-items-start justify-content-between">
+              <div>
+                <strong class="text-dark small">${item.clinic}</strong>
+                <div class="text-muted" style="font-size: 11px;">${item.shift}</div>
+              </div>
+              ${actionBtns}
+            </div>
+            <div class="row g-1 text-center my-2">
+              <div class="col-4"><div class="bg-white p-1 rounded border"><span class="small text-muted d-block" style="font-size:10px;">ผู้ป่วย</span><strong class="text-primary">${getEffectiveTotalPt(item)}</strong></div></div>
+              <div class="col-4"><div class="bg-white p-1 rounded border"><span class="small text-muted d-block" style="font-size:10px;">Admit</span><strong class="text-danger">${item.admit}</strong></div></div>
+              <div class="col-4"><div class="bg-white p-1 rounded border"><span class="small text-muted d-block" style="font-size:10px;">RN+PN+NA</span><strong class="text-success">${nursing}</strong></div></div>
+            </div>
+            <div class="d-flex justify-content-between text-muted" style="font-size: 10px;">
+              <span>ผู้รายงาน: ${item.reporter}</span>
+              <span>${item.note || ''}</span>
+            </div>
+          </div>
+        `;
+        container.append(card);
+      });
+    }
+
+    function openEditWorkloadModal(id) {
+      const item = APP_STATE.workloads.find(w => w.id === id);
+      if (!item) return;
+      const effTotal = getEffectiveTotalPt(item);
+      $('#editWId').val(item.id);
+      $('#editWDate').val(item.date);
+      $('#editWShift').val(item.shift);
+      $('#editWClinic').val(item.clinic);
+      $('#editWTotalPt').val(effTotal);
+      $('#editWAdultPt').val(item.adultPt);
+      $('#editWChildPt').val(item.childPt);
+      $('#editWAdmit').val(item.admit);
+      $('#editWHn').val(item.hn);
+      $('#editWRn').val(item.rn);
+      $('#editWPn').val(item.pn);
+      $('#editWNa').val(item.na);
+      $('#editWClerk').val(item.clerk);
+      $('#editWService').val(item.serviceWorker);
+      $('#editWReporter').val(item.reporter);
+      $('#editWNote').val(item.note);
+      new bootstrap.Modal(document.getElementById('editWorkloadModal')).show();
+    }
+
+    function saveEditWorkload(e) {
+      e.preventDefault();
+      const id = $('#editWId').val();
+      const item = APP_STATE.workloads.find(w => w.id === id);
+      if (!item) return;
+
+      const rawTotal = Number($('#editWTotalPt').val()) || 0;
+      const rawAdult = Number($('#editWAdultPt').val()) || 0;
+      const rawChild = Number($('#editWChildPt').val()) || 0;
+      const finalTotal = Math.max(rawTotal, rawAdult + rawChild);
+      const finalAdult = (rawAdult === 0 && rawChild === 0)
+        ? finalTotal
+        : (rawAdult + rawChild < finalTotal ? Math.max(0, finalTotal - rawChild) : rawAdult);
+
+      item.date = $('#editWDate').val();
+      item.shift = $('#editWShift').val();
+      item.totalPt = finalTotal;
+      item.adultPt = finalAdult;
+      item.childPt = rawChild;
+      item.admit = Number($('#editWAdmit').val()) || 0;
+      item.hn = Number($('#editWHn').val()) || 0;
+      item.rn = Number($('#editWRn').val()) || 0;
+      item.pn = Number($('#editWPn').val()) || 0;
+      item.na = Number($('#editWNa').val()) || 0;
+      item.clerk = Number($('#editWClerk').val()) || 0;
+      item.serviceWorker = Number($('#editWService').val()) || 0;
+      item.reporter = $('#editWReporter').val().trim();
+      item.note = $('#editWNote').val().trim();
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.updateDailyWorkload(id, item);
+      }
+
+      bootstrap.Modal.getInstance(document.getElementById('editWorkloadModal')).hide();
+      Swal.fire('สำเร็จ', 'อัปเดตข้อมูลภาระงานห้องตรวจ ' + item.clinic + ' สำเร็จ', 'success');
+      renderTodayWorkloads();
+      renderCensus();
+      calculateMonthlyProductivity();
+    }
+
+    function deleteWorkload(id) {
+      Swal.fire({
+        title: 'ยืนยันการลบรายการ?',
+        text: 'ต้องการลบข้อมูลภาระงานนี้หรือไม่',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        confirmButtonText: 'ลบรายการ',
+        cancelButtonText: 'ยกเลิก'
+      }).then((result) => {
+        if (result.isConfirmed) {
+          APP_STATE.workloads = APP_STATE.workloads.filter(w => w.id !== id);
+          if (typeof google !== 'undefined' && google.script && google.script.run) {
+            google.script.run.deleteDailyWorkload(id);
+          }
+          Swal.fire('ลบแล้ว', 'ลบรายการภาระงานเรียบร้อย', 'success');
+          renderTodayWorkloads();
+          renderCensus();
+          calculateMonthlyProductivity();
+        }
+      });
+    }
+
+    // --- Menu 2: Leave & OT Logic ---
+    function calcLeaveDays() {
+      const s = new Date(document.getElementById('leaveStartDate').value);
+      const e = new Date(document.getElementById('leaveEndDate').value);
+      if (e >= s) {
+        const diff = Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
+        document.getElementById('leaveDaysCount').value = diff;
+      }
+    }
+
+    function handleSaveLeave(e) {
+      e.preventDefault();
+      const staffId = $('#leaveStaffSelectSingle').val();
+      const staff = APP_STATE.staff.find(s => s.staffId === staffId);
+      if (!staff) {
+        Swal.fire('เตือน', 'กรุณาค้นหาและเลือกเจ้าหน้าที่', 'warning');
+        return;
+      }
+      const record = {
+        id: 'LV-' + Date.now(),
+        startDate: document.getElementById('leaveStartDate').value,
+        endDate: document.getElementById('leaveEndDate').value,
+        staffName: staff.name,
+        position: staff.position,
+        clinic: staff.homeClinic,
+        leaveType: document.getElementById('leaveTypeSelect').value,
+        days: Number(document.getElementById('leaveDaysCount').value) || 1,
+        note: document.getElementById('leaveNoteInput').value.trim()
+      };
+
+      APP_STATE.leaves.unshift(record);
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.saveLeaveRecord(record);
+      }
+      Swal.fire('สำเร็จ', 'บันทึกวันลาสำเร็จ', 'success');
+      document.getElementById('leaveNoteInput').value = '';
+      $('#leaveStaffSelectSingle').val('').trigger('change');
+      renderLeaveTable();
+    }
+
+    function renderLeaveTable() {
+      const search = $('#searchLeaveStaffInput').val().toLowerCase().trim();
+      const type = $('#filterLeaveTypeSelect').val();
+
+      const filtered = APP_STATE.leaves.filter(l => {
+        const matchSearch = !search || l.staffName.toLowerCase().indexOf(search) !== -1;
+        const matchType = type === 'ALL' || l.leaveType === type;
+        return matchSearch && matchType;
+      });
+
+      const totalDays = filtered.reduce((sum, l) => sum + (Number(l.days) || 0), 0);
+      $('#leaveFilteredSumBadge').text('รวมวันลาที่เลือก: ' + totalDays + ' วัน (' + filtered.length + ' รายการ)');
+
+      const tbody = $('#leaveTableBody').empty();
+      if (filtered.length === 0) {
+        tbody.html('<tr><td colspan="7" class="text-center text-muted py-3">ไม่พบรายการวันลา</td></tr>');
+        return;
+      }
+
+      filtered.forEach(l => {
+        const range = l.startDate === l.endDate ? l.startDate : l.startDate + ' ถึง ' + l.endDate;
+        const badgeCls = l.leaveType === 'ไปอบรม/ประชุม' ? 'bg-info text-dark' : 'bg-warning text-dark';
+        const adminBtn = APP_STATE.isAdmin ? `
+          <button class="btn btn-sm btn-link text-danger p-0" onclick="deleteLeave('${l.id}')"><i class="fa-solid fa-trash"></i></button>
+        ` : '-';
+
+        tbody.append(`
+          <tr>
+            <td class="fw-bold">${l.staffName}${l.note ? '<div class="text-muted fw-normal" style="font-size:10px;">' + l.note + '</div>' : ''}</td>
+            <td>${formatPosLabel(l.position)}</td>
+            <td>${l.clinic}</td>
+            <td><span class="badge ${badgeCls}">${l.leaveType}</span></td>
+            <td class="text-center">${range}</td>
+            <td class="text-center fw-bold">${l.days}</td>
+            <td class="text-center admin-col">${adminBtn}</td>
+          </tr>
+        `);
+      });
+      if (!APP_STATE.isAdmin) $('.admin-col').hide();
+    }
+
+    function deleteLeave(id) {
+      Swal.fire({
+        title: 'ยืนยันการลบรายการ?',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'ลบ',
+        cancelButtonText: 'ยกเลิก'
+      }).then((res) => {
+        if (res.isConfirmed) {
+          APP_STATE.leaves = APP_STATE.leaves.filter(l => l.id !== id);
+          if (typeof google !== 'undefined' && google.script && google.script.run) {
+            google.script.run.deleteLeaveRecord(id);
+          }
+          renderLeaveTable();
+        }
+      });
+    }
+
+    function addExternalOtDraft() {
+      const name = $('#extOtName').val().trim();
+      const position = $('#extOtPosition').val();
+      const affiliation = $('#extOtAffiliation').val().trim();
+      if (!name || !affiliation) {
+        Swal.fire('ข้อมูลไม่ครบ', 'กรุณากรอกชื่อ-สกุล และสังกัด / หน่วยงานต้นสังกัด', 'warning');
+        return;
+      }
+      EXTERNAL_OT_DRAFTS.push({
+        tempId: 'EXT-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+        name,
+        position,
+        affiliation
+      });
+      $('#extOtName').val('');
+      $('#extOtAffiliation').val('');
+      renderExternalOtDrafts();
+    }
+
+    function removeExternalOtDraft(tempId) {
+      EXTERNAL_OT_DRAFTS = EXTERNAL_OT_DRAFTS.filter(d => d.tempId !== tempId);
+      renderExternalOtDrafts();
+    }
+
+    function renderExternalOtDrafts() {
+      const box = $('#externalOtDraftList').empty();
+      if (EXTERNAL_OT_DRAFTS.length === 0) return;
+      EXTERNAL_OT_DRAFTS.forEach(d => {
+        box.append(`
+          <div class="d-flex align-items-center justify-content-between bg-light border rounded px-2 py-1 mb-1">
+            <span><strong>${d.name}</strong> (${formatPosLabel(d.position)} • สังกัด: ${d.affiliation})</span>
+            <button type="button" class="btn btn-sm btn-link text-danger p-0" onclick="removeExternalOtDraft('${d.tempId}')"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+        `);
+      });
+    }
+
+    function handleSaveBatchOT(e) {
+      e.preventDefault();
+      const date = document.getElementById('otDate').value;
+      const shift = document.getElementById('otShift').value;
+      const workClinic = document.getElementById('otWorkClinic').value;
+      const selectedNames = $('#otStaffMultiSelect').val() || [];
+
+      if (selectedNames.length === 0 && EXTERNAL_OT_DRAFTS.length === 0) {
+        Swal.fire('เตือน', 'กรุณาเลือกเจ้าหน้าที่ OPD หรือเพิ่มเจ้าหน้าที่เฉพาะกิจอย่างน้อย 1 คน', 'warning');
+        return;
+      }
+
+      const opdRecords = selectedNames.map(name => {
+        const staff = APP_STATE.staff.find(s => s.name === name);
+        return {
+          id: 'OT-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+          date,
+          shift,
+          staffName: name,
+          position: staff ? staff.position : 'RN',
+          homeClinic: staff ? staff.homeClinic : workClinic,
+          workClinic,
+          isExternal: false
+        };
+      });
+
+      const extRecords = EXTERNAL_OT_DRAFTS.map((ext, idx) => ({
+        id: 'OT-EXT-' + Date.now() + '-' + idx,
+        date,
+        shift,
+        staffName: ext.name,
+        position: ext.position,
+        homeClinic: ext.affiliation,
+        workClinic,
+        isExternal: true
+      }));
+
+      const allRecords = [...opdRecords, ...extRecords];
+      APP_STATE.ot.unshift(...allRecords);
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.saveBatchOT(allRecords);
+      }
+      Swal.fire('สำเร็จ', 'บันทึกเวรปฏิบัติงานจำนวน ' + allRecords.length + ' คน สำเร็จ', 'success');
+      $('#otStaffMultiSelect').val(null).trigger('change');
+      EXTERNAL_OT_DRAFTS = [];
+      renderExternalOtDrafts();
+      renderOTTable();
+    }
+
+    function renderOTTable() {
+      const tbody = $('#otTableBody').empty();
+      if (APP_STATE.ot.length === 0) {
+        tbody.html('<tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีข้อมูลเวรนอกเวลา</td></tr>');
+        return;
+      }
+      APP_STATE.ot.slice(0, 30).forEach(o => {
+        const shiftBg = o.shift === 'OT ในเวลาราชการ 08:00-16:00' ? '#0891b2' : '#7c3aed';
+        const extBadge = o.isExternal ? ' <span class="badge bg-info text-dark ms-1">เฉพาะกิจนอก OPD</span>' : '';
+        tbody.append(`
+          <tr>
+            <td>${o.date}</td>
+            <td><span class="badge text-white" style="background-color:${shiftBg};">${o.shift}</span></td>
+            <td class="fw-bold">${o.staffName}${extBadge}</td>
+            <td>${formatPosLabel(o.position)}</td>
+            <td>${o.homeClinic}</td>
+            <td class="text-primary fw-bold">${o.workClinic}</td>
+            <td class="text-center admin-col">
+              ${APP_STATE.isAdmin ? `<button class="btn btn-sm btn-link text-danger p-0" onclick="deleteOT('${o.id}')"><i class="fa-solid fa-trash"></i></button>` : '-'}
+            </td>
+          </tr>
+        `);
+      });
+      if (!APP_STATE.isAdmin) $('.admin-col').hide();
+    }
+
+    function deleteOT(id) {
+      Swal.fire({
+        title: 'ยืนยันการลบรายการเวร?',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'ลบ',
+        cancelButtonText: 'ยกเลิก'
+      }).then((res) => {
+        if (res.isConfirmed) {
+          APP_STATE.ot = APP_STATE.ot.filter(o => o.id !== id);
+          if (typeof google !== 'undefined' && google.script && google.script.run) {
+            google.script.run.deleteOTRecord(id);
+          }
+          renderOTTable();
+        }
+      });
+    }
+
+    function renderFiscalSummaryTable() {
+      const tbody = $('#fiscalSummaryTbody').empty();
+      const search = $('#searchSummaryStaff').val().toLowerCase().trim();
+      const staffList = APP_STATE.staff.filter(s => {
+        return !search || s.name.toLowerCase().indexOf(search) !== -1 || formatPosLabel(s.position).toLowerCase().indexOf(search) !== -1 || s.homeClinic.toLowerCase().indexOf(search) !== -1;
+      });
+
+      staffList.forEach(s => {
+        const inTimeDays = 20;
+        const otCount = APP_STATE.ot.filter(o => o.staffName === s.name).length;
+        const leaveDays = APP_STATE.leaves.filter(l => l.staffName === s.name).reduce((sum, l) => sum + (Number(l.days) || 0), 0);
+        const netWorking = Math.max(0, inTimeDays - leaveDays) + otCount;
+
+        tbody.append(`
+          <tr>
+            <td class="text-start fw-bold">${s.name}</td>
+            <td>${formatPosLabel(s.position)}</td>
+            <td>${s.homeClinic}</td>
+            <td>${Math.max(0, inTimeDays - leaveDays)}</td>
+            <td class="fw-bold text-primary">${otCount}</td>
+            <td class="text-danger fw-bold">${leaveDays}</td>
+            <td class="fw-bold text-success">${netWorking}</td>
+          </tr>
+        `);
+      });
+    }
+
+    // --- Menu 3: Daily Census Logic ---
+    function renderCensus() {
+      const date = document.getElementById('censusDate').value;
+      const shift = document.getElementById('censusShift').value;
+
+      const filtered = APP_STATE.workloads.filter(w => {
+        return w.date === date && (shift === 'ALL' || w.shift === shift);
+      });
+
+      const tbody = $('#censusTableBody').empty();
+      if (filtered.length === 0) {
+        tbody.html('<tr><td colspan="16" class="text-center text-muted py-4">ไม่มีรายการภาระงานในวันที่และกะเวลาที่เลือก</td></tr>');
+        $('#censusTableFoot').empty();
+        return;
+      }
+
+      let tPt = 0, tAdult = 0, tChild = 0, tAdmit = 0;
+      let tHn = 0, tRn = 0, tPn = 0, tNa = 0, tClerk = 0, tService = 0;
+
+      filtered.forEach((w, idx) => {
+        const effTotal = getEffectiveTotalPt(w);
+        tPt += effTotal; tAdult += w.adultPt; tChild += w.childPt; tAdmit += w.admit;
+        tHn += w.hn; tRn += w.rn; tPn += w.pn; tNa += (w.na || 0);
+        tClerk += w.clerk; tService += w.serviceWorker;
+
+        const adminBtns = APP_STATE.isAdmin ? `
+          <button class="btn btn-sm btn-link text-primary p-0 me-1" onclick="openEditWorkloadModal('${w.id}')"><i class="fa-solid fa-pen"></i></button>
+          <button class="btn btn-sm btn-link text-danger p-0" onclick="deleteWorkload('${w.id}')"><i class="fa-solid fa-trash"></i></button>
+        ` : '-';
+
+        tbody.append(`
+          <tr>
+            <td>${idx + 1}</td>
+            <td class="text-start fw-bold">${w.clinic}</td>
+            <td class="text-muted">${w.shift}</td>
+            <td class="fw-bold text-primary">${effTotal}</td>
+            <td>${w.adultPt}</td>
+            <td>${w.childPt}</td>
+            <td class="fw-bold text-danger">${w.admit}</td>
+            <td>${w.hn}</td>
+            <td class="fw-bold text-primary">${w.rn}</td>
+            <td class="fw-bold text-info">${w.pn}</td>
+            <td class="fw-bold text-success">${w.na || 0}</td>
+            <td>${w.clerk}</td>
+            <td>${w.serviceWorker}</td>
+            <td class="text-start">${w.reporter}</td>
+            <td class="text-start text-muted">${w.note || '-'}</td>
+            <td class="no-print admin-col">${adminBtns}</td>
+          </tr>
+        `);
+      });
+
+      const totalNursing = (tRn + tPn + tNa).toFixed(1);
+      $('#censusTableFoot').html(`
+        <tr>
+          <td colspan="3" class="text-center">รวมทั้งสิ้น (${filtered.length} แผนก)</td>
+          <td>${tPt}</td>
+          <td>${tAdult}</td>
+          <td>${tChild}</td>
+          <td>${tAdmit}</td>
+          <td>${tHn.toFixed(1)}</td>
+          <td>${tRn.toFixed(1)}</td>
+          <td>${tPn.toFixed(1)}</td>
+          <td>${tNa.toFixed(1)}</td>
+          <td>${tClerk.toFixed(1)}</td>
+          <td>${tService.toFixed(1)}</td>
+          <td colspan="2" class="text-end">กำลังคนพยาบาลรวม (RN+PN+NA): ${totalNursing} แรง</td>
+          <td class="no-print admin-col"></td>
+        </tr>
+      `);
+      if (!APP_STATE.isAdmin) $('.admin-col').hide();
+    }
+
+    // --- Menu 4: Productivity & Skill Mix ---
+    function calculateMonthlyProductivity() {
+      const month = document.getElementById('prodMonth').value;
+      const shift = document.getElementById('prodShift').value;
+      const clinic = document.getElementById('prodClinic').value;
+      const excludeLasik = document.getElementById('excludeLasikCheck').checked;
+
+      $('#lasikStatusText').text(excludeLasik ? '(คัดศูนย์เลสิกออกแล้ว)' : '(รวมศูนย์เลสิกด้วย)');
+
+      const filtered = APP_STATE.workloads.filter(w => {
+        const matchMonth = w.date.indexOf(month) === 0;
+        const matchShift = shift === 'ALL' || w.shift === shift;
+        const matchClinic = clinic === 'ALL' || w.clinic === clinic;
+        const matchLasik = !(excludeLasik && clinic === 'ALL' && w.clinic === 'ศูนย์เลสิก');
+        return matchMonth && matchShift && matchClinic && matchLasik;
+      });
+
+      const dates = new Set(filtered.map(w => w.date));
+      const workingDays = dates.size > 0 ? dates.size : 1;
+
+      const totalPt = filtered.reduce((s, w) => s + getEffectiveTotalPt(w), 0);
+      const sumRN = filtered.reduce((s, w) => s + w.rn, 0);
+      const sumPN = filtered.reduce((s, w) => s + w.pn, 0);
+      const sumNA = filtered.reduce((s, w) => s + (w.na || 0), 0);
+      const nursingTotal = sumRN + sumPN + sumNA;
+
+      const avgPtPerDay = totalPt / workingDays;
+      const nhppd = Number($('#setNHPPD').val()) || 0.4;
+      const stdHr = Number($('#setStdHr').val()) || 7;
+      const annualHr = Number($('#setAnnualHr').val()) || 2080;
+      const workDaysConst = Number($('#setWorkDays').val()) || 245;
+
+      const ftc = (avgPtPerDay * nhppd) / stdHr;
+      const output = (ftc * annualHr) / (workDaysConst * 8);
+      const input = nursingTotal / workingDays;
+      const productivity = input > 0 ? (output / input) * 100 : 0;
+      const skillMix = nursingTotal > 0 ? (sumRN / nursingTotal) * 100 : 0;
+
+      $('#m_avgPt').text(avgPtPerDay.toFixed(1));
+      $('#m_totalPt').text(totalPt);
+      $('#m_workDays').text(workingDays);
+      $('#m_ftc').text(ftc.toFixed(2));
+      $('#m_output').text(output.toFixed(2));
+      $('#m_input').text(input.toFixed(2));
+      $('#m_productivity').text(productivity.toFixed(1) + '%');
+      $('#m_skillMix').text(skillMix.toFixed(1) + '%');
+
+      renderProductivityChart(filtered);
+    }
+
+    function renderProductivityChart(data) {
+      const ctx = document.getElementById('productivityChart').getContext('2d');
+      if (prodChartInstance) prodChartInstance.destroy();
+
+      const clinicMap = {};
+      data.forEach(w => {
+        if (!clinicMap[w.clinic]) clinicMap[w.clinic] = { pt: 0, staff: 0 };
+        clinicMap[w.clinic].pt += getEffectiveTotalPt(w);
+        clinicMap[w.clinic].staff += (w.rn + w.pn + (w.na || 0));
+      });
+
+      const labels = Object.keys(clinicMap);
+      const pts = labels.map(c => clinicMap[c].pt);
+      const staffs = labels.map(c => clinicMap[c].staff);
+
+      prodChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [
+            { label: 'จำนวนผู้ป่วยรวม', data: pts, backgroundColor: '#0284c7' },
+            { label: 'กำลังคน RN+PN+NA รวม', data: staffs, backgroundColor: '#10b981' }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'top' } }
+        }
+      });
+    }
+
+    // --- Menu 5: Admin Staff Master & Clinics & Settings ---
+    function renderClinicManagerLists() {
+      const inBox = $('#inTimeClinicsList').empty();
+      APP_STATE.inTimeClinics.forEach(c => {
+        const rm = APP_STATE.isAdmin ? `<button type="button" class="btn btn-sm btn-link text-danger p-0 ms-1" onclick="removeClinicName('in', '${c}')"><i class="fa-solid fa-xmark"></i></button>` : '';
+        inBox.append(`<span class="clinic-chip">${c}${rm}</span>`);
+      });
+
+      const outBox = $('#outTimeClinicsList').empty();
+      APP_STATE.outTimeClinics.forEach(c => {
+        const rm = APP_STATE.isAdmin ? `<button type="button" class="btn btn-sm btn-link text-danger p-0 ms-1" onclick="removeClinicName('out', '${c}')"><i class="fa-solid fa-xmark"></i></button>` : '';
+        outBox.append(`<span class="clinic-chip">${c}${rm}</span>`);
+      });
+    }
+
+    function addClinicName(type) {
+      if (!APP_STATE.isAdmin) {
+        Swal.fire('เฉพาะ Admin', 'กรุณาปลดล็อกสิทธิ์ Admin ก่อนแก้ไขรายชื่อคลินิก', 'warning');
+        return;
+      }
+      const inputId = type === 'in' ? '#newInTimeClinicInput' : '#newOutTimeClinicInput';
+      const name = $(inputId).val().trim();
+      if (!name) return;
+      const list = type === 'in' ? APP_STATE.inTimeClinics : APP_STATE.outTimeClinics;
+      if (!list.includes(name)) {
+        list.push(name);
+        $(inputId).val('');
+        persistSettingsToServer();
+        renderClinicManagerLists();
+        populateClinicDropdowns();
+      }
+    }
+
+    function removeClinicName(type, name) {
+      if (!APP_STATE.isAdmin) return;
+      if (type === 'in') {
+        APP_STATE.inTimeClinics = APP_STATE.inTimeClinics.filter(c => c !== name);
+      } else {
+        APP_STATE.outTimeClinics = APP_STATE.outTimeClinics.filter(c => c !== name);
+      }
+      persistSettingsToServer();
+      renderClinicManagerLists();
+      populateClinicDropdowns();
+    }
+
+    function openAddStaffModal() {
+      if (!APP_STATE.isAdmin) {
+        Swal.fire('เฉพาะ Admin', 'กรุณาปลดล็อกสิทธิ์ Admin ก่อนเพิ่มบุคลากร', 'warning');
+        return;
+      }
+      $('#newStaffName').val('');
+      new bootstrap.Modal(document.getElementById('addStaffModal')).show();
+    }
+
+    function saveNewStaff(e) {
+      e.preventDefault();
+      const name = $('#newStaffName').val().trim();
+      const position = $('#newStaffPosition').val();
+      const homeClinic = $('#newStaffClinic').val();
+      if (!name) return;
+
+      const staffObj = {
+        staffId: 'STF-' + Date.now(),
+        name,
+        position,
+        homeClinic,
+        status: 'Active'
+      };
+      APP_STATE.staff.push(staffObj);
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.addStaff(staffObj);
+      }
+      bootstrap.Modal.getInstance(document.getElementById('addStaffModal')).hide();
+      Swal.fire('สำเร็จ', 'เพิ่มเจ้าหน้าที่ ' + name + ' เรียบร้อย', 'success');
+      renderStaffMasterTable();
+      populateStaffSelects();
+    }
+
+    function renderStaffMasterTable() {
+      const search = $('#searchStaffMasterInput').val().toLowerCase().trim();
+      const clinic = $('#filterStaffClinicSelect').val();
+
+      const staffList = APP_STATE.staff.filter(s => {
+        const matchSearch = !search || s.name.toLowerCase().indexOf(search) !== -1 || formatPosLabel(s.position).toLowerCase().indexOf(search) !== -1 || s.homeClinic.toLowerCase().indexOf(search) !== -1;
+        const matchClinic = !clinic || clinic === 'ALL' || s.homeClinic === clinic;
+        return matchSearch && matchClinic;
+      });
+
+      $('#staffTotalCount').text(staffList.length);
+      const tbody = $('#staffMasterTbody').empty();
+
+      staffList.forEach(s => {
+        tbody.append(`
+          <tr>
+            <td class="fw-bold">${s.name}</td>
+            <td><span class="badge bg-secondary">${formatPosLabel(s.position)}</span></td>
+            <td>${s.homeClinic}</td>
+            <td><span class="badge bg-success">${s.status}</span></td>
+            <td class="text-center">
+              ${APP_STATE.isAdmin ? `
+                <button class="btn btn-sm btn-link text-danger p-0" onclick="deleteStaffMember('${s.staffId}')"><i class="fa-solid fa-trash"></i></button>
+              ` : '-'}
+            </td>
+          </tr>
+        `);
+      });
+    }
+
+    function deleteStaffMember(id) {
+      Swal.fire({
+        title: 'ยืนยันลบข้อมูลเจ้าหน้าที่นี้?',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'ลบ',
+        cancelButtonText: 'ยกเลิก'
+      }).then((res) => {
+        if (res.isConfirmed) {
+          APP_STATE.staff = APP_STATE.staff.filter(s => s.staffId !== id);
+          if (typeof google !== 'undefined' && google.script && google.script.run) {
+            google.script.run.deleteStaff(id);
+          }
+          renderStaffMasterTable();
+          populateStaffSelects();
+        }
+      });
+    }
+
+    function persistSettingsToServer() {
+      const settings = {
+        nhppd: $('#setNHPPD').val(),
+        stdHr: $('#setStdHr').val(),
+        annualHr: $('#setAnnualHr').val(),
+        workDays: $('#setWorkDays').val(),
+        adminEmails: $('#setAdminEmails').val(),
+        adminPin: APP_STATE.adminPin,
+        inTimeClinics: APP_STATE.inTimeClinics,
+        outTimeClinics: APP_STATE.outTimeClinics
+      };
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.saveSettings(settings);
+      }
+    }
+
+    function handleSaveSettings(e) {
+      e.preventDefault();
+      persistSettingsToServer();
+      calculateMonthlyProductivity();
+      Swal.fire('สำเร็จ', 'บันทึกและจำค่าการตั้งค่าระบบเรียบร้อย', 'success');
+    }
+  </script>
+</body>
+</html>

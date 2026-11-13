@@ -1,0 +1,6 @@
+{
+  "name": "PCMC OPD Workload & Productivity System",
+  "description": "ระบบบริหารจัดการภาระงานผู้ป่วย เวรนอกเวลา วันลา สรุป Productivity & Skill Mix และฐานข้อมูลบุคลากร OPD โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
