@@ -102,6 +102,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [newClinic, setNewClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
   const [newStatus, setNewStatus] = useState<StaffStatus>('Active');
   const [confirmDeleteStaffId, setConfirmDeleteStaffId] = useState<string | null>(null);
+  const [confirmResetAll, setConfirmResetAll] = useState<boolean>(false);
   const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
   const [inlineError, setInlineError] = useState<string>('');
 
@@ -1233,15 +1234,38 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center justify-between pt-2 border-t">
-            <button
-              type="button"
-              onClick={onResetData}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>รีเซ็ตกลับเป็นข้อมูลตัวอย่างตั้งต้น (Default Sample)</span>
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t">
+            {confirmResetAll ? (
+              <div className="inline-flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
+                <span className="text-xs font-semibold text-red-800">ยืนยันล้างข้อมูลทั้งหมด?</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onResetData();
+                    setConfirmResetAll(false);
+                  }}
+                  className="px-2.5 py-1 text-xs font-bold bg-red-600 hover:bg-red-700 text-white rounded-md cursor-pointer"
+                >
+                  ยืนยันล้างข้อมูล
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmResetAll(false)}
+                  className="px-2 py-1 text-xs font-semibold text-gray-600 hover:text-gray-900 cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmResetAll(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>ล้างข้อมูลทั้งหมดเพื่อเริ่มต้นใช้งานจริง (Reset Data)</span>
+              </button>
+            )}
 
             <button
               type="submit"

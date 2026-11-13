@@ -30,6 +30,12 @@ export interface AppDatabase {
 
 const STORAGE_KEY = 'pcmc_opd_system_db_v1';
 const STAFF_DIRTY_KEY = 'pcmc_staff_master_dirty_v1';
+const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
+
+const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
+const isDemoWorkloadId = (id?: string) => /^WL-\d{3}$/.test((id || '').trim());
+const isDemoLeaveId = (id?: string) => /^LV-\d{3}$/.test((id || '').trim());
+const isDemoOtId = (id?: string) => /^OT-\d{3}$/.test((id || '').trim());
 
 export const markStaffMasterDirty = (): void => {
   try {
@@ -60,12 +66,22 @@ export const loadLocalDatabase = (): AppDatabase => {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      const migratedStaff = (parsed.staff || INITIAL_STAFF_LIST).map((s: StaffMember) => ({
+      const needsDemoPurge = localStorage.getItem(DEMO_PURGED_KEY) !== 'true';
+
+      const rawStaff: StaffMember[] = parsed.staff || INITIAL_STAFF_LIST;
+      const migratedStaff = (needsDemoPurge
+        ? rawStaff.filter((s) => !isDemoStaffId(s.staffId))
+        : rawStaff
+      ).map((s: StaffMember) => ({
         ...s,
         position: (s.position === 'PCA' ? 'NA' : s.position) as StaffPosition,
       }));
 
-      const migratedWorkloads = (parsed.workloads || INITIAL_WORKLOADS).map((w: any) => {
+      const rawWorkloads: any[] = parsed.workloads || INITIAL_WORKLOADS;
+      const migratedWorkloads = (needsDemoPurge
+        ? rawWorkloads.filter((w) => !isDemoWorkloadId(w.id))
+        : rawWorkloads
+      ).map((w: any) => {
         const adult = Number(w.adultPt) || 0;
         const child = Number(w.childPt) || 0;
         const total = Math.max(Number(w.totalPt) || 0, adult + child);
@@ -76,12 +92,20 @@ export const loadLocalDatabase = (): AppDatabase => {
         };
       });
 
-      const migratedLeaves = (parsed.leaves || INITIAL_LEAVES).map((l: any) => ({
+      const rawLeaves: any[] = parsed.leaves || INITIAL_LEAVES;
+      const migratedLeaves = (needsDemoPurge
+        ? rawLeaves.filter((l) => !isDemoLeaveId(l.id))
+        : rawLeaves
+      ).map((l: any) => ({
         ...l,
         position: (l.position === 'PCA' ? 'NA' : l.position) as StaffPosition,
       }));
 
-      const migratedOt = (parsed.ot || INITIAL_OT).map((o: any) => ({
+      const rawOt: any[] = parsed.ot || INITIAL_OT;
+      const migratedOt = (needsDemoPurge
+        ? rawOt.filter((o) => !isDemoOtId(o.id))
+        : rawOt
+      ).map((o: any) => ({
         ...o,
         position: (o.position === 'PCA' ? 'NA' : o.position) as StaffPosition,
       }));
@@ -99,13 +123,22 @@ export const loadLocalDatabase = (): AppDatabase => {
             : INITIAL_SETTINGS.outTimeClinics,
       };
 
-      return {
+      const cleanDb: AppDatabase = {
         staff: migratedStaff,
         workloads: migratedWorkloads,
         leaves: migratedLeaves,
         ot: migratedOt,
         settings: mergedSettings,
       };
+
+      if (needsDemoPurge) {
+        localStorage.setItem(DEMO_PURGED_KEY, 'true');
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cleanDb));
+      }
+
+      return cleanDb;
+    } else {
+      localStorage.setItem(DEMO_PURGED_KEY, 'true');
     }
   } catch (err) {
     console.error('Error loading local DB:', err);

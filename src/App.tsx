@@ -533,12 +533,12 @@ export default function App() {
     showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
   };
 
-  // Handler: Reset to Initial Sample Data
+  // Handler: Reset to clean empty production data
   const handleResetData = () => {
-    if (window.confirm('ต้องการรีเซ็ตข้อมูลทั้งหมดกลับเป็นค่าเริ่มต้นของโรงพยาบาลชลประทานหรือไม่?')) {
-      localStorage.removeItem('pcmc_opd_system_db_v1');
-      window.location.reload();
-    }
+    localStorage.removeItem('pcmc_opd_system_db_v1');
+    markStaffMasterDirty();
+    setDb(loadLocalDatabase());
+    showToast('ล้างข้อมูลทั้งหมดเรียบร้อยแล้ว พร้อมเริ่มต้นใช้งานจริง', 'info');
   };
 
   return (
