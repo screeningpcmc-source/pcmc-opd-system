@@ -29,14 +29,16 @@ import {
   KeyRound,
   Eye,
   EyeOff,
-  Code2,
   LogOut,
   RefreshCw,
   CheckCircle2,
   Building2,
   Plus,
   Trash2,
-  Link2
+  Link2,
+  Share2,
+  Copy,
+  Unlink
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
@@ -50,13 +52,16 @@ interface AdminPanelTabProps {
   onLogin: () => void;
   onLogout: () => void;
   isLoggingIn: boolean;
-  onOpenGasModal: () => void;
   onAddStaff: (staff: StaffMember) => void;
+  onDeleteStaff: (staffId: string) => void;
   onUpdateStaffStatus: (staffId: string, status: StaffStatus) => void;
   onSaveSettings: (settings: SystemSettings) => void;
   onResetData: () => void;
   onSetupSpreadsheet: () => void;
+  onSyncSpreadsheet: () => void;
   isSettingUpSheet: boolean;
+  isSyncingSheet: boolean;
+  onCopyShareLink: () => void;
   onUnlockAdmin?: (pin: string) => boolean;
   onLockAdmin?: () => void;
 }
@@ -71,13 +76,16 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   onLogin,
   onLogout,
   isLoggingIn,
-  onOpenGasModal,
   onAddStaff,
+  onDeleteStaff,
   onUpdateStaffStatus,
   onSaveSettings,
   onResetData,
   onSetupSpreadsheet,
+  onSyncSpreadsheet,
   isSettingUpSheet,
+  isSyncingSheet,
+  onCopyShareLink,
   onUnlockAdmin,
   onLockAdmin,
 }) => {
@@ -93,6 +101,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [newPosition, setNewPosition] = useState<StaffPosition>('RN');
   const [newClinic, setNewClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
   const [newStatus, setNewStatus] = useState<StaffStatus>('Active');
+  const [confirmDeleteStaffId, setConfirmDeleteStaffId] = useState<string | null>(null);
+  const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
+  const [inlineError, setInlineError] = useState<string>('');
 
   // Clinic Management state
   const [newInClinicName, setNewInClinicName] = useState<string>('');
@@ -196,9 +207,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const handleAddStaffSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) {
-      alert('กรุณาระบุชื่อ-นามสกุลเจ้าหน้าที่');
+      setInlineError('กรุณาระบุชื่อ-นามสกุลเจ้าหน้าที่');
       return;
     }
+    setInlineError('');
 
     const staff: StaffMember = {
       staffId: `STF-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -210,6 +222,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
     onAddStaff(staff);
     setNewName('');
+    setNewStatus('Active');
     setShowAddForm(false);
   };
 
@@ -219,9 +232,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     const trimmed = newInClinicName.trim();
     if (!trimmed) return;
     if (inTimeClinics.includes(trimmed)) {
-      alert(`แผนก "${trimmed}" มีอยู่ในรายการในเวลาแล้ว`);
+      setInlineError(`แผนก "${trimmed}" มีอยู่ในรายการในเวลาแล้ว`);
       return;
     }
+    setInlineError('');
     onSaveSettings({
       ...settings,
       inTimeClinics: [...inTimeClinics, trimmed],
@@ -232,9 +246,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleRemoveInTimeClinic = (clinicName: string) => {
     if (inTimeClinics.length <= 1) {
-      alert('ต้องมีแผนกตรวจในเวลาอย่างน้อย 1 แผนก');
+      setInlineError('ต้องมีแผนกตรวจในเวลาอย่างน้อย 1 แผนก');
       return;
     }
+    setInlineError('');
     onSaveSettings({
       ...settings,
       inTimeClinics: inTimeClinics.filter(c => c !== clinicName),
@@ -247,9 +262,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     const trimmed = newOutClinicName.trim();
     if (!trimmed) return;
     if (outTimeClinics.includes(trimmed)) {
-      alert(`แผนก "${trimmed}" มีอยู่ในรายการนอกเวลาแล้ว`);
+      setInlineError(`แผนก "${trimmed}" มีอยู่ในรายการนอกเวลาแล้ว`);
       return;
     }
+    setInlineError('');
     onSaveSettings({
       ...settings,
       inTimeClinics,
@@ -260,9 +276,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleRemoveOutTimeClinic = (clinicName: string) => {
     if (outTimeClinics.length <= 1) {
-      alert('ต้องมีแผนกตรวจนอกเวลาอย่างน้อย 1 แผนก');
+      setInlineError('ต้องมีแผนกตรวจนอกเวลาอย่างน้อย 1 แผนก');
       return;
     }
+    setInlineError('');
     onSaveSettings({
       ...settings,
       inTimeClinics,
@@ -271,13 +288,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   };
 
   const handleRestoreDefaultClinics = () => {
-    if (window.confirm('ต้องการคืนค่ารายชื่อแผนกตรวจในเวลาและนอกเวลากลับเป็นค่าเริ่มต้นทั้งหมดหรือไม่?')) {
-      onSaveSettings({
-        ...settings,
-        inTimeClinics: [...IN_TIME_CLINICS],
-        outTimeClinics: [...OUT_TIME_CLINICS],
-      });
-    }
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      inTimeClinics: [...IN_TIME_CLINICS],
+      outTimeClinics: [...OUT_TIME_CLINICS],
+    });
   };
 
   // Save custom spreadsheet link/ID
@@ -303,6 +319,29 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       spreadsheetUrl: normalizedUrl,
     });
   };
+
+  const handleUnlinkSheet = () => {
+    setCustomSheetUrl('');
+    onSaveSettings({
+      ...settings,
+      spreadsheetId: undefined,
+      spreadsheetUrl: undefined,
+    });
+  };
+
+  const handleCopyLinkClick = () => {
+    onCopyShareLink();
+    setCopiedShareLink(true);
+    setTimeout(() => setCopiedShareLink(false), 2500);
+  };
+
+  const shareableOpdUrl = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    const base = `${window.location.origin}${window.location.pathname}`;
+    return settings.spreadsheetId
+      ? `${base}?sheetId=${encodeURIComponent(settings.spreadsheetId)}`
+      : base;
+  }, [settings.spreadsheetId]);
 
   // Handle Save Settings
   const handleSaveSettingsSubmit = (e: React.FormEvent) => {
@@ -459,38 +498,27 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         </div>
       </div>
 
-      {/* SECTION 1: Google Workspace, Google Sheets (5 ชีท) & Apps Script (Moved from Navbar) */}
+      {/* SECTION 1: Google Workspace, Google Sheets (5 ชีท) & Share Link */}
       <div className="bg-gradient-to-r from-emerald-900 via-teal-900 to-cyan-900 text-white rounded-2xl p-5 shadow-md space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1">
             <h3 className="text-sm font-bold flex items-center gap-2 text-emerald-200">
               <FileSpreadsheet className="w-5 h-5 text-emerald-300" />
-              <span>การเชื่อมต่อ Google Workspace, Google Drive (5 ชีท) และโค้ด Apps Script</span>
+              <span>การเชื่อมต่อ Google Sheets (5 ชีท) และแชร์ลิงก์ให้บุคลากร OPD</span>
             </h3>
             <p className="text-xs text-emerald-100/80">
-              {settings.spreadsheetUrl
-                ? `บันทึกการเชื่อมโยงฐานข้อมูลเรียบร้อยแล้ว (จำค่าถาวร): ${settings.spreadsheetId}`
-                : 'ลงชื่อเข้าใช้ Google เพื่อสร้างฐานข้อมูล 5 ชีทใน Google Drive หรือเปิดคัดลอกโค้ด Apps Script'}
+              {settings.spreadsheetId
+                ? `เชื่อมโยงฐานข้อมูลเรียบร้อยแล้ว (จำค่าถาวร): ${settings.spreadsheetId}`
+                : 'ลงชื่อเข้าใช้ Google เพื่อสร้างฐานข้อมูล 5 ชีทใหม่ หรือวางลิงก์ / ID Google Sheets ที่มีอยู่แล้วด้านล่าง'}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* 1. Apps Script Button */}
-            <button
-              type="button"
-              onClick={onOpenGasModal}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-white/10 hover:bg-white/20 text-white border border-white/25 rounded-xl transition-colors cursor-pointer"
-              title="ดูและดาวน์โหลดโค้ด Google Apps Script (Code.gs และ Index.html)"
-            >
-              <Code2 className="w-4 h-4 text-amber-300" />
-              <span>โค้ด Apps Script</span>
-            </button>
-
-            {/* 2. Create 5 Sheets / Open Sheet Button */}
-            {settings.spreadsheetUrl ? (
-              <div className="flex items-center gap-2">
+            {/* 1. When Sheet Link/ID already exists -> Open Sheet + Sync (NO Create New!) */}
+            {settings.spreadsheetId || settings.spreadsheetUrl ? (
+              <div className="flex flex-wrap items-center gap-2">
                 <a
-                  href={settings.spreadsheetUrl}
+                  href={settings.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${settings.spreadsheetId}/edit`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-emerald-500/25 hover:bg-emerald-500/35 text-emerald-100 border border-emerald-400/50 rounded-xl transition-colors"
@@ -500,12 +528,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 </a>
                 <button
                   type="button"
-                  onClick={onSetupSpreadsheet}
-                  disabled={isSettingUpSheet}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white border border-teal-400/40 rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+                  onClick={onSyncSpreadsheet}
+                  disabled={isSyncingSheet}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white border border-teal-400/40 rounded-xl shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                  title="ซิงค์ข้อมูลไป-กลับระหว่างหน้าเว็บกับ Google Sheet ปัจจุบัน (ไม่สร้างไฟล์ใหม่)"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSettingUpSheet ? 'animate-spin' : ''}`} />
-                  <span>{isSettingUpSheet ? 'กำลังสร้าง...' : 'สร้างใหม่ / ซิงค์ซ้ำ'}</span>
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
+                  <span>{isSyncingSheet ? 'กำลังซิงค์ข้อมูล...' : 'ซิงค์ข้อมูลกับ Google Sheet'}</span>
                 </button>
               </div>
             ) : (
@@ -529,7 +558,22 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               </button>
             )}
 
-            {/* 3. Google Sign-In / Account Status */}
+            {/* 2. Copy Share Link for OPD Staff */}
+            <button
+              type="button"
+              onClick={handleCopyLinkClick}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border transition-all cursor-pointer ${
+                copiedShareLink
+                  ? 'bg-emerald-500 text-emerald-950 border-emerald-300 shadow-sm'
+                  : 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-100 border-cyan-300/40'
+              }`}
+              title="คัดลอกลิงก์หน้าเว็บ (พร้อมผูก ID ชีทให้อัตโนมัติ) ส่งให้บุคลากร OPD ใช้งาน"
+            >
+              {copiedShareLink ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4 text-cyan-300" />}
+              <span>{copiedShareLink ? 'คัดลอกลิงก์แล้ว!' : 'คัดลอกลิงก์แชร์ให้ OPD'}</span>
+            </button>
+
+            {/* 3. Google Sign-In / Account Status (persisted across reloads) */}
             {user ? (
               <div className="flex items-center gap-2 bg-black/25 backdrop-blur px-3 py-1.5 rounded-xl border border-white/15">
                 <div className="text-right">
@@ -581,28 +625,72 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </div>
         </div>
 
-        {/* Remember Existing Spreadsheet URL/ID */}
-        <div className="bg-black/20 rounded-xl p-3 border border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-          <div className="flex items-center gap-1.5 text-xs text-emerald-200 font-semibold shrink-0">
-            <Link2 className="w-4 h-4" />
-            <span>ลิงก์ / ID Google Sheets ที่ต้องการจำค่า:</span>
+        {/* Remember Existing Spreadsheet URL/ID & Share Link Preview */}
+        <div className="bg-black/20 rounded-xl p-3 border border-white/10 space-y-2.5">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs text-emerald-200 font-semibold shrink-0">
+              <Link2 className="w-4 h-4" />
+              <span>ลิงก์ / ID Google Sheets ที่ต้องการจำค่า:</span>
+            </div>
+            <input
+              type="text"
+              value={customSheetUrl}
+              onChange={(e) => setCustomSheetUrl(e.target.value)}
+              placeholder="วาง URL หรือ Spreadsheet ID ที่มีอยู่เพื่อบันทึกลิงก์ถาวร..."
+              className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
+            />
+            <button
+              type="button"
+              onClick={handleSaveSheetLink}
+              className="px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              จำค่าลิงก์ชีท
+            </button>
+            {(settings.spreadsheetId || settings.spreadsheetUrl) && (
+              <button
+                type="button"
+                onClick={handleUnlinkSheet}
+                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white/10 hover:bg-red-500/30 text-red-100 border border-white/15 rounded-lg transition-colors cursor-pointer shrink-0"
+                title="ล้างลิงก์ที่จำไว้ออก"
+              >
+                <Unlink className="w-3.5 h-3.5" />
+                <span>ยกเลิกเชื่อมโยง</span>
+              </button>
+            )}
           </div>
-          <input
-            type="text"
-            value={customSheetUrl}
-            onChange={(e) => setCustomSheetUrl(e.target.value)}
-            placeholder="วาง URL หรือ Spreadsheet ID ที่มีอยู่เพื่อบันทึกลิงก์ถาวร..."
-            className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
-          />
-          <button
-            type="button"
-            onClick={handleSaveSheetLink}
-            className="px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer shrink-0"
-          >
-            จำค่าลิงก์ชีท
-          </button>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-emerald-100/85">
+            <div className="truncate">
+              <span className="font-semibold text-cyan-200">ลิงก์สำหรับแชร์บุคลากร OPD: </span>
+              <span className="font-mono text-white/90 select-all">{shareableOpdUrl}</span>
+            </div>
+            <button
+              type="button"
+              onClick={handleCopyLinkClick}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-md font-semibold transition-colors cursor-pointer shrink-0 self-start sm:self-auto"
+            >
+              <Copy className="w-3 h-3" />
+              <span>{copiedShareLink ? 'คัดลอกแล้ว' : 'คัดลอกลิงก์'}</span>
+            </button>
+          </div>
         </div>
       </div>
+
+      {inlineError && (
+        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{inlineError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setInlineError('')}
+            className="text-red-500 hover:text-red-800 font-bold cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Staff Master Statistics Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
@@ -783,7 +871,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 <th className="py-2.5 px-2">ตำแหน่งวิชาชีพ</th>
                 <th className="py-2.5 px-3">ห้องตรวจสังกัด</th>
                 <th className="py-2.5 px-2 text-center">สถานะ</th>
-                <th className="py-2.5 px-3 text-center">เปลี่ยนสถานะ</th>
+                <th className="py-2.5 px-3 text-center">เปลี่ยนสถานะ / ลบรายชื่อ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -820,40 +908,74 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                       </span>
                     </td>
                     <td className="py-2 px-3 text-center">
-                      <div className="inline-flex rounded-md shadow-2xs" role="group">
-                        <button
-                          type="button"
-                          onClick={() => onUpdateStaffStatus(staff.staffId, 'Active')}
-                          className={`px-2 py-1 text-[10px] font-semibold rounded-l-md border cursor-pointer ${
-                            staff.status === 'Active' 
-                              ? 'bg-emerald-600 text-white border-emerald-600' 
-                              : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
-                          }`}
-                        >
-                          Active
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onUpdateStaffStatus(staff.staffId, 'Resigned')}
-                          className={`px-2 py-1 text-[10px] font-semibold border-t border-b cursor-pointer ${
-                            staff.status === 'Resigned' 
-                              ? 'bg-amber-600 text-white border-amber-600' 
-                              : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
-                          }`}
-                        >
-                          Resigned
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onUpdateStaffStatus(staff.staffId, 'Retired')}
-                          className={`px-2 py-1 text-[10px] font-semibold rounded-r-md border cursor-pointer ${
-                            staff.status === 'Retired' 
-                              ? 'bg-gray-700 text-white border-gray-700' 
-                              : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
-                          }`}
-                        >
-                          Retired
-                        </button>
+                      <div className="inline-flex items-center justify-center gap-2 flex-wrap">
+                        <div className="inline-flex rounded-md shadow-2xs" role="group">
+                          <button
+                            type="button"
+                            onClick={() => onUpdateStaffStatus(staff.staffId, 'Active')}
+                            className={`px-2 py-1 text-[10px] font-semibold rounded-l-md border cursor-pointer ${
+                              staff.status === 'Active' 
+                                ? 'bg-emerald-600 text-white border-emerald-600' 
+                                : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
+                            }`}
+                          >
+                            Active
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateStaffStatus(staff.staffId, 'Resigned')}
+                            className={`px-2 py-1 text-[10px] font-semibold border-t border-b cursor-pointer ${
+                              staff.status === 'Resigned' 
+                                ? 'bg-amber-600 text-white border-amber-600' 
+                                : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
+                            }`}
+                          >
+                            Resigned
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateStaffStatus(staff.staffId, 'Retired')}
+                            className={`px-2 py-1 text-[10px] font-semibold rounded-r-md border cursor-pointer ${
+                              staff.status === 'Retired' 
+                                ? 'bg-gray-700 text-white border-gray-700' 
+                                : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-300'
+                            }`}
+                          >
+                            Retired
+                          </button>
+                        </div>
+
+                        {confirmDeleteStaffId === staff.staffId ? (
+                          <div className="inline-flex items-center gap-1 bg-red-50 border border-red-200 rounded-md px-1.5 py-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onDeleteStaff(staff.staffId);
+                                setConfirmDeleteStaffId(null);
+                              }}
+                              className="px-2 py-0.5 text-[10px] font-bold bg-red-600 hover:bg-red-700 text-white rounded cursor-pointer"
+                            >
+                              ยืนยันลบ
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteStaffId(null)}
+                              className="px-1.5 py-0.5 text-[10px] font-semibold text-gray-600 hover:text-gray-900 cursor-pointer"
+                            >
+                              ยกเลิก
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteStaffId(staff.staffId)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold text-red-600 hover:text-white bg-red-50 hover:bg-red-600 border border-red-200 hover:border-red-600 rounded-md transition-colors cursor-pointer"
+                            title={`ลบบุคลากร ${staff.name}`}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>ลบ</span>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

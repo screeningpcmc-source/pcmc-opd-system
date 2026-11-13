@@ -21,6 +21,9 @@ import {
   loadLocalDatabase, 
   saveLocalDatabase, 
   createGoogleSpreadsheet,
+  syncAllWithGoogleSheet,
+  syncStaffMasterToSheet,
+  markStaffMasterDirty,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
   appendOTToSheet
@@ -38,7 +41,6 @@ import { LeaveAndOTTab } from './components/LeaveAndOTTab';
 import { DailyCensusTab } from './components/DailyCensusTab';
 import { ProductivityTab } from './components/ProductivityTab';
 import { AdminPanelTab } from './components/AdminPanelTab';
-import { GasExportModal } from './components/GasExportModal';
 import { 
   ClipboardPen, 
   CalendarClock, 
@@ -59,9 +61,9 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [isSettingUpSheet, setIsSettingUpSheet] = useState<boolean>(false);
+  const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
 
-  // Modals & Toast State
-  const [isGasModalOpen, setIsGasModalOpen] = useState<boolean>(false);
+  // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
 
   // Auto-save local database whenever db changes
@@ -69,7 +71,36 @@ export default function App() {
     saveLocalDatabase(db);
   }, [db]);
 
-  // Initialize Firebase Auth listener
+  // Read ?sheetId= from shared URL so OPD staff inherit the linked Google Sheet automatically
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const sharedSheetParam = params.get('sheetId')?.trim();
+      if (sharedSheetParam) {
+        const idMatch = sharedSheetParam.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+        const extractedId = idMatch ? idMatch[1] : sharedSheetParam;
+        if (extractedId && extractedId !== db.settings.spreadsheetId) {
+          setDb(prev => ({
+            ...prev,
+            settings: {
+              ...prev.settings,
+              spreadsheetId: extractedId,
+              spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${extractedId}/edit`,
+            },
+          }));
+          setToastMessage({
+            text: `เชื่อมโยงลิงก์ Google Sheets จากทีม OPD เรียบร้อยแล้ว (${extractedId.slice(0, 12)}...)`,
+            type: 'info',
+          });
+        }
+      }
+    } catch {
+      // Safe fallback
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Initialize Firebase Auth listener (persists user across reloads)
   useEffect(() => {
     const unsubscribe = initAuth(
       (currentUser) => {
@@ -166,31 +197,68 @@ export default function App() {
     ? db.settings.outTimeClinics
     : [...OUT_TIME_CLINICS];
 
-  // Setup Google Spreadsheet (Creates 5 sheets in Google Drive via Sheets API)
-  const handleSetupSpreadsheet = async () => {
+  // Ensure we have a valid Google OAuth token (triggers Google Sign-In cleanly if missing/expired)
+  const ensureGoogleToken = async (): Promise<string | null> => {
     let token = await getAccessToken();
     if (!token) {
-      // Prompt user to sign in
-      const confirmLogin = window.confirm(
-        'การสร้าง Google Spreadsheet ต้องเชื่อมต่อสิทธิ์กับ Google บัญชีของคุณ\nต้องการเข้าสู่ระบบ Google ทันทีหรือไม่?'
-      );
-      if (!confirmLogin) return;
-
       try {
         const loginRes = await googleSignIn();
-        if (!loginRes) return;
+        if (!loginRes) return null;
         token = loginRes.accessToken;
         setUser(loginRes.user);
-      } catch (e: any) {
-        showToast('การเข้าสู่ระบบถูกยกเลิก', 'error');
-        return;
+      } catch (err: any) {
+        showToast(`เข้าสู่ระบบไม่สำเร็จ: ${err?.message || err}`, 'error');
+        return null;
       }
     }
+    return token;
+  };
 
-    if (!token) {
-      showToast('ไม่พบคีย์การเข้าถึง Google', 'error');
+  // Sync data 2-way with an existing linked Google Spreadsheet (never creates duplicates)
+  const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
+    const targetSheetId = (overrideSheetId || db.settings.spreadsheetId || '').trim();
+    if (!targetSheetId) {
+      showToast('ยังไม่มีลิงก์/ID Google Sheets กรุณาวางลิงก์ชีทหรือกดสร้าง 5 ชีทใหม่ก่อน', 'error');
       return;
     }
+
+    const token = await ensureGoogleToken();
+    if (!token) return;
+
+    setIsSyncingSheet(true);
+    try {
+      const result = await syncAllWithGoogleSheet(token, targetSheetId, db);
+      setDb({
+        ...result.mergedDb,
+        settings: {
+          ...result.mergedDb.settings,
+          spreadsheetId: targetSheetId,
+          spreadsheetUrl:
+            result.mergedDb.settings.spreadsheetUrl ||
+            `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+        },
+      });
+      showToast(
+        `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
+        'success'
+      );
+    } catch (err: any) {
+      console.error('Sync spreadsheet error:', err);
+      showToast(`ซิงค์ข้อมูลไม่สำเร็จ: ${err?.message || err}`, 'error');
+    } finally {
+      setIsSyncingSheet(false);
+    }
+  };
+
+  // Setup Google Spreadsheet (Creates 5 sheets ONLY when no Sheet link/ID is configured yet)
+  const handleSetupSpreadsheet = async () => {
+    if (db.settings.spreadsheetId) {
+      await handleSyncSpreadsheet(db.settings.spreadsheetId);
+      return;
+    }
+
+    const token = await ensureGoogleToken();
+    if (!token) return;
 
     setIsSettingUpSheet(true);
     try {
@@ -215,6 +283,34 @@ export default function App() {
       showToast(`เกิดข้อผิดพลาดในการสร้างชีท: ${err.message || err}`, 'error');
     } finally {
       setIsSettingUpSheet(false);
+    }
+  };
+
+  // Copy shareable OPD link (includes ?sheetId=... if linked)
+  const handleCopyShareLink = async () => {
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    const shareUrl = db.settings.spreadsheetId
+      ? `${baseUrl}?sheetId=${encodeURIComponent(db.settings.spreadsheetId)}`
+      : baseUrl;
+
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      showToast(
+        db.settings.spreadsheetId
+          ? 'คัดลอกลิงก์พร้อมรหัส Google Sheet สำหรับส่งให้บุคลากร OPD แล้ว!'
+          : 'คัดลอกลิงก์หน้าเว็บสำหรับแชร์ให้บุคลากร OPD แล้ว!',
+        'success'
+      );
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = shareUrl;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      showToast('คัดลอกลิงก์สำหรับแชร์ให้บุคลากร OPD เรียบร้อยแล้ว!', 'success');
     }
   };
 
@@ -382,21 +478,52 @@ export default function App() {
   };
 
   // Handler: Add Staff Member
-  const handleAddStaff = (staff: StaffMember) => {
+  const handleAddStaff = async (staff: StaffMember) => {
+    const nextStaff = [...db.staff, staff];
+    markStaffMasterDirty();
     setDb(prev => ({
       ...prev,
-      staff: [...prev.staff, staff],
+      staff: nextStaff,
     }));
     showToast(`เพิ่มเจ้าหน้าที่ ${staff.name} เข้าสู่ระบบแล้ว`, 'success');
+
+    const token = await getAccessToken();
+    if (token && db.settings.spreadsheetId) {
+      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+    }
+  };
+
+  // Handler: Delete Staff Member
+  const handleDeleteStaff = async (staffId: string) => {
+    const target = db.staff.find(s => s.staffId === staffId);
+    const nextStaff = db.staff.filter(s => s.staffId !== staffId);
+    markStaffMasterDirty();
+    setDb(prev => ({
+      ...prev,
+      staff: nextStaff,
+    }));
+    showToast(`ลบบุคลากร ${target?.name || ''} ออกจากระบบแล้ว`, 'info');
+
+    const token = await getAccessToken();
+    if (token && db.settings.spreadsheetId) {
+      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+    }
   };
 
   // Handler: Update Staff Status (Active / Resigned / Retired)
-  const handleUpdateStaffStatus = (staffId: string, status: StaffStatus) => {
+  const handleUpdateStaffStatus = async (staffId: string, status: StaffStatus) => {
+    const nextStaff = db.staff.map(s => s.staffId === staffId ? { ...s, status } : s);
+    markStaffMasterDirty();
     setDb(prev => ({
       ...prev,
-      staff: prev.staff.map(s => s.staffId === staffId ? { ...s, status } : s),
+      staff: nextStaff,
     }));
     showToast(`อัปเดตสถานะเป็น ${status} สำเร็จ`, 'info');
+
+    const token = await getAccessToken();
+    if (token && db.settings.spreadsheetId) {
+      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+    }
   };
 
   // Handler: Save Settings
@@ -405,7 +532,7 @@ export default function App() {
       ...prev,
       settings,
     }));
-    showToast('บันทึกการตั้งค่าสูตรเรียบร้อยแล้ว', 'success');
+    showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
   };
 
   // Handler: Reset to Initial Sample Data
@@ -583,13 +710,16 @@ export default function App() {
             onLogin={handleLogin}
             onLogout={handleLogout}
             isLoggingIn={isLoggingIn}
-            onOpenGasModal={() => setIsGasModalOpen(true)}
             onAddStaff={handleAddStaff}
+            onDeleteStaff={handleDeleteStaff}
             onUpdateStaffStatus={handleUpdateStaffStatus}
             onSaveSettings={handleSaveSettings}
             onResetData={handleResetData}
             onSetupSpreadsheet={handleSetupSpreadsheet}
+            onSyncSpreadsheet={() => handleSyncSpreadsheet()}
             isSettingUpSheet={isSettingUpSheet}
+            isSyncingSheet={isSyncingSheet}
+            onCopyShareLink={handleCopyShareLink}
             onUnlockAdmin={handleUnlockAdmin}
             onLockAdmin={handleLockAdmin}
           />
@@ -603,16 +733,10 @@ export default function App() {
             © 2026 โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน (PCMC) • กลุ่มงานการพยาบาลผู้ป่วยนอก
           </div>
           <div className="text-[11px] text-gray-400">
-            ระบบบริหารจัดการภาระงานและ Productivity OPD • รองรับ Google Sheets & Apps Script
+            ระบบบริหารจัดการภาระงานและ Productivity OPD • เชื่อมต่อ Google Sheets
           </div>
         </div>
       </footer>
-
-      {/* GAS Code Modal */}
-      <GasExportModal
-        isOpen={isGasModalOpen}
-        onClose={() => setIsGasModalOpen(false)}
-      />
     </div>
   );
 }

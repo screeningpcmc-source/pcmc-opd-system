@@ -5,6 +5,8 @@ import {
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut,
+  setPersistence,
+  browserLocalPersistence,
   User,
   Auth
 } from 'firebase/auth';
@@ -22,21 +24,74 @@ export const isFirebaseConfigured = Boolean(
   firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId
 );
 
+const TOKEN_STORAGE_KEY = 'pcmc_google_oauth_token';
+const TOKEN_EXP_STORAGE_KEY = 'pcmc_google_oauth_token_exp';
+// Google OAuth access tokens typically last 60 minutes; cache for 50 minutes cleanly.
+const TOKEN_TTL_MS = 50 * 60 * 1000;
+
 let app: FirebaseApp | null = null;
 export let auth: Auth | null = null;
 
 if (isFirebaseConfigured) {
   app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   auth = getAuth(app);
+  setPersistence(auth, browserLocalPersistence).catch((err) => {
+    console.warn('Could not enforce browserLocalPersistence:', err);
+  });
 }
 
 const provider = new GoogleAuthProvider();
 provider.addScope('https://www.googleapis.com/auth/spreadsheets');
 provider.addScope('https://www.googleapis.com/auth/drive.file');
 provider.addScope('https://www.googleapis.com/auth/forms.body');
+provider.setCustomParameters({ prompt: 'select_account' });
 
-let isSigningIn = false;
 let cachedAccessToken: string | null = null;
+
+function saveAccessTokenToStorage(token: string) {
+  cachedAccessToken = token;
+  try {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(TOKEN_EXP_STORAGE_KEY, String(Date.now() + TOKEN_TTL_MS));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadValidAccessTokenFromStorage(): string | null {
+  if (cachedAccessToken) {
+    try {
+      const exp = Number(localStorage.getItem(TOKEN_EXP_STORAGE_KEY) || 0);
+      if (exp === 0 || Date.now() < exp) {
+        return cachedAccessToken;
+      }
+    } catch {
+      return cachedAccessToken;
+    }
+  }
+
+  try {
+    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+    const exp = Number(localStorage.getItem(TOKEN_EXP_STORAGE_KEY) || 0);
+    if (token && exp > Date.now()) {
+      cachedAccessToken = token;
+      return token;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return null;
+}
+
+function clearAccessTokenFromStorage() {
+  cachedAccessToken = null;
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(TOKEN_EXP_STORAGE_KEY);
+  } catch {
+    // Ignore storage removal errors
+  }
+}
 
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -49,14 +104,10 @@ export const initAuth = (
 
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
-      }
+      const token = loadValidAccessTokenFromStorage() || '';
+      if (onAuthSuccess) onAuthSuccess(user, token);
     } else {
-      cachedAccessToken = null;
+      clearAccessTokenFromStorage();
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -70,15 +121,15 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
   }
 
   try {
-    isSigningIn = true;
+    await setPersistence(auth, browserLocalPersistence);
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
       throw new Error('ไม่ได้รับ Access Token จาก Google Auth');
     }
 
-    cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
+    saveAccessTokenToStorage(credential.accessToken);
+    return { user: result.user, accessToken: credential.accessToken };
   } catch (error: unknown) {
     console.error('Sign in error:', error);
     const errCode = (error as { code?: string })?.code || '';
@@ -97,18 +148,16 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
       throw new Error('ยังไม่ได้เปิดใช้งาน Google Provider ใน Firebase Console -> Authentication -> Sign-in method');
     }
     throw error;
-  } finally {
-    isSigningIn = false;
   }
 };
 
 export const getAccessToken = async (): Promise<string | null> => {
-  return cachedAccessToken;
+  return loadValidAccessTokenFromStorage();
 };
 
 export const logout = async () => {
   if (auth) {
     await signOut(auth);
   }
-  cachedAccessToken = null;
+  clearAccessTokenFromStorage();
 };
