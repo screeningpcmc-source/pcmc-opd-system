@@ -2,18 +2,21 @@ import React from 'react';
 import { 
   Building2, 
   CheckCircle2,
-  ShieldCheck
+  ShieldCheck,
+  Lock
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 
 interface NavbarProps {
   user: User | null;
   isAdmin: boolean;
+  onLockAdmin?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   user,
   isAdmin,
+  onLockAdmin,
 }) => {
   return (
     <header className="bg-gradient-to-r from-emerald-800 via-teal-800 to-cyan-900 text-white shadow-lg sticky top-0 z-50">
@@ -38,13 +41,24 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Clean Status Indicators (Auth/Sheets/GAS moved to Menu 5) */}
+        {/* Clean Status Indicators */}
         <div className="flex flex-wrap items-center gap-2">
           {isAdmin && (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold bg-emerald-500/25 text-emerald-100 border border-emerald-400/40 rounded-lg">
+            <div className="inline-flex items-center gap-1.5 bg-emerald-500/25 text-emerald-100 border border-emerald-400/40 rounded-lg px-2.5 py-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
-              <span>โหมด Admin</span>
-            </span>
+              <span className="text-xs font-semibold">โหมด Admin</span>
+              {onLockAdmin && (
+                <button
+                  type="button"
+                  onClick={onLockAdmin}
+                  className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-red-600/90 hover:bg-red-500 text-white rounded-md transition-colors cursor-pointer"
+                  title="ออกจากระบบ Admin (ล็อกสิทธิ์)"
+                >
+                  <Lock className="w-3 h-3" />
+                  <span>ล็อกสิทธิ์</span>
+                </button>
+              )}
+            </div>
           )}
           {user && (
             <div className="flex items-center gap-2 bg-black/20 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10">

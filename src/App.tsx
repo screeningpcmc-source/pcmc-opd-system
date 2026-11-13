@@ -71,12 +71,15 @@ export default function App() {
     saveLocalDatabase(db);
   }, [db]);
 
-  // Read ?sheetId= from shared URL so OPD staff inherit the linked Google Sheet automatically
+  // Clear any legacy admin unlock state on load and handle ?sheetId= from shared URL
   useEffect(() => {
     try {
+      sessionStorage.removeItem('pcmc_admin_pin_unlocked');
+      localStorage.removeItem('pcmc_admin_pin_unlocked');
       const params = new URLSearchParams(window.location.search);
       const sharedSheetParam = params.get('sheetId')?.trim();
       if (sharedSheetParam) {
+        setIsAdminUnlocked(false);
         const idMatch = sharedSheetParam.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
         const extractedId = idMatch ? idMatch[1] : sharedSheetParam;
         if (extractedId && extractedId !== db.settings.spreadsheetId) {
@@ -150,26 +153,25 @@ export default function App() {
     }
   };
 
-  // Logout Handler
+  // Logout Handler (Google Sign-Out also locks Admin mode)
   const handleLogout = async () => {
     try {
       await logout();
       setUser(null);
+      setIsAdminUnlocked(false);
+      sessionStorage.removeItem('pcmc_admin_pin_unlocked');
       showToast('ออกจากระบบเรียบร้อยแล้ว', 'info');
     } catch (err) {
       console.error('Logout error:', err);
     }
   };
 
-  // Admin PIN Unlock State
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
-    return sessionStorage.getItem('pcmc_admin_pin_unlocked') === 'true';
-  });
+  // Admin PIN Unlock State (NEVER persisted across page reloads or shared links)
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
 
   const handleUnlockAdmin = (pin: string) => {
     if (verifyAdminPin(pin, db.settings.adminPin)) {
       setIsAdminUnlocked(true);
-      sessionStorage.setItem('pcmc_admin_pin_unlocked', 'true');
       showToast('ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ!', 'success');
       return true;
     }
@@ -179,15 +181,11 @@ export default function App() {
   const handleLockAdmin = () => {
     setIsAdminUnlocked(false);
     sessionStorage.removeItem('pcmc_admin_pin_unlocked');
-    showToast('ล็อกสิทธิ์ผู้ดูแลระบบแล้ว', 'info');
+    showToast('ออกจากระบบ Admin (ล็อกสิทธิ์) เรียบร้อยแล้ว', 'info');
   };
 
-  // Check Admin permission: active if unlocked by PIN or Google user is in Admin_Emails
-  const isGoogleAdmin = Boolean(
-    user?.email && 
-    db.settings.adminEmails.some(e => e.toLowerCase() === user.email?.toLowerCase())
-  );
-  const isAdmin = isAdminUnlocked || isGoogleAdmin;
+  // Admin access strictly requires entering the Admin PIN in the current session (never bypassed by Google Sign-In)
+  const isAdmin = isAdminUnlocked;
 
   // Dynamic clinic lists managed by Admin (with fallback defaults)
   const inTimeClinics = db.settings.inTimeClinics && db.settings.inTimeClinics.length > 0
@@ -549,6 +547,7 @@ export default function App() {
       <Navbar
         user={user}
         isAdmin={isAdmin}
+        onLockAdmin={handleLockAdmin}
       />
 
       {/* Floating Toast Message */}
@@ -705,7 +704,7 @@ export default function App() {
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
             isAdmin={isAdmin}
-            isAdminUnlocked={isAdminUnlocked || isGoogleAdmin}
+            isAdminUnlocked={isAdminUnlocked}
             user={user}
             onLogin={handleLogin}
             onLogout={handleLogout}

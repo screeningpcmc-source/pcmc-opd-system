@@ -453,7 +453,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </form>
 
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center text-[11px] text-amber-800">
-            🔒 กรุณากรอกรหัสผ่านผู้ดูแลระบบที่กำหนดไว้เพื่อเข้าใช้งานการตั้งค่า
+            🔒 ระบบกำหนดให้ต้องกรอก Admin PIN ใหม่ทุกครั้งที่เปิดหรือรีเฟรชหน้าเว็บ (บัญชี Google ใช้สำหรับเชื่อมต่อ Google Sheets เท่านั้น)
           </div>
         </div>
       </div>
@@ -487,12 +487,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
           {onLockAdmin && (
             <button
+              type="button"
               onClick={onLockAdmin}
-              className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold text-red-700 hover:text-red-800 bg-white hover:bg-red-50 border border-red-200 rounded-full shadow-2xs transition-colors cursor-pointer"
-              title="ล็อกสิทธิ์และกลับสู่หน้าใส่ PIN"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-700 hover:text-white bg-white hover:bg-red-600 border border-red-300 rounded-full shadow-2xs transition-colors cursor-pointer"
+              title="ออกจากระบบ Admin และกลับสู่หน้าใส่ PIN"
             >
-              <Lock className="w-3.5 h-3.5 text-red-600" />
-              <span>ล็อกสิทธิ์</span>
+              <Lock className="w-3.5 h-3.5" />
+              <span>ออกจากระบบ Admin (ล็อกสิทธิ์)</span>
             </button>
           )}
         </div>
