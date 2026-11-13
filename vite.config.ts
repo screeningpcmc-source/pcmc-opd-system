@@ -3,9 +3,15 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({command}) => {
+  const rawBase = process.env.VITE_BASE_PATH;
+  const isValidBasePath = Boolean(
+    rawBase && (rawBase.startsWith('/') || rawBase.startsWith('./'))
+  );
+  const base = command === 'serve' ? '/' : isValidBasePath ? rawBase : './';
+
   return {
-    base: process.env.VITE_BASE_PATH || './',
+    base,
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

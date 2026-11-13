@@ -10,12 +10,12 @@ import {
 } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY || '').trim(),
+  authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '').trim(),
+  projectId: String(import.meta.env.VITE_FIREBASE_PROJECT_ID || '').trim(),
+  storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '').trim(),
+  messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '').trim(),
+  appId: String(import.meta.env.VITE_FIREBASE_APP_ID || '').trim(),
 };
 
 export const isFirebaseConfigured = Boolean(
@@ -65,7 +65,7 @@ export const initAuth = (
 export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
   if (!auth) {
     throw new Error(
-      'ยังไม่ได้ตั้งค่า Firebase Credentials (VITE_FIREBASE_*) กรุณากำหนดใน .env.local หรือ GitHub Secrets'
+      'ยังไม่ได้ตั้งค่า Firebase Credentials (VITE_FIREBASE_*) กรุณากำหนดใน GitHub Secrets แล้วสั่ง Re-run Deploy หรือตั้งค่าใน .env.local'
     );
   }
 
@@ -74,13 +74,28 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
-      throw new Error('Failed to get access token from Google Auth');
+      throw new Error('ไม่ได้รับ Access Token จาก Google Auth');
     }
 
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: unknown) {
     console.error('Sign in error:', error);
+    const errCode = (error as { code?: string })?.code || '';
+    if (errCode === 'auth/unauthorized-domain') {
+      throw new Error(
+        `โดเมน ${window.location.hostname} ยังไม่ได้รับอนุญาต กรุณาเพิ่มโดเมนนี้ใน Firebase Console -> Authentication -> Settings -> Authorized domains`
+      );
+    }
+    if (errCode === 'auth/popup-blocked') {
+      throw new Error('เบราว์เซอร์บล็อกหน้าต่างป๊อปอัป กรุณาอนุญาต Pop-up แล้วลองใหม่อีกครั้ง');
+    }
+    if (errCode === 'auth/popup-closed-by-user') {
+      throw new Error('ยกเลิกการเข้าสู่ระบบ (ปิดหน้าต่าง Google Sign-In)');
+    }
+    if (errCode === 'auth/operation-not-allowed') {
+      throw new Error('ยังไม่ได้เปิดใช้งาน Google Provider ใน Firebase Console -> Authentication -> Sign-in method');
+    }
     throw error;
   } finally {
     isSigningIn = false;
