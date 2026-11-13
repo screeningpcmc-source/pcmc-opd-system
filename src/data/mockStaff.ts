@@ -6,7 +6,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
   annualHr: 2080,
   workDays: 245,
   adminEmails: ['screening.pcmc@gmail.com', 'admin.opd@pcmc.ac.th', 'headnurse@pcmc.ac.th'],
-  adminPin: '4217',
+  adminPin: '',
   inTimeClinics: [
     'กุมารเวชกรรม',
     'สูติ-นรีเวชกรรม',

@@ -31,6 +31,7 @@ import {
   logout, 
   getAccessToken 
 } from './services/firebaseAuth';
+import { verifyAdminPin } from './services/adminSecurity';
 import { Navbar } from './components/Navbar';
 import { DailyWorkloadTab } from './components/DailyWorkloadTab';
 import { LeaveAndOTTab } from './components/LeaveAndOTTab';
@@ -129,14 +130,13 @@ export default function App() {
     }
   };
 
-  // Admin PIN Unlock State (Secret code '4217')
+  // Admin PIN Unlock State
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
     return sessionStorage.getItem('pcmc_admin_pin_unlocked') === 'true';
   });
 
   const handleUnlockAdmin = (pin: string) => {
-    const targetPin = (db.settings.adminPin || '4217').trim();
-    if (pin.trim() === targetPin) {
+    if (verifyAdminPin(pin, db.settings.adminPin)) {
       setIsAdminUnlocked(true);
       sessionStorage.setItem('pcmc_admin_pin_unlocked', 'true');
       showToast('ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ!', 'success');

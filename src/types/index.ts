@@ -81,7 +81,7 @@ export interface SystemSettings {
   annualHr: number; // default 2080
   workDays: number; // default 245
   adminEmails: string[];
-  adminPin?: string; // default '4217'
+  adminPin?: string;
   spreadsheetId?: string;
   spreadsheetUrl?: string;
   inTimeClinics?: string[];

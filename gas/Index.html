@@ -1033,7 +1033,6 @@
     let APP_STATE = {
       currentUserEmail: 'screening.pcmc@gmail.com',
       isAdmin: false,
-      adminPin: '4217',
       inTimeClinics: [...DEFAULT_IN_TIME_CLINICS],
       outTimeClinics: [...DEFAULT_OUT_TIME_CLINICS],
       staff: [],
@@ -1093,7 +1092,6 @@
             if (res && res.success) {
               APP_STATE.currentUserEmail = res.currentUserEmail || 'screening.pcmc@gmail.com';
               APP_STATE.isAdmin = res.isEmailAdmin;
-              APP_STATE.adminPin = res.adminPin || '4217';
               APP_STATE.staff = res.staff || [];
               APP_STATE.workloads = (res.workloads || []).map(function(w) {
                 return Object.assign({}, w, { totalPt: getEffectiveTotalPt(w) });
@@ -1170,15 +1168,39 @@
       }
     }
 
+    async function verifyPinFallbackDigest_(pin) {
+      const targetHex = '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88';
+      if (window.crypto && window.crypto.subtle) {
+        const data = new TextEncoder().encode(pin);
+        const buf = await window.crypto.subtle.digest('SHA-256', data);
+        const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        return hex === targetHex;
+      }
+      return false;
+    }
+
     function submitAdminPin() {
       const pin = $('#adminPinInput').val().trim();
-      if (pin === APP_STATE.adminPin || pin === '4217') {
-        APP_STATE.isAdmin = true;
-        bootstrap.Modal.getInstance(document.getElementById('adminPinModal')).hide();
-        Swal.fire('สำเร็จ', 'ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ', 'success');
-        updateUI();
+      if (!pin) return;
+
+      const onVerified = function(ok) {
+        if (ok) {
+          APP_STATE.isAdmin = true;
+          bootstrap.Modal.getInstance(document.getElementById('adminPinModal')).hide();
+          Swal.fire('สำเร็จ', 'ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ', 'success');
+          updateUI();
+        } else {
+          Swal.fire('รหัสผ่านไม่ถูกต้อง', 'กรุณาลองใหม่อีกครั้ง', 'error');
+        }
+      };
+
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function(res) { onVerified(Boolean(res && res.success)); })
+          .withFailureHandler(function() { onVerified(false); })
+          .verifyAdminPin(pin);
       } else {
-        Swal.fire('รหัสผ่านไม่ถูกต้อง', 'กรุณาลองใหม่อีกครั้ง', 'error');
+        verifyPinFallbackDigest_(pin).then(onVerified);
       }
     }
 
@@ -2099,7 +2121,6 @@
         annualHr: $('#setAnnualHr').val(),
         workDays: $('#setWorkDays').val(),
         adminEmails: $('#setAdminEmails').val(),
-        adminPin: APP_STATE.adminPin,
         inTimeClinics: APP_STATE.inTimeClinics,
         outTimeClinics: APP_STATE.outTimeClinics
       };

@@ -151,7 +151,7 @@ export const createGoogleSpreadsheet = async (
     ['Annual_Hr', settings.annualHr.toString()],
     ['Work_Days', settings.workDays.toString()],
     ['Admin_Emails', settings.adminEmails.join(', ')],
-    ['Admin_Pin', settings.adminPin || '4217'],
+    ['Admin_Pin', settings.adminPin || ''],
     ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
     ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
   ];

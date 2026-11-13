@@ -11,6 +11,7 @@ import {
   POSITION_LABELS,
   formatPositionLabel
 } from '../types';
+import { verifyAdminPin } from '../services/adminSecurity';
 import { 
   ShieldCheck, 
   Users, 
@@ -101,7 +102,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [pinInput, setPinInput] = useState<string>('');
   const [pinError, setPinError] = useState<string>('');
   const [showPinInputMask, setShowPinInputMask] = useState<boolean>(false);
-  const [adminPinSetting, setAdminPinSetting] = useState<string>(settings.adminPin || '4217');
+  const [adminPinSetting, setAdminPinSetting] = useState<string>(settings.adminPin || '');
   const [showAdminPinSetting, setShowAdminPinSetting] = useState<boolean>(false);
 
   // Settings form state (kept in sync with persisted settings)
@@ -119,7 +120,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setAnnualHr(settings.annualHr);
     setWorkDays(settings.workDays);
     setAdminEmailsStr(settings.adminEmails.join(', '));
-    setAdminPinSetting(settings.adminPin || '4217');
+    setAdminPinSetting(settings.adminPin || '');
     setCustomSheetUrl(settings.spreadsheetUrl || '');
   }, [settings]);
 
@@ -131,8 +132,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handlePinSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const targetPin = (settings.adminPin || '4217').trim();
-    if (pinInput.trim() === targetPin) {
+    if (verifyAdminPin(pinInput, settings.adminPin)) {
       setPinError('');
       if (onUnlockAdmin) {
         onUnlockAdmin(pinInput.trim());
@@ -153,7 +153,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       if (pinInput.length < 8) {
         const next = pinInput + val;
         setPinInput(next);
-        if (next.length === 4 && next === (settings.adminPin || '4217').trim()) {
+        if (next.length === 4 && verifyAdminPin(next, settings.adminPin)) {
           setTimeout(() => {
             if (onUnlockAdmin) onUnlockAdmin(next);
             setPinInput('');
@@ -319,7 +319,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       annualHr: Number(annualHr) || 2080,
       workDays: Number(workDays) || 245,
       adminEmails: emails.length > 0 ? emails : settings.adminEmails,
-      adminPin: adminPinSetting.trim() || '4217',
+      adminPin: adminPinSetting.trim(),
       inTimeClinics,
       outTimeClinics,
     };
@@ -1101,7 +1101,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 value={adminPinSetting}
                 onChange={(e) => setAdminPinSetting(e.target.value)}
                 maxLength={10}
-                placeholder="••••"
+                placeholder="ปล่อยว่างเพื่อใช้รหัสหลัก (VITE_ADMIN_PIN) หรือกรอกรหัสใหม่"
                 className="w-full text-sm rounded-lg border-red-300 py-2 px-3 border font-mono tracking-wider bg-white font-bold text-red-950"
               />
             </div>

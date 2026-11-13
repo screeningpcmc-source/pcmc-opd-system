@@ -14,7 +14,45 @@ var SHEET_NAMES = {
   SETTINGS: 'Settings'
 };
 
-var DEFAULT_ADMIN_PIN = '4217';
+var DEFAULT_PIN_SHA256 = '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88';
+
+function getConfiguredAdminPin_() {
+  var propPin = PropertiesService.getScriptProperties().getProperty('ADMIN_PIN');
+  if (propPin) return String(propPin).trim();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+  if (sheet && sheet.getLastRow() > 1) {
+    var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][0] === 'Admin_Pin' && String(data[i][1] || '').trim()) {
+        return String(data[i][1]).trim();
+      }
+    }
+  }
+  return '';
+}
+
+function setAdminPinSecret(newPin) {
+  var cleanPin = String(newPin || '').trim();
+  if (cleanPin.length < 4) {
+    return { success: false, error: 'รหัสผ่านต้องมีอย่างน้อย 4 หลัก' };
+  }
+  PropertiesService.getScriptProperties().setProperty('ADMIN_PIN', cleanPin);
+  return { success: true, message: 'บันทึกรหัสผ่าน Admin ลงใน Script Properties เรียบร้อยแล้ว' };
+}
+
+function sha256Hex_(input) {
+  var rawHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(input || ''), Utilities.Charset.UTF_8);
+  var txtHash = '';
+  for (var i = 0; i < rawHash.length; i++) {
+    var hashVal = rawHash[i];
+    if (hashVal < 0) hashVal += 256;
+    var byteStr = hashVal.toString(16);
+    if (byteStr.length === 1) txtHash += '0';
+    txtHash += byteStr;
+  }
+  return txtHash;
+}
 var DEFAULT_IN_TIME_CLINICS = [
   'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'เวชศาสตร์ฟื้นฟู', 'ศัลยกรรม',
   'จักษุวิทยา', 'ศูนย์เลสิก', 'โสต ศอ นาสิก', 'อายุรกรรม', 'ตรวจโรคทั่วไป',
@@ -104,7 +142,7 @@ function setupDatabase() {
         ['Annual_Hr', '2080'],
         ['Work_Days', '245'],
         ['Admin_Emails', 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th, headnurse@pcmc.ac.th'],
-        ['Admin_Pin', DEFAULT_ADMIN_PIN],
+        ['Admin_Pin', getConfiguredAdminPin_()],
         ['In_Time_Clinics', DEFAULT_IN_TIME_CLINICS.join(', ')],
         ['Out_Time_Clinics', DEFAULT_OUT_TIME_CLINICS.join(', ')]
       ]
@@ -145,16 +183,19 @@ function getInitialData() {
     var adminEmails = (settings['Admin_Emails'] || '').toLowerCase().split(',').map(function(e) { return e.trim(); });
     var isEmailAdmin = currentUserEmail ? adminEmails.indexOf(currentUserEmail.toLowerCase()) !== -1 : false;
 
+    var safeSettings = Object.assign({}, settings);
+    delete safeSettings['Admin_Pin'];
+
     return {
       success: true,
       currentUserEmail: currentUserEmail,
       isEmailAdmin: isEmailAdmin,
-      adminPin: settings['Admin_Pin'] || DEFAULT_ADMIN_PIN,
+      hasAdminPinConfigured: Boolean(getConfiguredAdminPin_()),
       staff: getStaffList(),
       workloads: getWorkloadList(),
       leaves: getLeaveList(),
       ot: getOTList(),
-      settings: settings
+      settings: safeSettings
     };
   } catch (err) {
     return { success: false, error: err.toString() };
@@ -173,7 +214,7 @@ function getSettingsMap() {
     'Annual_Hr': '2080',
     'Work_Days': '245',
     'Admin_Emails': 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th',
-    'Admin_Pin': DEFAULT_ADMIN_PIN,
+    'Admin_Pin': getConfiguredAdminPin_(),
     'In_Time_Clinics': DEFAULT_IN_TIME_CLINICS.join(', '),
     'Out_Time_Clinics': DEFAULT_OUT_TIME_CLINICS.join(', ')
   };
@@ -603,13 +644,20 @@ function saveSettings(settingsData) {
     var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
     if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS); }
 
+    var existingPin = getConfiguredAdminPin_();
+    var nextPin = String(settingsData.adminPin || '').trim();
+    if (nextPin) {
+      PropertiesService.getScriptProperties().setProperty('ADMIN_PIN', nextPin);
+      existingPin = nextPin;
+    }
+
     var rows = [
       ['NHPPD', String(settingsData.nhppd || '0.4')],
       ['Std_Hr', String(settingsData.stdHr || '7')],
       ['Annual_Hr', String(settingsData.annualHr || '2080')],
       ['Work_Days', String(settingsData.workDays || '245')],
       ['Admin_Emails', Array.isArray(settingsData.adminEmails) ? settingsData.adminEmails.join(', ') : String(settingsData.adminEmails || '')],
-      ['Admin_Pin', String(settingsData.adminPin || DEFAULT_ADMIN_PIN)],
+      ['Admin_Pin', existingPin],
       ['In_Time_Clinics', Array.isArray(settingsData.inTimeClinics) ? settingsData.inTimeClinics.join(', ') : String(settingsData.inTimeClinics || DEFAULT_IN_TIME_CLINICS.join(', '))],
       ['Out_Time_Clinics', Array.isArray(settingsData.outTimeClinics) ? settingsData.outTimeClinics.join(', ') : String(settingsData.outTimeClinics || DEFAULT_OUT_TIME_CLINICS.join(', '))]
     ];
@@ -626,7 +674,11 @@ function saveSettings(settingsData) {
 }
 
 function verifyAdminPin(pin) {
-  var settings = getSettingsMap();
-  var savedPin = settings['Admin_Pin'] || DEFAULT_ADMIN_PIN;
-  return { success: String(pin).trim() === String(savedPin).trim() };
+  var entered = String(pin || '').trim();
+  if (!entered) return { success: false };
+  var savedPin = getConfiguredAdminPin_();
+  if (savedPin) {
+    return { success: entered === savedPin };
+  }
+  return { success: sha256Hex_(entered) === DEFAULT_PIN_SHA256 };
 }
