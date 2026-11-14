@@ -5,6 +5,8 @@ import {
   DailyWorkload,
   LeaveRecord,
   OTAttendance,
+  AuditLogEntry,
+  AdminPinEntry,
   SystemSettings,
   WorkShift,
   LeaveType,
@@ -20,18 +22,26 @@ import {
   INITIAL_OT,
   INITIAL_SETTINGS
 } from '../data/mockStaff';
+import {
+  DEFAULT_PRIMARY_ADMIN_OWNER,
+  buildDefaultAdditionalAdminPins
+} from './adminSecurity';
 
 export interface AppDatabase {
   staff: StaffMember[];
   workloads: DailyWorkload[];
   leaves: LeaveRecord[];
   ot: OTAttendance[];
+  auditLogs: AuditLogEntry[];
   settings: SystemSettings;
 }
 
 const STORAGE_KEY = 'pcmc_opd_system_db_v1';
 const STAFF_DIRTY_KEY = 'pcmc_staff_master_dirty_v1';
 const SETTINGS_DIRTY_KEY = 'pcmc_settings_dirty_v1';
+const WORKLOADS_DIRTY_KEY = 'pcmc_workloads_dirty_v1';
+const LEAVES_DIRTY_KEY = 'pcmc_leaves_dirty_v1';
+const OT_DIRTY_KEY = 'pcmc_ot_dirty_v1';
 const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
@@ -87,6 +97,93 @@ export const isSettingsDirty = (): boolean => {
   }
 };
 
+export const markWorkloadsDirty = (): void => {
+  try {
+    localStorage.setItem(WORKLOADS_DIRTY_KEY, 'true');
+  } catch {
+    // ignore
+  }
+};
+
+export const clearWorkloadsDirty = (): void => {
+  try {
+    localStorage.removeItem(WORKLOADS_DIRTY_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+export const isWorkloadsDirty = (): boolean => {
+  try {
+    return localStorage.getItem(WORKLOADS_DIRTY_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+export const markLeavesDirty = (): void => {
+  try {
+    localStorage.setItem(LEAVES_DIRTY_KEY, 'true');
+  } catch {
+    // ignore
+  }
+};
+
+export const clearLeavesDirty = (): void => {
+  try {
+    localStorage.removeItem(LEAVES_DIRTY_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+export const isLeavesDirty = (): boolean => {
+  try {
+    return localStorage.getItem(LEAVES_DIRTY_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+export const markOtDirty = (): void => {
+  try {
+    localStorage.setItem(OT_DIRTY_KEY, 'true');
+  } catch {
+    // ignore
+  }
+};
+
+export const clearOtDirty = (): void => {
+  try {
+    localStorage.removeItem(OT_DIRTY_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+export const isOtDirty = (): boolean => {
+  try {
+    return localStorage.getItem(OT_DIRTY_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+function normalizeAdditionalAdminPins(raw: unknown): AdminPinEntry[] {
+  const defaults = buildDefaultAdditionalAdminPins();
+  if (!Array.isArray(raw) || raw.length === 0) return defaults;
+  return defaults.map((def, idx) => {
+    const found = raw.find((item: any) => item?.id === def.id) || raw[idx];
+    return {
+      id: def.id,
+      ownerName: typeof found?.ownerName === 'string' && found.ownerName.trim()
+        ? found.ownerName.trim()
+        : def.ownerName,
+      pin: typeof found?.pin === 'string' ? found.pin.trim() : '',
+    };
+  });
+}
+
 export const loadLocalDatabase = (): AppDatabase => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -139,6 +236,10 @@ export const loadLocalDatabase = (): AppDatabase => {
       const mergedSettings: SystemSettings = {
         ...INITIAL_SETTINGS,
         ...(parsed.settings || {}),
+        screeningNhppd:
+          Number(parsed.settings?.screeningNhppd) > 0
+            ? Number(parsed.settings?.screeningNhppd)
+            : 0.1,
         inTimeClinics:
           Array.isArray(parsed.settings?.inTimeClinics) && parsed.settings.inTimeClinics.length > 0
             ? parsed.settings.inTimeClinics
@@ -154,6 +255,11 @@ export const loadLocalDatabase = (): AppDatabase => {
         customHolidays: Array.isArray(parsed.settings?.customHolidays)
           ? parsed.settings.customHolidays
           : INITIAL_SETTINGS.customHolidays,
+        primaryAdminOwner:
+          typeof parsed.settings?.primaryAdminOwner === 'string' && parsed.settings.primaryAdminOwner.trim()
+            ? parsed.settings.primaryAdminOwner.trim()
+            : INITIAL_SETTINGS.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER,
+        additionalAdminPins: normalizeAdditionalAdminPins(parsed.settings?.additionalAdminPins),
         autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
 
@@ -162,6 +268,7 @@ export const loadLocalDatabase = (): AppDatabase => {
         workloads: migratedWorkloads,
         leaves: migratedLeaves,
         ot: migratedOt,
+        auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
         settings: mergedSettings,
       };
 
@@ -183,6 +290,7 @@ export const loadLocalDatabase = (): AppDatabase => {
     workloads: INITIAL_WORKLOADS,
     leaves: INITIAL_LEAVES,
     ot: INITIAL_OT,
+    auditLogs: [],
     settings: INITIAL_SETTINGS,
   };
 };
@@ -224,10 +332,11 @@ const REQUIRED_SHEETS = [
   'Leave_Records',
   'OT_Attendance',
   'Settings',
+  'Audit_Logs',
 ] as const;
 
 /**
- * Ensures all 5 required tabs exist in an already-linked Google Spreadsheet
+ * Ensures all required tabs exist in an already-linked Google Spreadsheet
  */
 export const ensureSpreadsheetTabs = async (
   accessToken: string,
@@ -328,6 +437,7 @@ export const createGoogleSpreadsheet = async (
   const settingsRows = [
     ['Key', 'Value'],
     ['NHPPD', settings.nhppd.toString()],
+    ['Screening_NHPPD', (settings.screeningNhppd ?? 0.1).toString()],
     ['Std_Hr', settings.stdHr.toString()],
     ['Annual_Hr', settings.annualHr.toString()],
     ['Work_Days', settings.workDays.toString()],
@@ -336,6 +446,8 @@ export const createGoogleSpreadsheet = async (
     ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
     ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
     ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
+    ['Primary_Admin_Owner', settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
+    ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
   ];
 
   const batchUpdateValues = {
@@ -379,8 +491,12 @@ export const createGoogleSpreadsheet = async (
         values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
       },
       {
-        range: 'Settings!A1:B10',
+        range: 'Settings!A1:B12',
         values: settingsRows,
+      },
+      {
+        range: 'Audit_Logs!A1:F1',
+        values: [['Timestamp', 'Action', 'Target_Name', 'Summary', 'Reason', 'Edited_By']],
       },
     ],
   };
@@ -493,6 +609,15 @@ function otKey(o: OTAttendance): string {
   ].join('|');
 }
 
+function auditLogKey(a: AuditLogEntry): string {
+  return [
+    (a.timestamp || '').trim(),
+    (a.action || '').trim(),
+    (a.targetName || '').trim(),
+    (a.reason || '').trim(),
+  ].join('|');
+}
+
 /**
  * Full 2-way Sync with an existing Google Spreadsheet (never creates a duplicate spreadsheet)
  */
@@ -514,7 +639,9 @@ export const syncAllWithGoogleSheet = async (
       'Staff_Master!A:G'
     )}&ranges=${encodeURIComponent('Daily_Workload!A:O')}&ranges=${encodeURIComponent(
       'Leave_Records!A:H'
-    )}&ranges=${encodeURIComponent('OT_Attendance!A:F')}&ranges=${encodeURIComponent('Settings!A:B')}`,
+    )}&ranges=${encodeURIComponent('OT_Attendance!A:F')}&ranges=${encodeURIComponent(
+      'Settings!A:B'
+    )}&ranges=${encodeURIComponent('Audit_Logs!A:F')}`,
     {
       headers: { Authorization: `Bearer ${accessToken}` },
     }
@@ -533,6 +660,7 @@ export const syncAllWithGoogleSheet = async (
   const leaveRawRows: string[][] = valueRanges[2]?.values || [];
   const otRawRows: string[][] = valueRanges[3]?.values || [];
   const settingsRawRows: string[][] = valueRanges[4]?.values || [];
+  const auditRawRows: string[][] = valueRanges[5]?.values || [];
 
   // 1. Parse Staff_Master from sheet
   const sheetStaffRows = staffRawRows
@@ -586,14 +714,19 @@ export const syncAllWithGoogleSheet = async (
       };
     });
 
+  const shouldOverwriteWorkloads = isWorkloadsDirty();
   const sheetWKeys = new Set(sheetWorkloads.map(workloadKey));
   const localWKeys = new Set(db.workloads.map(workloadKey));
 
-  const workloadsToPush = db.workloads.filter((w) => !sheetWKeys.has(workloadKey(w)));
-  const workloadsPulled = sheetWorkloads.filter((w) => !localWKeys.has(workloadKey(w)));
+  const workloadsToPush = shouldOverwriteWorkloads
+    ? []
+    : db.workloads.filter((w) => !sheetWKeys.has(workloadKey(w)));
+  const workloadsPulled = shouldOverwriteWorkloads
+    ? []
+    : sheetWorkloads.filter((w) => !localWKeys.has(workloadKey(w)));
 
   const mergedWorkloadsMap = new Map<string, DailyWorkload>();
-  [...db.workloads, ...sheetWorkloads].forEach((w) => {
+  (shouldOverwriteWorkloads ? db.workloads : [...db.workloads, ...sheetWorkloads]).forEach((w) => {
     const k = workloadKey(w);
     if (!mergedWorkloadsMap.has(k)) {
       mergedWorkloadsMap.set(k, { ...w, totalPt: getEffectiveTotalPt(w) });
@@ -622,10 +755,13 @@ export const syncAllWithGoogleSheet = async (
       };
     });
 
+  const shouldOverwriteLeaves = isLeavesDirty();
   const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
-  const leavesToPush = db.leaves.filter((l) => !sheetLKeys.has(leaveKey(l)));
+  const leavesToPush = shouldOverwriteLeaves
+    ? []
+    : db.leaves.filter((l) => !sheetLKeys.has(leaveKey(l)));
   const mergedLeavesMap = new Map<string, LeaveRecord>();
-  [...db.leaves, ...sheetLeaves].forEach((l) => {
+  (shouldOverwriteLeaves ? db.leaves : [...db.leaves, ...sheetLeaves]).forEach((l) => {
     const k = leaveKey(l);
     if (!mergedLeavesMap.has(k)) mergedLeavesMap.set(k, l);
   });
@@ -650,14 +786,42 @@ export const syncAllWithGoogleSheet = async (
       };
     });
 
+  const shouldOverwriteOt = isOtDirty();
   const sheetOKeys = new Set(sheetOt.map(otKey));
-  const otToPush = db.ot.filter((o) => !sheetOKeys.has(otKey(o)));
+  const otToPush = shouldOverwriteOt
+    ? []
+    : db.ot.filter((o) => !sheetOKeys.has(otKey(o)));
   const mergedOtMap = new Map<string, OTAttendance>();
-  [...db.ot, ...sheetOt].forEach((o) => {
+  (shouldOverwriteOt ? db.ot : [...db.ot, ...sheetOt]).forEach((o) => {
     const k = otKey(o);
     if (!mergedOtMap.has(k)) mergedOtMap.set(k, o);
   });
   const mergedOt = Array.from(mergedOtMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+
+  // 4.5 Parse Audit_Logs from sheet & merge with local
+  const sheetAuditLogs: AuditLogEntry[] = auditRawRows
+    .slice(1)
+    .filter((r) => (r[0] || '').trim() && (r[1] || '').trim())
+    .map((r, idx) => ({
+      id: `AUD-GS-${Date.now()}-${idx}`,
+      timestamp: String(r[0] || '').trim(),
+      action: String(r[1] || 'แก้ไขวันลา').trim() as AuditLogEntry['action'],
+      targetName: String(r[2] || '').trim(),
+      summary: String(r[3] || '').trim(),
+      reason: String(r[4] || '').trim(),
+      editedBy: String(r[5] || '').trim() || undefined,
+    }));
+
+  const sheetAuditKeys = new Set(sheetAuditLogs.map(auditLogKey));
+  const auditLogsToPush = (db.auditLogs || []).filter((a) => !sheetAuditKeys.has(auditLogKey(a)));
+  const mergedAuditMap = new Map<string, AuditLogEntry>();
+  [...(db.auditLogs || []), ...sheetAuditLogs].forEach((a) => {
+    const k = auditLogKey(a);
+    if (!mergedAuditMap.has(k)) mergedAuditMap.set(k, a);
+  });
+  const mergedAuditLogs = Array.from(mergedAuditMap.values()).sort((a, b) =>
+    b.timestamp.localeCompare(a.timestamp)
+  );
 
   // 5. Parse or Push Settings
   const settingsMap: Record<string, string> = {};
@@ -679,9 +843,27 @@ export const syncAllWithGoogleSheet = async (
     return [];
   })();
 
+  const parsedRemoteAdminPins = (() => {
+    try {
+      const raw = settingsMap['Additional_Admin_Pins'];
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return normalizeAdditionalAdminPins(parsed);
+      }
+    } catch {
+      // ignore malformed JSON
+    }
+    return null;
+  })();
+
   const finalSettings: SystemSettings = {
     ...db.settings,
-    nhppd: db.settings.nhppd || Number(settingsMap['NHPPD']) || 0.4,
+    nhppd: settingsDirty
+      ? Number(db.settings.nhppd) || 0.4
+      : Number(settingsMap['NHPPD']) || Number(db.settings.nhppd) || 0.4,
+    screeningNhppd: settingsDirty
+      ? Number(db.settings.screeningNhppd) || 0.1
+      : Number(settingsMap['Screening_NHPPD']) || Number(db.settings.screeningNhppd) || 0.1,
     stdHr: db.settings.stdHr || Number(settingsMap['Std_Hr']) || 7,
     annualHr: db.settings.annualHr || Number(settingsMap['Annual_Hr']) || 2080,
     workDays: db.settings.workDays || Number(settingsMap['Work_Days']) || 245,
@@ -708,6 +890,14 @@ export const syncAllWithGoogleSheet = async (
       : db.settings.customHolidays && db.settings.customHolidays.length > 0
       ? db.settings.customHolidays
       : parsedRemoteHolidays,
+    primaryAdminOwner: settingsDirty
+      ? db.settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER
+      : settingsMap['Primary_Admin_Owner'] ||
+        db.settings.primaryAdminOwner ||
+        DEFAULT_PRIMARY_ADMIN_OWNER,
+    additionalAdminPins: settingsDirty
+      ? normalizeAdditionalAdminPins(db.settings.additionalAdminPins)
+      : parsedRemoteAdminPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -738,8 +928,54 @@ export const syncAllWithGoogleSheet = async (
     });
   }
 
-  // Ensure headers exist on empty transaction sheets
-  if (workloadRawRows.length === 0) {
+  if (shouldOverwriteWorkloads) {
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Daily_Workload!A:O:clear`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    writeData.push({
+      range: 'Daily_Workload!A1:O',
+      values: [
+        [
+          'Date',
+          'Shift',
+          'Clinic',
+          'Total_Pt',
+          'Adult_Pt',
+          'Child_Pt',
+          'Admit',
+          'HN',
+          'RN',
+          'PN',
+          'NA',
+          'Clerk',
+          'Service_Worker',
+          'Note',
+          'Reporter',
+        ],
+        ...mergedWorkloads.map((w) => [
+          w.date,
+          w.shift,
+          w.clinic,
+          getEffectiveTotalPt(w),
+          w.adultPt,
+          w.childPt,
+          w.admit,
+          w.hn,
+          w.rn,
+          w.pn,
+          w.na ?? w.pca ?? 0,
+          w.clerk,
+          w.serviceWorker,
+          w.note,
+          w.reporter,
+        ]),
+      ],
+    });
+  } else if (workloadRawRows.length === 0) {
     writeData.push({
       range: 'Daily_Workload!A1:O1',
       values: [
@@ -763,24 +999,80 @@ export const syncAllWithGoogleSheet = async (
       ],
     });
   }
-  if (leaveRawRows.length === 0) {
+
+  if (shouldOverwriteLeaves) {
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leave_Records!A:H:clear`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    writeData.push({
+      range: 'Leave_Records!A1:H',
+      values: [
+        ['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'],
+        ...mergedLeaves.map((l) => [
+          l.startDate,
+          l.endDate,
+          l.staffName,
+          l.position,
+          l.clinic,
+          l.leaveType,
+          l.days,
+          l.note || '',
+        ]),
+      ],
+    });
+  } else if (leaveRawRows.length === 0) {
     writeData.push({
       range: 'Leave_Records!A1:H1',
       values: [['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note']],
     });
   }
-  if (otRawRows.length === 0) {
+
+  if (shouldOverwriteOt) {
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/OT_Attendance!A:F:clear`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    writeData.push({
+      range: 'OT_Attendance!A1:F',
+      values: [
+        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+        ...mergedOt.map((o) => [
+          o.date,
+          o.shift,
+          o.staffName,
+          o.position,
+          o.homeClinic,
+          o.workClinic,
+        ]),
+      ],
+    });
+  } else if (otRawRows.length === 0) {
     writeData.push({
       range: 'OT_Attendance!A1:F1',
       values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
     });
   }
 
+  if (auditRawRows.length === 0) {
+    writeData.push({
+      range: 'Audit_Logs!A1:F1',
+      values: [['Timestamp', 'Action', 'Target_Name', 'Summary', 'Reason', 'Edited_By']],
+    });
+  }
+
   writeData.push({
-    range: 'Settings!A1:B10',
+    range: 'Settings!A1:B13',
     values: [
       ['Key', 'Value'],
       ['NHPPD', finalSettings.nhppd.toString()],
+      ['Screening_NHPPD', (finalSettings.screeningNhppd ?? 0.1).toString()],
       ['Std_Hr', finalSettings.stdHr.toString()],
       ['Annual_Hr', finalSettings.annualHr.toString()],
       ['Work_Days', finalSettings.workDays.toString()],
@@ -789,6 +1081,8 @@ export const syncAllWithGoogleSheet = async (
       ['Out_Time_Clinics', (finalSettings.outTimeClinics || []).join(', ')],
       ['Leave_Types', (finalSettings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
       ['Custom_Holidays', JSON.stringify(finalSettings.customHolidays || [])],
+      ['Primary_Admin_Owner', finalSettings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
+      ['Additional_Admin_Pins', JSON.stringify(finalSettings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
     ],
   });
 
@@ -894,8 +1188,34 @@ export const syncAllWithGoogleSheet = async (
     );
   }
 
+  if (auditLogsToPush.length > 0) {
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Audit_Logs!A1:append?valueInputOption=USER_ENTERED`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          values: auditLogsToPush.map((a) => [
+            a.timestamp,
+            a.action,
+            a.targetName,
+            a.summary,
+            a.reason,
+            a.editedBy || '',
+          ]),
+        }),
+      }
+    );
+  }
+
   clearStaffMasterDirty();
   clearSettingsDirty();
+  clearWorkloadsDirty();
+  clearLeavesDirty();
+  clearOtDirty();
 
   return {
     mergedDb: {
@@ -903,6 +1223,7 @@ export const syncAllWithGoogleSheet = async (
       workloads: mergedWorkloads,
       leaves: mergedLeaves,
       ot: mergedOt,
+      auditLogs: mergedAuditLogs,
       settings: finalSettings,
     },
     pushedWorkloads: workloadsToPush.length,
@@ -1019,6 +1340,42 @@ export const appendOTToSheet = async (
     return res.ok;
   } catch (err) {
     console.error('Failed to append OT to sheet:', err);
+    return false;
+  }
+};
+
+/**
+ * Appends an audit log entry to Google Sheets (Audit_Logs tab)
+ */
+export const appendAuditLogToSheet = async (
+  accessToken: string,
+  spreadsheetId: string,
+  entry: AuditLogEntry
+): Promise<boolean> => {
+  try {
+    const row = [
+      entry.timestamp,
+      entry.action,
+      entry.targetName,
+      entry.summary,
+      entry.reason,
+      entry.editedBy || '',
+    ];
+
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Audit_Logs!A1:append?valueInputOption=USER_ENTERED`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ values: [row] }),
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    console.error('Failed to append audit log to sheet:', err);
     return false;
   }
 };

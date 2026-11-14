@@ -44,6 +44,9 @@ export interface DailyWorkload {
   note: string;
   reporter: string;
   timestamp?: string;
+  lastEditedAt?: string;
+  lastEditReason?: string;
+  lastEditedBy?: string;
 }
 
 export interface LeaveRecord {
@@ -56,6 +59,9 @@ export interface LeaveRecord {
   leaveType: LeaveType;
   days: number;
   note?: string;
+  lastEditedAt?: string;
+  lastEditReason?: string;
+  lastEditedBy?: string;
 }
 
 export interface OTAttendance {
@@ -68,6 +74,25 @@ export interface OTAttendance {
   workClinic: string;
   isExternal?: boolean; // true if substitute staff from outside OPD
   affiliation?: string; // สังกัด / หน่วยงานต้นสังกัด
+  lastEditedAt?: string;
+  lastEditReason?: string;
+  lastEditedBy?: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  action: 'แก้ไขวันลา' | 'ลบวันลา' | 'แก้ไขเวร OT' | 'ลบเวร OT' | 'แก้ไขภาระงาน' | 'ลบภาระงาน';
+  targetName: string;
+  summary: string;
+  reason: string;
+  editedBy?: string;
+}
+
+export interface AdminPinEntry {
+  id: string;
+  ownerName: string;
+  pin: string; // empty = uses built-in hashed slot code
 }
 
 export interface CustomHoliday {
@@ -76,12 +101,15 @@ export interface CustomHoliday {
 }
 
 export interface SystemSettings {
-  nhppd: number; // default 0.4
+  nhppd: number; // default 0.4 (all clinics except หน่วยคัดกรอง)
+  screeningNhppd?: number; // default 0.1 (เฉพาะหน่วยคัดกรอง)
   stdHr: number; // default 7
   annualHr: number; // default 2080
   workDays: number; // default 245
   adminEmails: string[];
   adminPin?: string;
+  primaryAdminOwner?: string;
+  additionalAdminPins?: AdminPinEntry[];
   spreadsheetId?: string;
   spreadsheetUrl?: string;
   inTimeClinics?: string[];
@@ -89,6 +117,22 @@ export interface SystemSettings {
   leaveTypes?: string[];
   customHolidays?: CustomHoliday[];
   autoSync?: boolean;
+}
+
+export const SCREENING_CLINIC_NAME = 'หน่วยคัดกรอง';
+export const DEFAULT_SCREENING_NHPPD = 0.1;
+
+export function getClinicNhppd(
+  clinicName: string,
+  settings?: Pick<SystemSettings, 'nhppd' | 'screeningNhppd'>
+): number {
+  const normalized = (clinicName || '').trim();
+  if (normalized === SCREENING_CLINIC_NAME) {
+    const val = Number(settings?.screeningNhppd);
+    return val > 0 ? val : DEFAULT_SCREENING_NHPPD;
+  }
+  const general = Number(settings?.nhppd);
+  return general > 0 ? general : 0.4;
 }
 
 export const IN_TIME_CLINICS = [
@@ -155,9 +199,13 @@ export const POSITION_SORT_ORDER: Record<StaffPosition, number> = {
 };
 
 export const compareStaffByPositionAndStartDate = (
-  a: Pick<StaffMember, 'position' | 'startDate' | 'name'>,
-  b: Pick<StaffMember, 'position' | 'startDate' | 'name'>
+  a: Pick<StaffMember, 'position' | 'startDate' | 'name'> & { status?: StaffStatus },
+  b: Pick<StaffMember, 'position' | 'startDate' | 'name'> & { status?: StaffStatus }
 ): number => {
+  const statusRank = (s?: StaffStatus) => (s === 'Resigned' || s === 'Retired' ? 1 : 0);
+  const statDiff = statusRank(a.status) - statusRank(b.status);
+  if (statDiff !== 0) return statDiff;
+
   const rankA = POSITION_SORT_ORDER[a.position] ?? 99;
   const rankB = POSITION_SORT_ORDER[b.position] ?? 99;
   if (rankA !== rankB) return rankA - rankB;

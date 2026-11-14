@@ -1,12 +1,16 @@
 import { StaffMember, DailyWorkload, LeaveRecord, OTAttendance, SystemSettings, LEAVE_TYPES } from '../types';
+import { DEFAULT_PRIMARY_ADMIN_OWNER, buildDefaultAdditionalAdminPins } from '../services/adminSecurity';
 
 export const INITIAL_SETTINGS: SystemSettings = {
   nhppd: 0.4,
+  screeningNhppd: 0.1,
   stdHr: 7,
   annualHr: 2080,
   workDays: 245,
   adminEmails: ['screening.pcmc@gmail.com', 'admin.opd@pcmc.ac.th', 'headnurse@pcmc.ac.th'],
   adminPin: '',
+  primaryAdminOwner: DEFAULT_PRIMARY_ADMIN_OWNER,
+  additionalAdminPins: buildDefaultAdditionalAdminPins(),
   inTimeClinics: [
     'กุมารเวชกรรม',
     'สูติ-นรีเวชกรรม',

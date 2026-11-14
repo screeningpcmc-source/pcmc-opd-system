@@ -11,12 +11,14 @@ import {
   DailyWorkload, 
   LeaveRecord, 
   OTAttendance, 
+  AuditLogEntry,
   SystemSettings, 
   StaffStatus,
   LeaveType,
   LEAVE_TYPES,
   IN_TIME_CLINICS,
-  OUT_TIME_CLINICS
+  OUT_TIME_CLINICS,
+  getEffectiveTotalPt
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -26,17 +28,22 @@ import {
   syncStaffMasterToSheet,
   markStaffMasterDirty,
   markSettingsDirty,
+  markWorkloadsDirty,
+  markLeavesDirty,
+  markOtDirty,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
-  appendOTToSheet
+  appendOTToSheet,
+  appendAuditLogToSheet
 } from './services/sheetsService';
+import { formatThaiLeaveRange, formatThaiShortDate } from './utils/thaiDate';
 import { 
   initAuth, 
   googleSignIn, 
   logout, 
   getAccessToken 
 } from './services/firebaseAuth';
-import { verifyAdminPin } from './services/adminSecurity';
+import { verifyAdminPinWithOwner } from './services/adminSecurity';
 import { Navbar } from './components/Navbar';
 import { DailyWorkloadTab } from './components/DailyWorkloadTab';
 import { LeaveAndOTTab } from './components/LeaveAndOTTab';
@@ -90,6 +97,7 @@ export default function App() {
       const sharedSheetParam = params.get('sheetId')?.trim();
       if (sharedSheetParam) {
         setIsAdminUnlocked(false);
+        setAdminOwnerName('');
         const idMatch = sharedSheetParam.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
         const extractedId = idMatch ? idMatch[1] : sharedSheetParam;
         if (extractedId && extractedId !== db.settings.spreadsheetId) {
@@ -169,6 +177,7 @@ export default function App() {
       await logout();
       setUser(null);
       setIsAdminUnlocked(false);
+      setAdminOwnerName('');
       sessionStorage.removeItem('pcmc_admin_pin_unlocked');
       showToast('ออกจากระบบเรียบร้อยแล้ว', 'info');
     } catch (err) {
@@ -178,11 +187,14 @@ export default function App() {
 
   // Admin PIN Unlock State (NEVER persisted across page reloads or shared links)
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
+  const [adminOwnerName, setAdminOwnerName] = useState<string>('');
 
   const handleUnlockAdmin = (pin: string) => {
-    if (verifyAdminPin(pin, db.settings.adminPin)) {
+    const match = verifyAdminPinWithOwner(pin, db.settings);
+    if (match.valid) {
       setIsAdminUnlocked(true);
-      showToast('ปลดล็อกสิทธิ์ผู้ดูแลระบบ (Admin) สำเร็จ!', 'success');
+      setAdminOwnerName(match.ownerName);
+      showToast(`ปลดล็อกสิทธิ์ผู้ดูแลระบบ (${match.ownerName}) สำเร็จ!`, 'success');
       return true;
     }
     return false;
@@ -190,6 +202,7 @@ export default function App() {
 
   const handleLockAdmin = () => {
     setIsAdminUnlocked(false);
+    setAdminOwnerName('');
     sessionStorage.removeItem('pcmc_admin_pin_unlocked');
     showToast('ออกจากระบบ Admin (ล็อกสิทธิ์) เรียบร้อยแล้ว', 'info');
   };
@@ -506,26 +519,82 @@ export default function App() {
     }
   };
 
-  // Handler: Update Daily Workload (Admin)
-  const handleUpdateWorkload = (updated: DailyWorkload) => {
-    setDb(prev => ({
-      ...prev,
-      workloads: prev.workloads.map(w => w.id === updated.id ? updated : w),
-    }));
-    setLocalRevision(r => r + 1);
-    showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} สำเร็จ!`, 'success');
+  const recordAuditToSheet = async (auditEntry: AuditLogEntry) => {
+    const token = await getAccessToken();
+    if (token && dbRef.current.settings.spreadsheetId) {
+      await appendAuditLogToSheet(token, dbRef.current.settings.spreadsheetId, auditEntry);
+    }
   };
 
-  // Handler: Delete Daily Workload
-  const handleDeleteWorkload = (id: string) => {
-    if (window.confirm('ยืนยันที่จะลบรายการบันทึกภาระงานนี้หรือไม่?')) {
-      setDb(prev => ({
-        ...prev,
-        workloads: prev.workloads.filter(w => w.id !== id),
-      }));
-      setLocalRevision(r => r + 1);
-      showToast('ลบรายการเรียบร้อยแล้ว', 'info');
-    }
+  // Handler: Update Daily Workload (Admin, mandatory reason + timestamp)
+  const handleUpdateWorkload = (updated: DailyWorkload, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+    const prevItem = db.workloads.find(w => w.id === updated.id);
+
+    const stamped: DailyWorkload = {
+      ...updated,
+      lastEditedAt: nowIso,
+      lastEditReason: cleanReason,
+      lastEditedBy: editedBy,
+    };
+
+    const summary = prevItem
+      ? `${prevItem.clinic} (${formatThaiShortDate(prevItem.date)} • ${prevItem.shift}) ผู้ป่วย ${getEffectiveTotalPt(prevItem)} → ${getEffectiveTotalPt(stamped)} คน`
+      : `${stamped.clinic} (${formatThaiShortDate(stamped.date)})`;
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'แก้ไขภาระงาน',
+      targetName: stamped.clinic,
+      summary,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markWorkloadsDirty();
+    setDb(prev => ({
+      ...prev,
+      workloads: prev.workloads.map(w => w.id === stamped.id ? stamped : w),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
+    }));
+    setLocalRevision(r => r + 1);
+    void recordAuditToSheet(auditEntry);
+    showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} พร้อมบันทึกเหตุผลแล้ว`, 'success');
+  };
+
+  // Handler: Delete Daily Workload (Admin, mandatory reason + timestamp)
+  const handleDeleteWorkload = (id: string, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const target = db.workloads.find(w => w.id === id);
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'ลบภาระงาน',
+      targetName: target?.clinic || 'ไม่ระบุห้องตรวจ',
+      summary: target
+        ? `${target.clinic} (${formatThaiShortDate(target.date)} • ${target.shift}) ผู้ป่วย ${getEffectiveTotalPt(target)} คน`
+        : `รหัสรายการ ${id}`,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markWorkloadsDirty();
+    setDb(prev => ({
+      ...prev,
+      workloads: prev.workloads.filter(w => w.id !== id),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
+    }));
+    setLocalRevision(r => r + 1);
+    void recordAuditToSheet(auditEntry);
+    showToast('ลบรายการภาระงานพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
   };
 
   // Handler: Save Leave
@@ -544,26 +613,76 @@ export default function App() {
     }
   };
 
-  // Handler: Update Leave (Admin)
-  const handleUpdateLeave = (updated: LeaveRecord) => {
+  // Handler: Update Leave (Admin, mandatory reason + timestamp)
+  const handleUpdateLeave = (updated: LeaveRecord, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+    const prevItem = db.leaves.find(l => l.id === updated.id);
+
+    const stamped: LeaveRecord = {
+      ...updated,
+      lastEditedAt: nowIso,
+      lastEditReason: cleanReason,
+      lastEditedBy: editedBy,
+    };
+
+    const prevDesc = prevItem
+      ? `${prevItem.leaveType} ${prevItem.days} วัน (${formatThaiLeaveRange(prevItem.startDate, prevItem.endDate)})`
+      : '';
+    const nextDesc = `${stamped.leaveType} ${stamped.days} วัน (${formatThaiLeaveRange(stamped.startDate, stamped.endDate)})`;
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'แก้ไขวันลา',
+      targetName: stamped.staffName,
+      summary: prevDesc ? `${prevDesc} → ${nextDesc}` : nextDesc,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markLeavesDirty();
     setDb(prev => ({
       ...prev,
-      leaves: prev.leaves.map(l => l.id === updated.id ? updated : l),
+      leaves: prev.leaves.map(l => l.id === stamped.id ? stamped : l),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
     }));
     setLocalRevision(r => r + 1);
-    showToast(`อัปเดตประวัติการลา ${updated.staffName} เรียบร้อยแล้ว`, 'success');
+    void recordAuditToSheet(auditEntry);
+    showToast(`อัปเดตประวัติการลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
   };
 
-  // Handler: Delete Leave
-  const handleDeleteLeave = (id: string) => {
-    if (window.confirm('ยืนยันที่จะลบประวัติการลานี้หรือไม่?')) {
-      setDb(prev => ({
-        ...prev,
-        leaves: prev.leaves.filter(l => l.id !== id),
-      }));
-      setLocalRevision(r => r + 1);
-      showToast('ลบประวัติการลาเรียบร้อยแล้ว', 'info');
-    }
+  // Handler: Delete Leave (Admin, mandatory reason + timestamp)
+  const handleDeleteLeave = (id: string, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const target = db.leaves.find(l => l.id === id);
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'ลบวันลา',
+      targetName: target?.staffName || 'ไม่ระบุชื่อ',
+      summary: target
+        ? `${target.leaveType} ${target.days} วัน (${formatThaiLeaveRange(target.startDate, target.endDate)})`
+        : `รหัสรายการ ${id}`,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markLeavesDirty();
+    setDb(prev => ({
+      ...prev,
+      leaves: prev.leaves.filter(l => l.id !== id),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
+    }));
+    setLocalRevision(r => r + 1);
+    void recordAuditToSheet(auditEntry);
+    showToast('ลบประวัติการลาพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
   };
 
   // Handler: Save Batch OT
@@ -584,24 +703,75 @@ export default function App() {
     }
   };
 
-  // Handler: Update OT (Admin)
-  const handleUpdateOT = (updated: OTAttendance) => {
+  // Handler: Update OT (Admin, mandatory reason + timestamp)
+  const handleUpdateOT = (updated: OTAttendance, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+    const prevItem = db.ot.find(o => o.id === updated.id);
+
+    const stamped: OTAttendance = {
+      ...updated,
+      lastEditedAt: nowIso,
+      lastEditReason: cleanReason,
+      lastEditedBy: editedBy,
+    };
+
+    const summary = prevItem
+      ? `${prevItem.workClinic} (${formatThaiShortDate(prevItem.date)}) → ${stamped.workClinic} (${formatThaiShortDate(stamped.date)} • ${stamped.shift})`
+      : `${stamped.workClinic} (${formatThaiShortDate(stamped.date)} • ${stamped.shift})`;
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'แก้ไขเวร OT',
+      targetName: stamped.staffName,
+      summary,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markOtDirty();
     setDb(prev => ({
       ...prev,
-      ot: prev.ot.map(o => o.id === updated.id ? updated : o),
+      ot: prev.ot.map(o => o.id === stamped.id ? stamped : o),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
     }));
     setLocalRevision(r => r + 1);
-    showToast(`อัปเดตเวรนอกเวลา ${updated.staffName} เรียบร้อยแล้ว`, 'success');
+    void recordAuditToSheet(auditEntry);
+    showToast(`อัปเดตเวรนอกเวลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
   };
 
-  // Handler: Delete OT
-  const handleDeleteOT = (id: string) => {
+  // Handler: Delete OT (Admin, mandatory reason + timestamp)
+  const handleDeleteOT = (id: string, reason: string) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const target = db.ot.find(o => o.id === id);
+    const nowIso = new Date().toISOString();
+    const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'ลบเวร OT',
+      targetName: target?.staffName || 'ไม่ระบุชื่อ',
+      summary: target
+        ? `${target.workClinic} (${formatThaiShortDate(target.date)} • ${target.shift})`
+        : `รหัสรายการ ${id}`,
+      reason: cleanReason,
+      editedBy,
+    };
+
+    markOtDirty();
     setDb(prev => ({
       ...prev,
       ot: prev.ot.filter(o => o.id !== id),
+      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
     }));
     setLocalRevision(r => r + 1);
-    showToast('ลบรายการเวรนอกเวลาแล้ว', 'info');
+    void recordAuditToSheet(auditEntry);
+    showToast('ลบรายการเวรนอกเวลาพร้อมบันทึกเหตุผลแล้ว', 'info');
   };
 
   // Handler: Add Staff Member
@@ -718,15 +888,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100/70 text-slate-800 flex flex-col font-sans">
-      {/* Top Navbar */}
+      {/* Top Navbar (Clean without Auto Sync & Sync Sheet buttons per Image 1; Auto Sync still runs silently) */}
       <Navbar
         isAdmin={isAdmin}
+        adminOwnerName={adminOwnerName}
         onLockAdmin={handleLockAdmin}
-        hasSpreadsheet={Boolean(db.settings.spreadsheetId)}
-        isSyncingSheet={isSyncingSheet}
-        autoSyncEnabled={db.settings.autoSync !== false}
-        lastSyncedAt={lastSyncedAt}
-        onManualSync={() => handleSyncSpreadsheet()}
       />
 
       {/* Floating Toast Message */}
@@ -843,6 +1009,7 @@ export default function App() {
             staffList={db.staff}
             leaves={db.leaves}
             otRecords={db.ot}
+            auditLogs={db.auditLogs || []}
             workloads={db.workloads}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
@@ -888,6 +1055,7 @@ export default function App() {
             leaveTypes={leaveTypes}
             isAdmin={isAdmin}
             isAdminUnlocked={isAdminUnlocked}
+            adminOwnerName={adminOwnerName}
             user={user}
             onLogin={handleLogin}
             onLogout={handleLogout}

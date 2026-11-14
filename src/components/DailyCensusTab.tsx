@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { DailyWorkload, WorkShift, SHIFTS, getEffectiveTotalPt } from '../types';
-import { formatThaiFullDate } from '../utils/thaiDate';
+import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime } from '../utils/thaiDate';
 import { exportElementAsJpeg } from '../utils/exportImage';
+import { ThaiDateInput } from './ThaiDateInput';
 import { 
   FileText, 
   Printer, 
@@ -18,14 +19,15 @@ import {
   Trash2,
   X,
   Save,
-  ImageDown
+  ImageDown,
+  AlertCircle
 } from 'lucide-react';
 
 interface DailyCensusTabProps {
   workloads: DailyWorkload[];
   isAdmin?: boolean;
-  onUpdateWorkload?: (updated: DailyWorkload) => void;
-  onDeleteWorkload?: (id: string) => void;
+  onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
+  onDeleteWorkload?: (id: string, reason: string) => void;
 }
 
 export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({ 
@@ -41,6 +43,12 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const [copied, setCopied] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
+  const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
+  const [editWorkloadReasonError, setEditWorkloadReasonError] = useState<string>('');
+  const [editModalError, setEditModalError] = useState<string>('');
+  const [deletingWorkload, setDeletingWorkload] = useState<DailyWorkload | null>(null);
+  const [deleteWorkloadReason, setDeleteWorkloadReason] = useState<string>('');
+  const [deleteWorkloadReasonError, setDeleteWorkloadReasonError] = useState<string>('');
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
   const formattedThaiDate = useMemo(() => formatThaiFullDate(date), [date]);
 
@@ -228,13 +236,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
       <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-gray-500" />
-            <label className="text-xs font-bold text-gray-700">วันที่:</label>
-            <input
-              type="date"
+            <Calendar className="w-4 h-4 text-gray-500 shrink-0" />
+            <label className="text-xs font-bold text-gray-700 whitespace-nowrap">วันที่ (พ.ศ.):</label>
+            <ThaiDateInput
               value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border"
+              onChange={setDate}
+              className="w-40"
+              selectClassName="w-full text-xs rounded-lg border border-gray-300 py-1.5 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-blue-500"
             />
           </div>
 
@@ -384,8 +392,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                     <td className="py-2 px-1.5 text-center text-gray-600">{w.clerk}</td>
                     <td className="py-2 px-1.5 text-center text-gray-600">{w.serviceWorker}</td>
                     <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px]">{w.reporter}</td>
-                    <td className="py-2 px-3 text-gray-500 text-[11px] truncate max-w-[150px]" title={w.note}>
-                      {w.note || '-'}
+                    <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px]" title={w.note}>
+                      <div className="truncate">{w.note || '-'}</div>
+                      {(w.lastEditReason || w.lastEditedAt) && (
+                        <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
+                          แก้ไข: {w.lastEditReason || '-'}
+                        </div>
+                      )}
                     </td>
                     {isAdmin && (
                       <td className="py-2 px-2 text-center whitespace-nowrap no-print">
@@ -393,7 +406,12 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                           {onUpdateWorkload && (
                             <button
                               type="button"
-                              onClick={() => setEditingWorkload({ ...w, totalPt: getEffectiveTotalPt(w) })}
+                              onClick={() => {
+                                setEditingWorkload({ ...w, totalPt: getEffectiveTotalPt(w) });
+                                setEditWorkloadReason('');
+                                setEditWorkloadReasonError('');
+                                setEditModalError('');
+                              }}
                               className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
                               title="แก้ไขข้อมูลภาระงาน"
                             >
@@ -403,7 +421,11 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                           {onDeleteWorkload && (
                             <button
                               type="button"
-                              onClick={() => onDeleteWorkload(w.id)}
+                              onClick={() => {
+                                setDeletingWorkload(w);
+                                setDeleteWorkloadReason('');
+                                setDeleteWorkloadReasonError('');
+                              }}
                               className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
                               title="ลบรายการ"
                             >
@@ -490,12 +512,11 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <div className="space-y-4 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">วันที่</label>
-                  <input
-                    type="date"
+                  <label className="block font-semibold text-gray-700 mb-1">วันที่ (พ.ศ.)</label>
+                  <ThaiDateInput
                     value={editingWorkload.date}
-                    onChange={(e) => setEditingWorkload({ ...editingWorkload, date: e.target.value })}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onChange={(iso) => setEditingWorkload({ ...editingWorkload, date: iso })}
+                    selectClassName="w-full px-2.5 py-1.5 pr-9 border border-gray-300 rounded-lg text-xs bg-white font-medium text-gray-900 outline-none focus:border-blue-500"
                   />
                 </div>
                 <div>
@@ -512,7 +533,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <select
                     value={editingWorkload.shift}
                     onChange={(e) => setEditingWorkload({ ...editingWorkload, shift: e.target.value as WorkShift })}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
                   >
                     <option value="ในเวลา 08:00-16:00">ในเวลา 08:00-16:00</option>
                     <option value="นอกเวลาเย็น 16:00-20:00">นอกเวลาเย็น 16:00-20:00</option>
@@ -667,7 +688,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <input
                     type="text"
                     value={editingWorkload.reporter}
-                    onChange={(e) => setEditingWorkload({ ...editingWorkload, reporter: e.target.value })}
+                    onChange={(e) => {
+                      setEditingWorkload({ ...editingWorkload, reporter: e.target.value });
+                      if (editModalError) setEditModalError('');
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                     placeholder="เช่น พว.สุดารัตน์ ศิริพรหม"
                     required
@@ -684,13 +708,69 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   />
                 </div>
               </div>
+
+              {editModalError && (
+                <div className="flex items-center gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-medium">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{editModalError}</span>
+                </div>
+              )}
+
+              {/* Mandatory Edit Reason + Timestamp Preview */}
+              <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <label className="block font-bold text-amber-900">
+                    เหตุผลการแก้ไขรายการ <span className="text-red-600">*</span>
+                  </label>
+                  <span className="text-[11px] text-amber-700 font-medium">
+                    เวลาที่บันทึก: {formatThaiDateTime(new Date().toISOString())}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {['แก้ไขจำนวนผู้ป่วย', 'แก้ไขจำนวนเจ้าหน้าที่ขึ้นเวร', 'แก้ไขห้องตรวจ/กะเวลา', 'แก้ไขชื่อผู้รายงาน'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        setEditWorkloadReason(preset);
+                        setEditWorkloadReasonError('');
+                      }}
+                      className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors cursor-pointer ${
+                        editWorkloadReason === preset
+                          ? 'bg-amber-600 text-white border-amber-600 font-semibold'
+                          : 'bg-white text-amber-800 border-amber-300 hover:bg-amber-100'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={editWorkloadReason}
+                  onChange={(e) => {
+                    setEditWorkloadReason(e.target.value);
+                    if (editWorkloadReasonError) setEditWorkloadReasonError('');
+                  }}
+                  placeholder="ระบุเหตุผลการแก้ไข เช่น แก้ไขยอดผู้ป่วยนอกช่วงบ่าย..."
+                  className={`w-full px-3 py-1.5 border rounded-lg text-xs bg-white ${
+                    editWorkloadReasonError ? 'border-red-400' : 'border-amber-300'
+                  }`}
+                />
+                {editWorkloadReasonError && (
+                  <p className="text-[11px] text-red-600 font-medium flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{editWorkloadReasonError}</span>
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-2.5 border-t pt-3">
               <button
                 type="button"
                 onClick={() => setEditingWorkload(null)}
-                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl"
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
               >
                 ยกเลิก
               </button>
@@ -698,16 +778,122 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 type="button"
                 onClick={() => {
                   if (!editingWorkload.reporter.trim()) {
-                    alert('กรุณาระบุชื่อผู้บันทึกรายงาน');
+                    setEditModalError('กรุณาระบุชื่อผู้บันทึกรายงาน');
                     return;
                   }
-                  onUpdateWorkload(editingWorkload);
+                  if (!editWorkloadReason.trim()) {
+                    setEditWorkloadReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
+                    return;
+                  }
+                  onUpdateWorkload(editingWorkload, editWorkloadReason.trim());
                   setEditingWorkload(null);
+                  setEditWorkloadReason('');
                 }}
                 className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <Save className="w-4 h-4" />
                 <span>บันทึกการแก้ไข</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Delete Workload Confirmation Modal (Mandatory Reason) */}
+      {deletingWorkload && onDeleteWorkload && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs no-print">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-red-200 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-red-100 pb-3">
+              <div className="flex items-center gap-2 text-red-700">
+                <Trash2 className="w-5 h-5" />
+                <h3 className="text-base font-bold">ยืนยันการลบรายการภาระงาน</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingWorkload(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-1 text-gray-700">
+              <div className="font-bold text-gray-900">{deletingWorkload.clinic} ({deletingWorkload.shift})</div>
+              <div>วันที่: <span className="font-semibold">{formatThaiShortDate(deletingWorkload.date)}</span></div>
+              <div>ผู้ป่วยทั้งหมด: <span className="font-semibold">{getEffectiveTotalPt(deletingWorkload)} คน</span> • ผู้รายงาน: {deletingWorkload.reporter}</div>
+            </div>
+
+            <div className="bg-red-50/70 border border-red-200 rounded-xl p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <label className="font-bold text-red-900">
+                  เหตุผลการลบรายการ <span className="text-red-600">*</span>
+                </label>
+                <span className="text-[11px] text-red-700 font-medium">
+                  เวลาที่ลบ: {formatThaiDateTime(new Date().toISOString())}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {['บันทึกซ้ำซ้อน', 'บันทึกผิดห้องตรวจ/ผิดวัน', 'ยกเลิกรายการ'].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setDeleteWorkloadReason(preset);
+                      setDeleteWorkloadReasonError('');
+                    }}
+                    className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors cursor-pointer ${
+                      deleteWorkloadReason === preset
+                        ? 'bg-red-600 text-white border-red-600 font-semibold'
+                        : 'bg-white text-red-800 border-red-300 hover:bg-red-100'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={deleteWorkloadReason}
+                onChange={(e) => {
+                  setDeleteWorkloadReason(e.target.value);
+                  if (deleteWorkloadReasonError) setDeleteWorkloadReasonError('');
+                }}
+                placeholder="ระบุเหตุผลการลบ เช่น บันทึกข้อมูลซ้ำซ้อน..."
+                className={`w-full px-3 py-1.5 border rounded-lg text-xs bg-white ${
+                  deleteWorkloadReasonError ? 'border-red-500' : 'border-red-300'
+                }`}
+              />
+              {deleteWorkloadReasonError && (
+                <p className="text-[11px] text-red-700 font-medium flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{deleteWorkloadReasonError}</span>
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 border-t pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingWorkload(null)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deleteWorkloadReason.trim()) {
+                    setDeleteWorkloadReasonError('กรุณาระบุเหตุผลการลบรายการก่อนยืนยัน');
+                    return;
+                  }
+                  onDeleteWorkload(deletingWorkload.id, deleteWorkloadReason.trim());
+                  setDeletingWorkload(null);
+                  setDeleteWorkloadReason('');
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>ยืนยันการลบ</span>
               </button>
             </div>
           </div>

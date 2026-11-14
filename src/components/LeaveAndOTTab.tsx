@@ -15,6 +15,7 @@ import {
   POSITION_LABELS,
   formatPositionLabel,
   CustomHoliday,
+  AuditLogEntry,
   compareStaffByPositionAndStartDate,
 } from '../types';
 import {
@@ -42,18 +43,26 @@ import {
   BadgePlus,
   ImageDown,
   Printer,
+  History,
 } from 'lucide-react';
-import { formatThaiLeaveRange, formatThaiShortDate, splitThaiName } from '../utils/thaiDate';
+import {
+  formatThaiLeaveRange,
+  formatThaiShortDate,
+  formatThaiDateTime,
+  splitThaiName,
+} from '../utils/thaiDate';
 import {
   calculateGovernmentLeaveStats,
   countGovernmentWorkdaysInRange,
 } from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
+import { ThaiDateInput } from './ThaiDateInput';
 
 interface LeaveAndOTTabProps {
   staffList: StaffMember[];
   leaves: LeaveRecord[];
   otRecords: OTAttendance[];
+  auditLogs?: AuditLogEntry[];
   workloads?: DailyWorkload[];
   inTimeClinics?: string[];
   outTimeClinics?: string[];
@@ -62,10 +71,10 @@ interface LeaveAndOTTabProps {
   isAdmin?: boolean;
   onSaveLeave: (leave: LeaveRecord) => void;
   onSaveBatchOT: (records: OTAttendance[]) => void;
-  onUpdateLeave?: (updated: LeaveRecord) => void;
-  onDeleteLeave: (id: string) => void;
-  onUpdateOT?: (updated: OTAttendance) => void;
-  onDeleteOT: (id: string) => void;
+  onUpdateLeave?: (updated: LeaveRecord, reason: string) => void;
+  onDeleteLeave: (id: string, reason: string) => void;
+  onUpdateOT?: (updated: OTAttendance, reason: string) => void;
+  onDeleteOT: (id: string, reason: string) => void;
 }
 
 interface ExternalOtDraft {
@@ -79,6 +88,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   staffList,
   leaves,
   otRecords,
+  auditLogs = [],
   workloads = [],
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
@@ -140,6 +150,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [leaveSearchStaff, setLeaveSearchStaff] = useState<string>('');
   const [leaveFilterType, setLeaveFilterType] = useState<string>('ALL');
   const [editingLeave, setEditingLeave] = useState<LeaveRecord | null>(null);
+  const [editLeaveReason, setEditLeaveReason] = useState<string>('');
+  const [editLeaveReasonError, setEditLeaveReasonError] = useState<string>('');
+  const [deletingLeave, setDeletingLeave] = useState<LeaveRecord | null>(null);
+  const [deleteLeaveReason, setDeleteLeaveReason] = useState<string>('');
+  const [deleteLeaveReasonError, setDeleteLeaveReasonError] = useState<string>('');
+  const [showLeaveAuditLog, setShowLeaveAuditLog] = useState<boolean>(false);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -218,9 +234,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [extError, setExtError] = useState<string>('');
   const [externalOtStaff, setExternalOtStaff] = useState<ExternalOtDraft[]>([]);
 
-  // OT History search & edit modal
+  // OT History search & edit/delete modal with mandatory reason
   const [otHistorySearch, setOtHistorySearch] = useState<string>('');
   const [editingOT, setEditingOT] = useState<OTAttendance | null>(null);
+  const [editOtReason, setEditOtReason] = useState<string>('');
+  const [editOtReasonError, setEditOtReasonError] = useState<string>('');
+  const [deletingOT, setDeletingOT] = useState<OTAttendance | null>(null);
+  const [deleteOtReason, setDeleteOtReason] = useState<string>('');
+  const [deleteOtReasonError, setDeleteOtReasonError] = useState<string>('');
+  const [showOtAuditLog, setShowOtAuditLog] = useState<boolean>(false);
 
   const otWorkClinicOptions = useMemo(() => {
     if (otShift === 'OT ในเวลาราชการ 08:00-16:00') {
@@ -1081,29 +1103,25 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    วันที่เริ่มต้นลา <span className="text-red-500">*</span>
+                    วันที่เริ่มต้นลา (พ.ศ.) <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="date"
+                  <ThaiDateInput
                     value={leaveStartDate}
-                    onChange={(e) => handleStartDateChange(e.target.value)}
-                    required
-                    className="w-full text-xs rounded-lg border-gray-300 py-2 px-2.5 border"
+                    onChange={handleStartDateChange}
+                    selectClassName="w-full text-xs rounded-lg border border-gray-300 py-2 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-amber-500"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    วันที่สิ้นสุดลา <span className="text-red-500">*</span>
+                    วันที่สิ้นสุดลา (พ.ศ.) <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="date"
+                  <ThaiDateInput
                     value={leaveEndDate}
-                    onChange={(e) => handleEndDateChange(e.target.value)}
-                    required
-                    className="w-full text-xs rounded-lg border-gray-300 py-2 px-2.5 border"
+                    onChange={handleEndDateChange}
+                    selectClassName="w-full text-xs rounded-lg border border-gray-300 py-2 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-amber-500"
                   />
                 </div>
               </div>
@@ -1282,8 +1300,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             <td className="py-2 px-3">
                               <div className="font-semibold text-gray-900">{lv.staffName}</div>
                               {lv.note && (
-                                <div className="text-[10px] text-gray-400 truncate max-w-[180px]">
+                                <div className="text-[10px] text-gray-500 truncate max-w-[200px]" title={lv.note}>
                                   {lv.note}
+                                </div>
+                              )}
+                              {lv.lastEditReason && (
+                                <div
+                                  className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
+                                  title={`แก้ไขโดย ${lv.lastEditedBy || 'Admin'} เมื่อ ${lv.lastEditedAt ? formatThaiDateTime(lv.lastEditedAt) : '-'}`}
+                                >
+                                  แก้ไข: {lv.lastEditReason}
+                                  {lv.lastEditedAt ? ` • ${formatThaiDateTime(lv.lastEditedAt)}` : ''}
                                 </div>
                               )}
                             </td>
@@ -1302,10 +1329,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 {lv.leaveType}
                               </span>
                             </td>
-                            <td className="py-2 px-2 text-center text-[11px] text-gray-500">
+                            <td className="py-2 px-2 text-center text-[11px] text-gray-600 whitespace-nowrap">
                               {lv.startDate === lv.endDate
-                                ? lv.startDate
-                                : `${lv.startDate} ถึง ${lv.endDate}`}
+                                ? formatThaiShortDate(lv.startDate)
+                                : `${formatThaiShortDate(lv.startDate)} ถึง ${formatThaiShortDate(lv.endDate)}`}
                             </td>
                             <td className="py-2 px-2 text-center font-bold text-gray-800">
                               {lv.days}
@@ -1315,9 +1342,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 {isAdmin && onUpdateLeave && (
                                   <button
                                     type="button"
-                                    onClick={() => setEditingLeave(lv)}
+                                    onClick={() => {
+                                      setEditingLeave({ ...lv });
+                                      setEditLeaveReason('');
+                                      setEditLeaveReasonError('');
+                                    }}
                                     className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
-                                    title="แก้ไขรายการ (Admin)"
+                                    title="แก้ไขรายการและระบุเหตุผล (Admin)"
                                   >
                                     <Pencil className="w-3.5 h-3.5" />
                                   </button>
@@ -1325,9 +1356,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 {isAdmin ? (
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteLeave(lv.id)}
+                                    onClick={() => {
+                                      setDeletingLeave(lv);
+                                      setDeleteLeaveReason('');
+                                      setDeleteLeaveReasonError('');
+                                    }}
                                     className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
-                                    title="ลบรายการ (Admin)"
+                                    title="ลบรายการและบันทึกเหตุผล (Admin)"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </button>
@@ -1341,6 +1376,63 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       })}
                     </tbody>
                   </table>
+                </div>
+              )}
+
+              {/* Leave Audit Log Section */}
+              {auditLogs.filter((a) => a.action === 'แก้ไขวันลา' || a.action === 'ลบวันลา').length > 0 && (
+                <div className="pt-2 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaveAuditLog((prev) => !prev)}
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-amber-700 cursor-pointer"
+                  >
+                    <History className="w-3.5 h-3.5 text-amber-600" />
+                    <span>
+                      ประวัติการแก้ไข / ลบวันลา (
+                      {auditLogs.filter((a) => a.action === 'แก้ไขวันลา' || a.action === 'ลบวันลา').length}{' '}
+                      รายการ)
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${showLeaveAuditLog ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+
+                  {showLeaveAuditLog && (
+                    <div className="mt-2.5 space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                      {auditLogs
+                        .filter((a) => a.action === 'แก้ไขวันลา' || a.action === 'ลบวันลา')
+                        .map((log) => (
+                          <div
+                            key={log.id}
+                            className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] flex flex-col gap-1"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-1">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${
+                                    log.action === 'ลบวันลา'
+                                      ? 'bg-red-100 text-red-800'
+                                      : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {log.action}
+                                </span>
+                                <span className="font-bold text-gray-900">{log.targetName}</span>
+                              </div>
+                              <span className="text-[10px] text-gray-500">
+                                {formatThaiDateTime(log.timestamp)}
+                                {log.editedBy ? ` • โดย ${log.editedBy}` : ''}
+                              </span>
+                            </div>
+                            <div className="text-gray-600">{log.summary}</div>
+                            <div className="text-amber-900 font-semibold">
+                              เหตุผล: {log.reason}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1366,14 +1458,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1">
-                      วันที่ปฏิบัติงานเวร <span className="text-red-500">*</span>
+                      วันที่ปฏิบัติงานเวร (พ.ศ.) <span className="text-red-500">*</span>
                     </label>
-                    <input
-                      type="date"
+                    <ThaiDateInput
                       value={otDate}
-                      onChange={(e) => setOtDate(e.target.value)}
-                      required
-                      className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border"
+                      onChange={setOtDate}
+                      selectClassName="w-full text-xs rounded-lg border border-gray-300 py-2 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-teal-500"
                     />
                   </div>
                   <div>
@@ -1678,7 +1768,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       return (
                         <tr key={o.id} className="hover:bg-slate-50/80">
                           <td className="py-2 px-3 text-gray-700 font-medium whitespace-nowrap">
-                            {o.date}
+                            {formatThaiShortDate(o.date)}
                           </td>
                           <td className="py-2 px-2">
                             <span
@@ -1700,6 +1790,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 </span>
                               )}
                             </div>
+                            {o.lastEditReason && (
+                              <div
+                                className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
+                                title={`แก้ไขโดย ${o.lastEditedBy || 'Admin'} เมื่อ ${o.lastEditedAt ? formatThaiDateTime(o.lastEditedAt) : '-'}`}
+                              >
+                                แก้ไข: {o.lastEditReason}
+                                {o.lastEditedAt ? ` • ${formatThaiDateTime(o.lastEditedAt)}` : ''}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2 px-2 text-gray-600">
                             {formatPositionLabel(o.position)}
@@ -1711,9 +1810,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               {isAdmin && onUpdateOT && (
                                 <button
                                   type="button"
-                                  onClick={() => setEditingOT(o)}
+                                  onClick={() => {
+                                    setEditingOT({ ...o });
+                                    setEditOtReason('');
+                                    setEditOtReasonError('');
+                                  }}
                                   className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
-                                  title="แก้ไขรายการ (Admin)"
+                                  title="แก้ไขรายการและระบุเหตุผล (Admin)"
                                 >
                                   <Pencil className="w-3.5 h-3.5" />
                                 </button>
@@ -1721,9 +1824,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               {isAdmin ? (
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteOT(o.id)}
+                                  onClick={() => {
+                                    setDeletingOT(o);
+                                    setDeleteOtReason('');
+                                    setDeleteOtReasonError('');
+                                  }}
                                   className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
-                                  title="ลบรายการ (Admin)"
+                                  title="ลบรายการและบันทึกเหตุผล (Admin)"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -1737,6 +1844,63 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {/* OT Audit Log Section */}
+            {auditLogs.filter((a) => a.action === 'แก้ไขเวร OT' || a.action === 'ลบเวร OT').length > 0 && (
+              <div className="pt-2 border-t border-gray-200">
+                <button
+                  type="button"
+                  onClick={() => setShowOtAuditLog((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-teal-700 cursor-pointer"
+                >
+                  <History className="w-3.5 h-3.5 text-teal-600" />
+                  <span>
+                    ประวัติการแก้ไข / ลบเวร OT (
+                    {auditLogs.filter((a) => a.action === 'แก้ไขเวร OT' || a.action === 'ลบเวร OT').length}{' '}
+                    รายการ)
+                  </span>
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 transition-transform ${showOtAuditLog ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {showOtAuditLog && (
+                  <div className="mt-2.5 space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {auditLogs
+                      .filter((a) => a.action === 'แก้ไขเวร OT' || a.action === 'ลบเวร OT')
+                      .map((log) => (
+                        <div
+                          key={log.id}
+                          className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] flex flex-col gap-1"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${
+                                  log.action === 'ลบเวร OT'
+                                    ? 'bg-red-100 text-red-800'
+                                    : 'bg-blue-100 text-blue-800'
+                                }`}
+                              >
+                                {log.action}
+                              </span>
+                              <span className="font-bold text-gray-900">{log.targetName}</span>
+                            </div>
+                            <span className="text-[10px] text-gray-500">
+                              {formatThaiDateTime(log.timestamp)}
+                              {log.editedBy ? ` • โดย ${log.editedBy}` : ''}
+                            </span>
+                          </div>
+                          <div className="text-gray-600">{log.summary}</div>
+                          <div className="text-teal-900 font-semibold">
+                            เหตุผล: {log.reason}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2447,10 +2611,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         </div>
       )}
 
-      {/* Admin Edit Leave Modal */}
+      {/* Admin Edit Leave Modal (Mandatory Reason + Timestamp) */}
       {editingLeave && onUpdateLeave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-gray-200 p-6 space-y-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full max-h-[92vh] overflow-y-auto shadow-2xl border border-gray-200 p-6 space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <div className="flex items-center gap-2">
                 <Pencil className="w-5 h-5 text-amber-600" />
@@ -2499,14 +2663,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">ตั้งแต่วันที่</label>
-                  <input
-                    type="date"
+                  <label className="block font-semibold text-gray-700 mb-1">ตั้งแต่วันที่ (พ.ศ.)</label>
+                  <ThaiDateInput
                     value={editingLeave.startDate}
-                    onChange={(e) => {
-                      const nextStart = e.target.value;
+                    onChange={(nextStart) => {
                       const nextEnd = editingLeave.endDate >= nextStart ? editingLeave.endDate : nextStart;
                       const autoWorkDays = countGovernmentWorkdaysInRange(nextStart, nextEnd, customHolidays);
                       setEditingLeave({
@@ -2516,16 +2678,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                         days: autoWorkDays,
                       });
                     }}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">ถึงวันที่</label>
-                  <input
-                    type="date"
+                  <label className="block font-semibold text-gray-700 mb-1">ถึงวันที่ (พ.ศ.)</label>
+                  <ThaiDateInput
                     value={editingLeave.endDate}
-                    onChange={(e) => {
-                      const nextEnd = e.target.value >= editingLeave.startDate ? e.target.value : editingLeave.startDate;
+                    onChange={(nextDate) => {
+                      const nextEnd = nextDate >= editingLeave.startDate ? nextDate : editingLeave.startDate;
                       const autoWorkDays = countGovernmentWorkdaysInRange(editingLeave.startDate, nextEnd, customHolidays);
                       setEditingLeave({
                         ...editingLeave,
@@ -2533,7 +2693,6 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                         days: autoWorkDays,
                       });
                     }}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                   />
                 </div>
               </div>
@@ -2571,7 +2730,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
 
               <div>
-                <label className="block font-semibold text-gray-700 mb-1">หมายเหตุ</label>
+                <label className="block font-semibold text-gray-700 mb-1">หมายเหตุการลา</label>
                 <input
                   type="text"
                   value={editingLeave.note || ''}
@@ -2579,6 +2738,52 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   placeholder="เช่น ใบรับรองแพทย์, ลาพักผ่อนประจำปี"
                   className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                 />
+              </div>
+
+              {/* Mandatory Edit Reason */}
+              <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
+                <label className="block font-bold text-amber-950">
+                  เหตุผลการแก้ไขรายการ (บังคับระบุ) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={editLeaveReason}
+                  onChange={(e) => {
+                    setEditLeaveReason(e.target.value);
+                    setEditLeaveReasonError('');
+                  }}
+                  placeholder="เช่น เปลี่ยนจากลาพักผ่อนเป็นลาป่วย, แก้ไขช่วงวันที่ลา"
+                  className="w-full px-2.5 py-2 border border-amber-300 rounded-lg text-xs bg-white font-medium"
+                />
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    'เปลี่ยนจากลาพักผ่อนเป็นลาป่วย',
+                    'เปลี่ยนประเภทการลา',
+                    'แก้ไขช่วงวันที่ลา',
+                    'ปรับแก้จำนวนวันลา',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        setEditLeaveReason(preset);
+                        setEditLeaveReasonError('');
+                      }}
+                      className="px-2 py-0.5 text-[10px] rounded-md bg-white border border-amber-200 text-amber-900 hover:bg-amber-100 cursor-pointer"
+                    >
+                      + {preset}
+                    </button>
+                  ))}
+                </div>
+                {editLeaveReasonError && (
+                  <p className="text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{editLeaveReasonError}</span>
+                  </p>
+                )}
+                <p className="text-[10px] text-amber-800">
+                  ระบบจะบันทึกเวลาที่แก้ไขอัตโนมัติ: {formatThaiDateTime(new Date().toISOString())}
+                </p>
               </div>
             </div>
 
@@ -2593,8 +2798,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onUpdateLeave(editingLeave);
+                  if (!editLeaveReason.trim()) {
+                    setEditLeaveReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
+                    return;
+                  }
+                  onUpdateLeave(editingLeave, editLeaveReason.trim());
                   setEditingLeave(null);
+                  setEditLeaveReason('');
                 }}
                 className="px-5 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
               >
@@ -2606,10 +2816,112 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         </div>
       )}
 
-      {/* Admin Edit OT Modal */}
+      {/* Admin Delete Leave Confirmation Modal (Mandatory Reason + Timestamp) */}
+      {deletingLeave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-red-200 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <Trash2 className="w-5 h-5 text-red-600" />
+                <h3 className="text-base font-bold text-red-950">
+                  ยืนยันลบประวัติการลา (ระบุเหตุผล)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingLeave(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-bold text-gray-900">{deletingLeave.staffName}</div>
+                <div className="text-gray-600">
+                  {deletingLeave.leaveType} • {deletingLeave.days} วัน (
+                  {formatThaiLeaveRange(deletingLeave.startDate, deletingLeave.endDate)})
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block font-bold text-red-950">
+                  เหตุผลการลบรายการ (บังคับระบุ) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={deleteLeaveReason}
+                  onChange={(e) => {
+                    setDeleteLeaveReason(e.target.value);
+                    setDeleteLeaveReasonError('');
+                  }}
+                  placeholder="เช่น ยกเลิกวันลา, บันทึกซ้ำซ้อน, บันทึกข้อมูลผิดคน"
+                  autoFocus
+                  className="w-full px-2.5 py-2 border border-red-300 rounded-lg text-xs font-medium"
+                />
+                <div className="flex flex-wrap gap-1">
+                  {['ยกเลิกวันลา', 'เปลี่ยนแผนไม่ลาแล้ว', 'บันทึกข้อมูลซ้ำซ้อน', 'บันทึกผิดคน/ผิดวัน'].map(
+                    (preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          setDeleteLeaveReason(preset);
+                          setDeleteLeaveReasonError('');
+                        }}
+                        className="px-2 py-0.5 text-[10px] rounded-md bg-red-50 border border-red-200 text-red-900 hover:bg-red-100 cursor-pointer"
+                      >
+                        + {preset}
+                      </button>
+                    )
+                  )}
+                </div>
+                {deleteLeaveReasonError && (
+                  <p className="text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{deleteLeaveReasonError}</span>
+                  </p>
+                )}
+                <p className="text-[10px] text-gray-500">
+                  บันทึกเวลาที่ลบอัตโนมัติ: {formatThaiDateTime(new Date().toISOString())}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 border-t pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingLeave(null)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deleteLeaveReason.trim()) {
+                    setDeleteLeaveReasonError('กรุณาระบุเหตุผลการลบรายการก่อนยืนยัน');
+                    return;
+                  }
+                  onDeleteLeave(deletingLeave.id, deleteLeaveReason.trim());
+                  setDeletingLeave(null);
+                  setDeleteLeaveReason('');
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>ยืนยันลบและบันทึกเหตุผล</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Edit OT Modal (Mandatory Reason + Timestamp) */}
       {editingOT && onUpdateOT && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-gray-200 p-6 space-y-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full max-h-[92vh] overflow-y-auto shadow-2xl border border-gray-200 p-6 space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <div className="flex items-center gap-2">
                 <Pencil className="w-5 h-5 text-teal-600" />
@@ -2673,14 +2985,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">วันที่</label>
-                  <input
-                    type="date"
+                  <label className="block font-semibold text-gray-700 mb-1">วันที่ (พ.ศ.)</label>
+                  <ThaiDateInput
                     value={editingOT.date}
-                    onChange={(e) => setEditingOT({ ...editingOT, date: e.target.value })}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    onChange={(nextDate) => setEditingOT({ ...editingOT, date: nextDate })}
                   />
                 </div>
                 <div>
@@ -2717,6 +3027,52 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   ))}
                 </select>
               </div>
+
+              {/* Mandatory Edit Reason */}
+              <div className="p-3 rounded-xl bg-teal-50/70 border border-teal-200 space-y-2">
+                <label className="block font-bold text-teal-950">
+                  เหตุผลการแก้ไขรายการ (บังคับระบุ) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={editOtReason}
+                  onChange={(e) => {
+                    setEditOtReason(e.target.value);
+                    setEditOtReasonError('');
+                  }}
+                  placeholder="เช่น เปลี่ยนห้องตรวจที่ขึ้นเวร, แก้ไขวันที่/กะเวลาเวร"
+                  className="w-full px-2.5 py-2 border border-teal-300 rounded-lg text-xs bg-white font-medium"
+                />
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    'เปลี่ยนคลินิกที่ปฏิบัติงาน',
+                    'เปลี่ยนวันที่ขึ้นเวร',
+                    'แก้ไขกะเวลาเวร',
+                    'เปลี่ยนชื่อผู้ปฏิบัติแทน',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        setEditOtReason(preset);
+                        setEditOtReasonError('');
+                      }}
+                      className="px-2 py-0.5 text-[10px] rounded-md bg-white border border-teal-200 text-teal-900 hover:bg-teal-100 cursor-pointer"
+                    >
+                      + {preset}
+                    </button>
+                  ))}
+                </div>
+                {editOtReasonError && (
+                  <p className="text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{editOtReasonError}</span>
+                  </p>
+                )}
+                <p className="text-[10px] text-teal-800">
+                  ระบบจะบันทึกเวลาที่แก้ไขอัตโนมัติ: {formatThaiDateTime(new Date().toISOString())}
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-2.5 border-t pt-3">
@@ -2730,13 +3086,120 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onUpdateOT(editingOT);
+                  if (!editOtReason.trim()) {
+                    setEditOtReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
+                    return;
+                  }
+                  onUpdateOT(editingOT, editOtReason.trim());
                   setEditingOT(null);
+                  setEditOtReason('');
                 }}
                 className="px-5 py-2 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <Save className="w-4 h-4" />
                 <span>บันทึกการแก้ไข</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Delete OT Confirmation Modal (Mandatory Reason + Timestamp) */}
+      {deletingOT && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-red-200 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <Trash2 className="w-5 h-5 text-red-600" />
+                <h3 className="text-base font-bold text-red-950">
+                  ยืนยันลบรายการเวร OT (ระบุเหตุผล)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingOT(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-bold text-gray-900">{deletingOT.staffName}</div>
+                <div className="text-gray-600">
+                  {formatThaiShortDate(deletingOT.date)} • {deletingOT.shift} •{' '}
+                  {deletingOT.workClinic}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block font-bold text-red-950">
+                  เหตุผลการลบรายการ (บังคับระบุ) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={deleteOtReason}
+                  onChange={(e) => {
+                    setDeleteOtReason(e.target.value);
+                    setDeleteOtReasonError('');
+                  }}
+                  placeholder="เช่น ยกเลิกเวร OT, แลกเวรเปลี่ยนคน, บันทึกซ้ำซ้อน"
+                  autoFocus
+                  className="w-full px-2.5 py-2 border border-red-300 rounded-lg text-xs font-medium"
+                />
+                <div className="flex flex-wrap gap-1">
+                  {['ยกเลิกเวร OT', 'แลกเวรเปลี่ยนผู้ปฏิบัติงาน', 'บันทึกข้อมูลซ้ำซ้อน', 'บันทึกผิดวัน'].map(
+                    (preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          setDeleteOtReason(preset);
+                          setDeleteOtReasonError('');
+                        }}
+                        className="px-2 py-0.5 text-[10px] rounded-md bg-red-50 border border-red-200 text-red-900 hover:bg-red-100 cursor-pointer"
+                      >
+                        + {preset}
+                      </button>
+                    )
+                  )}
+                </div>
+                {deleteOtReasonError && (
+                  <p className="text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{deleteOtReasonError}</span>
+                  </p>
+                )}
+                <p className="text-[10px] text-gray-500">
+                  บันทึกเวลาที่ลบอัตโนมัติ: {formatThaiDateTime(new Date().toISOString())}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 border-t pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingOT(null)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!deleteOtReason.trim()) {
+                    setDeleteOtReasonError('กรุณาระบุเหตุผลการลบรายการก่อนยืนยัน');
+                    return;
+                  }
+                  onDeleteOT(deletingOT.id, deleteOtReason.trim());
+                  setDeletingOT(null);
+                  setDeleteOtReason('');
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>ยืนยันลบและบันทึกเหตุผล</span>
               </button>
             </div>
           </div>

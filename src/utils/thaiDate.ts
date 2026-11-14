@@ -92,3 +92,33 @@ export function splitThaiName(fullName: string): { firstName: string; lastName: 
     lastName: tokens[tokens.length - 1],
   };
 }
+
+export const THAI_SHORT_MONTHS = [
+  'ม.ค.',
+  'ก.พ.',
+  'มี.ค.',
+  'เม.ย.',
+  'พ.ค.',
+  'มิ.ย.',
+  'ก.ค.',
+  'ส.ค.',
+  'ก.ย.',
+  'ต.ค.',
+  'พ.ย.',
+  'ธ.ค.',
+] as const;
+
+/**
+ * Formats ISO timestamp as: 14 พ.ย. 2569 เวลา 15:42 น.
+ */
+export function formatThaiDateTime(isoTimestamp: string): string {
+  if (!isoTimestamp) return '-';
+  const d = new Date(isoTimestamp);
+  if (Number.isNaN(d.getTime())) return isoTimestamp;
+  const day = d.getDate();
+  const month = THAI_SHORT_MONTHS[d.getMonth()];
+  const beYear = d.getFullYear() + 543;
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${day} ${month} ${beYear} เวลา ${hh}:${mm} น.`;
+}

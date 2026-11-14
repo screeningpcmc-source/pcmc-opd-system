@@ -12,11 +12,18 @@ import {
   POSITION_LABELS,
   formatPositionLabel,
   CustomHoliday,
+  AdminPinEntry,
   compareStaffByPositionAndStartDate
 } from '../types';
 import { formatThaiShortDate } from '../utils/thaiDate';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
-import { verifyAdminPin } from '../services/adminSecurity';
+import {
+  verifyAdminPinWithOwner,
+  DEFAULT_PRIMARY_ADMIN_OWNER,
+  DEFAULT_ADDITIONAL_ADMIN_SLOTS,
+  buildDefaultAdditionalAdminPins
+} from '../services/adminSecurity';
+import { ThaiDateInput } from './ThaiDateInput';
 import { 
   ShieldCheck, 
   Users, 
@@ -58,6 +65,7 @@ interface AdminPanelTabProps {
   leaveTypes: string[];
   isAdmin: boolean;
   isAdminUnlocked?: boolean;
+  adminOwnerName?: string;
   user: User | null;
   onLogin: () => void;
   onLogout: () => void;
@@ -86,6 +94,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   outTimeClinics,
   leaveTypes,
   isAdminUnlocked = false,
+  adminOwnerName = '',
   user,
   onLogin,
   onLogout,
@@ -141,10 +150,19 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [pinError, setPinError] = useState<string>('');
   const [showPinInputMask, setShowPinInputMask] = useState<boolean>(false);
   const [adminPinSetting, setAdminPinSetting] = useState<string>(settings.adminPin || '');
+  const [primaryAdminOwner, setPrimaryAdminOwner] = useState<string>(
+    settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER
+  );
+  const [additionalAdminPins, setAdditionalAdminPins] = useState<AdminPinEntry[]>(() =>
+    settings.additionalAdminPins && settings.additionalAdminPins.length > 0
+      ? settings.additionalAdminPins
+      : buildDefaultAdditionalAdminPins()
+  );
   const [showAdminPinSetting, setShowAdminPinSetting] = useState<boolean>(false);
 
   // Settings form state (kept in sync with persisted settings)
   const [nhppd, setNhppd] = useState<number>(settings.nhppd);
+  const [screeningNhppd, setScreeningNhppd] = useState<number>(settings.screeningNhppd ?? 0.1);
   const [stdHr, setStdHr] = useState<number>(settings.stdHr);
   const [annualHr, setAnnualHr] = useState<number>(settings.annualHr);
   const [workDays, setWorkDays] = useState<number>(settings.workDays);
@@ -154,11 +172,18 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   useEffect(() => {
     setNhppd(settings.nhppd);
+    setScreeningNhppd(settings.screeningNhppd ?? 0.1);
     setStdHr(settings.stdHr);
     setAnnualHr(settings.annualHr);
     setWorkDays(settings.workDays);
     setAdminEmailsStr(settings.adminEmails.join(', '));
     setAdminPinSetting(settings.adminPin || '');
+    setPrimaryAdminOwner(settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER);
+    setAdditionalAdminPins(
+      settings.additionalAdminPins && settings.additionalAdminPins.length > 0
+        ? settings.additionalAdminPins
+        : buildDefaultAdditionalAdminPins()
+    );
     setCustomSheetUrl(settings.spreadsheetUrl || '');
   }, [settings]);
 
@@ -170,14 +195,15 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handlePinSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (verifyAdminPin(pinInput, settings.adminPin)) {
+    const match = verifyAdminPinWithOwner(pinInput, settings);
+    if (match.valid) {
       setPinError('');
       if (onUnlockAdmin) {
         onUnlockAdmin(pinInput.trim());
       }
       setPinInput('');
     } else {
-      setPinError('รหัสผ่านไม่ถูกต้อง กรุณาระบุรหัสผ่านความปลอดภัย 4 หลักที่ถูกต้อง');
+      setPinError('รหัสผ่านไม่ถูกต้อง กรุณาระบุรหัสผ่านความปลอดภัยที่ถูกต้อง');
     }
   };
 
@@ -191,7 +217,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       if (pinInput.length < 8) {
         const next = pinInput + val;
         setPinInput(next);
-        if (next.length === 4 && verifyAdminPin(next, settings.adminPin)) {
+        if (next.length === 4 && verifyAdminPinWithOwner(next, settings).valid) {
           setTimeout(() => {
             if (onUnlockAdmin) onUnlockAdmin(next);
             setPinInput('');
@@ -464,14 +490,26 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       .map(e => e.trim().toLowerCase())
       .filter(e => e.length > 0);
 
+    const normalizedExtraPins = DEFAULT_ADDITIONAL_ADMIN_SLOTS.map((slot, idx) => {
+      const current = additionalAdminPins.find(item => item.id === slot.id) || additionalAdminPins[idx];
+      return {
+        id: slot.id,
+        ownerName: current?.ownerName?.trim() || slot.defaultOwnerName,
+        pin: current?.pin?.trim() || '',
+      };
+    });
+
     const updated: SystemSettings = {
       ...settings,
-      nhppd: Number(nhppd) || 0.4,
+      nhppd: Number(nhppd) > 0 ? Number(nhppd) : 0.4,
+      screeningNhppd: Number(screeningNhppd) > 0 ? Number(screeningNhppd) : 0.1,
       stdHr: Number(stdHr) || 7,
       annualHr: Number(annualHr) || 2080,
       workDays: Number(workDays) || 245,
       adminEmails: emails.length > 0 ? emails : settings.adminEmails,
       adminPin: adminPinSetting.trim(),
+      primaryAdminOwner: primaryAdminOwner.trim() || DEFAULT_PRIMARY_ADMIN_OWNER,
+      additionalAdminPins: normalizedExtraPins,
       inTimeClinics,
       outTimeClinics,
       leaveTypes,
@@ -593,10 +631,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         </div>
 
         {/* Admin Badge & Lock Button */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold text-emerald-800 bg-emerald-100/90 border border-emerald-300 rounded-full">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <span>ปลดล็อกสิทธิ์ Admin แล้ว</span>
+            <span>ปลดล็อกสิทธิ์ Admin แล้ว{adminOwnerName ? ` (${adminOwnerName})` : ''}</span>
           </span>
 
           {onLockAdmin && (
@@ -953,13 +991,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
               <div>
                 <label className="block text-[11px] font-semibold text-gray-700 mb-1">
-                  วันเริ่มงาน (วันแรก)
+                  วันเริ่มงาน (วันแรก • พ.ศ.)
                 </label>
-                <input
-                  type="date"
+                <ThaiDateInput
                   value={newStartDate}
-                  onChange={(e) => setNewStartDate(e.target.value)}
-                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white"
+                  onChange={setNewStartDate}
+                  selectClassName="w-full text-xs rounded-lg border border-gray-300 py-1.5 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-red-500"
                 />
               </div>
             </div>
@@ -1410,14 +1447,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           <form onSubmit={handleAddCustomHoliday} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
             <div className="sm:col-span-3">
               <label className="block text-[11px] font-semibold text-gray-700 mb-1">
-                วันที่หยุดพิเศษ <span className="text-red-500">*</span>
+                วันที่หยุดพิเศษ (พ.ศ.) <span className="text-red-500">*</span>
               </label>
-              <input
-                type="date"
+              <ThaiDateInput
                 value={newHolidayDate}
-                onChange={(e) => setNewHolidayDate(e.target.value)}
-                required
-                className="w-full text-xs rounded-lg border border-rose-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200"
+                onChange={setNewHolidayDate}
+                selectClassName="w-full text-xs rounded-lg border border-rose-300 py-1.5 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:ring-2 focus:ring-rose-200"
               />
             </div>
             <div className="sm:col-span-7">
@@ -1429,13 +1464,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 value={newHolidayName}
                 onChange={(e) => setNewHolidayName(e.target.value)}
                 placeholder="เช่น วันหยุดราชการพิเศษตามมติ ครม., วันหยุดสถาปนาโรงพยาบาล"
-                className="w-full text-xs rounded-lg border border-rose-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200"
+                className="w-full text-xs rounded-lg border border-rose-300 bg-white px-3 py-1.5 outline-none focus:ring-2 focus:ring-rose-200"
               />
             </div>
             <div className="sm:col-span-2">
               <button
                 type="submit"
-                className="w-full inline-flex items-center justify-center gap-1 px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                className="w-full inline-flex items-center justify-center gap-1 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>เพิ่มวันหยุด</span>
@@ -1486,7 +1521,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 >
                   {[2024, 2025, 2026, 2027, 2028].map((y) => (
                     <option key={y} value={y}>
-                      ปี พ.ศ. {y + 543} ({y})
+                      ปี พ.ศ. {y + 543}
                     </option>
                   ))}
                 </select>
@@ -1528,20 +1563,35 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         </div>
 
         <form onSubmit={handleSaveSettingsSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <div>
               <label className="block text-xs font-semibold text-gray-700 mb-1">
-                NHPPD (ชม.การพยาบาล/คน)
+                NHPPD หน่วยตรวจทั่วไป (ชม./คน)
               </label>
               <input
                 type="number"
                 step="0.05"
-                min="0.1"
+                min="0.05"
                 value={nhppd}
                 onChange={(e) => setNhppd(Number(e.target.value))}
                 className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border font-bold text-gray-900"
               />
-              <span className="text-[10px] text-gray-500">มาตรฐาน OPD สป.สธ. = 0.4</span>
+              <span className="text-[10px] text-gray-500">มาตรฐานทุกหน่วยตรวจ = 0.4 (ยกเว้นหน่วยคัดกรอง)</span>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-cyan-800 mb-1">
+                NHPPD หน่วยคัดกรอง (ชม./คน)
+              </label>
+              <input
+                type="number"
+                step="0.05"
+                min="0.05"
+                value={screeningNhppd}
+                onChange={(e) => setScreeningNhppd(Number(e.target.value))}
+                className="w-full text-xs rounded-lg border-cyan-300 bg-cyan-50/40 py-2 px-3 border font-bold text-cyan-950"
+              />
+              <span className="text-[10px] text-cyan-700 font-medium">เฉพาะหน่วยคัดกรองหน่วยเดียว = 0.1</span>
             </div>
 
             <div>
@@ -1603,16 +1653,21 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             />
           </div>
 
-          <div className="bg-red-50/50 border border-red-200/70 rounded-xl p-3.5 space-y-2">
+          <div className="bg-red-50/50 border border-red-200/70 rounded-xl p-4 space-y-3.5">
             <div className="flex items-center justify-between">
-              <label className="block text-xs font-bold text-red-950 flex items-center gap-1.5">
-                <KeyRound className="w-4 h-4 text-red-600" />
-                <span>รหัสผ่านความปลอดภัย Admin PIN (ความลับ)</span>
-              </label>
+              <div>
+                <label className="block text-xs font-bold text-red-950 flex items-center gap-1.5">
+                  <KeyRound className="w-4 h-4 text-red-600" />
+                  <span>รหัสผ่านความปลอดภัย Admin PIN (รหัสหลัก + รหัสแอดมินเพิ่มเติม 3 รหัส พร้อมระบุเจ้าของรหัส)</span>
+                </label>
+                <p className="text-[11px] text-red-800/80 mt-0.5">
+                  ระบบจะบันทึกชื่อเจ้าของรหัสแอดมินกำกับทุกครั้งที่มีการแก้ไขหรือลบข้อมูล
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowAdminPinSetting(!showAdminPinSetting)}
-                className="text-xs text-red-700 hover:text-red-900 flex items-center gap-1 font-semibold cursor-pointer"
+                className="text-xs text-red-700 hover:text-red-900 flex items-center gap-1 font-semibold cursor-pointer shrink-0"
               >
                 {showAdminPinSetting ? (
                   <>
@@ -1625,19 +1680,114 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 )}
               </button>
             </div>
-            <div className="relative">
-              <input
-                type={showAdminPinSetting ? 'text' : 'password'}
-                value={adminPinSetting}
-                onChange={(e) => setAdminPinSetting(e.target.value)}
-                maxLength={10}
-                placeholder="ปล่อยว่างเพื่อใช้รหัสหลัก (VITE_ADMIN_PIN) หรือกรอกรหัสใหม่"
-                className="w-full text-sm rounded-lg border-red-300 py-2 px-3 border font-mono tracking-wider bg-white font-bold text-red-950"
-              />
+
+            {/* Primary Admin PIN (Default 4217 = หัวหน้าพยาบาล) */}
+            <div className="bg-white rounded-xl border border-red-200 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-red-900">
+                  รหัสแอดมินหลัก (รหัสเริ่มต้น: 4217)
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-800 font-bold">
+                  Primary Admin
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                    ชื่อเจ้าของรหัสหลัก *
+                  </label>
+                  <input
+                    type="text"
+                    value={primaryAdminOwner}
+                    onChange={(e) => setPrimaryAdminOwner(e.target.value)}
+                    placeholder="หัวหน้าพยาบาล"
+                    className="w-full text-xs rounded-lg border border-red-200 py-1.5 px-2.5 font-semibold text-gray-900 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                    รหัส PIN หลัก (ปล่อยว่างเพื่อใช้ค่าเริ่มต้น 4217)
+                  </label>
+                  <input
+                    type={showAdminPinSetting ? 'text' : 'password'}
+                    value={adminPinSetting}
+                    onChange={(e) => setAdminPinSetting(e.target.value)}
+                    maxLength={10}
+                    placeholder="ค่าเริ่มต้น: 4217"
+                    className="w-full text-xs rounded-lg border border-red-200 py-1.5 px-2.5 font-mono tracking-wider bg-white font-bold text-red-950"
+                  />
+                </div>
+              </div>
             </div>
-            <p className="text-[11px] text-red-800">
-              * ใช้สำหรับปลดล็อกเข้าสู่หน้าจัดการบุคลากรและการแก้ไข/ลบรายการบันทึก
-            </p>
+
+            {/* 3 Additional Admin PIN Slots */}
+            <div className="space-y-2">
+              <div className="text-[11px] font-bold text-red-950">
+                รหัสแอดมินเพิ่มเติม 3 รหัส (ระบุชื่อ/ตำแหน่งเจ้าของรหัสเพื่อติดตามการแก้ไขข้อมูล)
+              </div>
+              <div className="grid grid-cols-1 gap-2.5">
+                {DEFAULT_ADDITIONAL_ADMIN_SLOTS.map((slot, idx) => {
+                  const entry =
+                    additionalAdminPins.find((p) => p.id === slot.id) ||
+                    additionalAdminPins[idx] || {
+                      id: slot.id,
+                      ownerName: slot.defaultOwnerName,
+                      pin: '',
+                    };
+                  const defaultCodeHint = idx === 0 ? '4218' : idx === 1 ? '4219' : '4220';
+
+                  const updateSlot = (patch: Partial<AdminPinEntry>) => {
+                    setAdditionalAdminPins((prev) => {
+                      const base =
+                        prev.length === DEFAULT_ADDITIONAL_ADMIN_SLOTS.length
+                          ? prev
+                          : buildDefaultAdditionalAdminPins();
+                      return base.map((item, i) =>
+                        item.id === slot.id || i === idx ? { ...item, ...patch } : item
+                      );
+                    });
+                  };
+
+                  return (
+                    <div
+                      key={slot.id}
+                      className="bg-white rounded-xl border border-red-200/80 p-3 grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end"
+                    >
+                      <div className="sm:col-span-2">
+                        <span className="inline-block px-2 py-1 rounded-lg bg-rose-100 text-rose-900 font-bold text-[11px]">
+                          รหัสแอดมิน {idx + 2}
+                        </span>
+                      </div>
+                      <div className="sm:col-span-6">
+                        <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                          ชื่อ / ตำแหน่งเจ้าของรหัส *
+                        </label>
+                        <input
+                          type="text"
+                          value={entry.ownerName}
+                          onChange={(e) => updateSlot({ ownerName: e.target.value })}
+                          placeholder={slot.defaultOwnerName}
+                          className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-semibold text-gray-900 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-4">
+                        <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                          รหัส PIN (ค่าเริ่มต้น: {defaultCodeHint})
+                        </label>
+                        <input
+                          type={showAdminPinSetting ? 'text' : 'password'}
+                          value={entry.pin}
+                          onChange={(e) => updateSlot({ pin: e.target.value })}
+                          maxLength={10}
+                          placeholder={`ปล่อยว่าง = ${defaultCodeHint}`}
+                          className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-mono tracking-wider bg-white font-bold text-red-950"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t">
@@ -1687,7 +1837,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       {/* Edit Staff Modal (Name, Position, Clinic, Status, Start Date & End Date) */}
       {editingStaff && onUpdateStaff && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-gray-200 p-6 space-y-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-gray-200 p-6 space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <div className="flex items-center gap-2">
                 <Calendar className="w-5 h-5 text-blue-600" />
@@ -1705,17 +1855,41 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </div>
 
             <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">ชื่อ - นามสกุล</label>
-                <input
-                  type="text"
-                  value={editingStaff.name}
-                  onChange={(e) => setEditingStaff({ ...editingStaff, name: e.target.value })}
-                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-gray-700 mb-1">ชื่อ - นามสกุล</label>
+                  <input
+                    type="text"
+                    value={editingStaff.name}
+                    onChange={(e) => setEditingStaff({ ...editingStaff, name: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">สถานะ</label>
+                  <select
+                    value={editingStaff.status}
+                    onChange={(e) => {
+                      const nextStatus = e.target.value as StaffStatus;
+                      setEditingStaff({
+                        ...editingStaff,
+                        status: nextStatus,
+                        endDate:
+                          nextStatus === 'Active'
+                            ? undefined
+                            : editingStaff.endDate || todayStr,
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white font-semibold"
+                  >
+                    <option value="Active">Active (กำลังปฏิบัติงาน)</option>
+                    <option value="Resigned">Resigned (ลาออก/ย้าย)</option>
+                    <option value="Retired">Retired (เกษียณอายุ)</option>
+                  </select>
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-gray-700 mb-1">ตำแหน่งวิชาชีพ</label>
                   <select
@@ -1742,61 +1916,36 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block font-semibold text-gray-700 mb-1">สถานะ</label>
-                  <select
-                    value={editingStaff.status}
-                    onChange={(e) => {
-                      const nextStatus = e.target.value as StaffStatus;
-                      setEditingStaff({
-                        ...editingStaff,
-                        status: nextStatus,
-                        endDate:
-                          nextStatus === 'Active'
-                            ? undefined
-                            : editingStaff.endDate || todayStr,
-                      });
-                    }}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white font-semibold"
-                  >
-                    <option value="Active">Active (ปฏิบัติงาน)</option>
-                    <option value="Resigned">Resigned (ลาออก/ย้าย)</option>
-                    <option value="Retired">Retired (เกษียณอายุ)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-semibold text-emerald-800 mb-1">
-                    วันเริ่มปฏิบัติงาน (วันแรก)
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div className="p-2.5 rounded-xl border border-emerald-200 bg-emerald-50/40">
+                  <label className="block font-semibold text-emerald-800 mb-1.5">
+                    วันเริ่มปฏิบัติงาน (วันแรก • พ.ศ.)
                   </label>
-                  <input
-                    type="date"
+                  <ThaiDateInput
+                    allowClear
                     value={editingStaff.startDate || ''}
-                    onChange={(e) =>
+                    onChange={(val) =>
                       setEditingStaff({
                         ...editingStaff,
-                        startDate: e.target.value || undefined,
+                        startDate: val || undefined,
                       })
                     }
-                    className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg text-xs bg-emerald-50/30"
                   />
                 </div>
 
-                <div>
-                  <label className="block font-semibold text-amber-800 mb-1">
-                    วันลาออก / เกษียณ
+                <div className="p-2.5 rounded-xl border border-amber-200 bg-amber-50/40">
+                  <label className="block font-semibold text-amber-800 mb-1.5">
+                    วันลาออก / เกษียณ (พ.ศ.)
                   </label>
-                  <input
-                    type="date"
+                  <ThaiDateInput
+                    allowClear
                     value={editingStaff.endDate || ''}
-                    onChange={(e) =>
+                    onChange={(val) =>
                       setEditingStaff({
                         ...editingStaff,
-                        endDate: e.target.value || undefined,
+                        endDate: val || undefined,
                       })
                     }
-                    className="w-full px-2.5 py-1.5 border border-amber-300 rounded-lg text-xs bg-amber-50/30"
                   />
                 </div>
               </div>

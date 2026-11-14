@@ -6,8 +6,11 @@ import {
   OUT_TIME_CLINICS, 
   SHIFTS, 
   WorkShift,
-  getEffectiveTotalPt
+  getEffectiveTotalPt,
+  getClinicNhppd,
+  SCREENING_CLINIC_NAME
 } from '../types';
+import { ThaiMonthInput } from './ThaiDateInput';
 import { 
   BarChart3, 
   PieChart, 
@@ -67,7 +70,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return dates.size > 0 ? dates.size : 1;
   }, [filteredWorkloads]);
 
-  // Totals calculation
+  // Totals calculation (uses 0.1 NHPPD for หน่วยคัดกรอง and 0.4 for all other clinics)
   const stats = useMemo(() => {
     const totalPt = filteredWorkloads.reduce((sum, w) => sum + getEffectiveTotalPt(w), 0);
     const totalAdmit = filteredWorkloads.reduce((sum, w) => sum + (w.admit || 0), 0);
@@ -77,13 +80,28 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     const sumHN = filteredWorkloads.reduce((sum, w) => sum + (w.hn || 0), 0);
     const totalNursingStaff = sumRN + sumPN + sumNA; // Exclude HN
 
+    const generalNhppd = Number(settings.nhppd) > 0 ? Number(settings.nhppd) : 0.4;
+    const screeningNhppd = Number(settings.screeningNhppd) > 0 ? Number(settings.screeningNhppd) : 0.1;
+    const hasScreeningRecords = filteredWorkloads.some(w => w.clinic === SCREENING_CLINIC_NAME);
+    const isScreeningOnly =
+      selectedClinic === SCREENING_CLINIC_NAME ||
+      (filteredWorkloads.length > 0 && filteredWorkloads.every(w => w.clinic === SCREENING_CLINIC_NAME));
+
     // 1) ผู้ป่วยเฉลี่ย/วัน = Total_Pt / จำนวนวันทำการ
     const avgPtPerDay = totalPt / workingDays;
 
-    // 2) อัตรากำลังที่ต้องการ (FTC) = (ข้อ 1 * NHPPD) / Std_Hr
-    const nhppd = Number(settings.nhppd) || 0.4;
+    // 2) อัตรากำลังที่ต้องการ (FTC) = ผลรวม (ผู้ป่วยแต่ละหน่วย * NHPPD ของหน่วยนั้น) / (วันทำการ * Std_Hr)
+    const totalRequiredHours = filteredWorkloads.reduce(
+      (sum, w) => sum + getEffectiveTotalPt(w) * getClinicNhppd(w.clinic, settings),
+      0
+    );
     const stdHr = Number(settings.stdHr) || 7;
-    const ftc = (avgPtPerDay * nhppd) / stdHr;
+    const ftc = (totalRequiredHours / workingDays) / stdHr;
+    const effectiveNhppd = totalPt > 0
+      ? totalRequiredHours / totalPt
+      : isScreeningOnly
+      ? screeningNhppd
+      : generalNhppd;
 
     // 3) Output (อัตรากำลังที่ต้องการ/วัน) = (ข้อ 2 * Annual_Hr) / (Work_Days * 8)
     const annualHr = Number(settings.annualHr) || 2080;
@@ -113,8 +131,13 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       input,
       productivity,
       skillMix,
+      generalNhppd,
+      screeningNhppd,
+      effectiveNhppd,
+      hasScreeningRecords,
+      isScreeningOnly,
     };
-  }, [filteredWorkloads, workingDays, settings]);
+  }, [filteredWorkloads, workingDays, settings, selectedClinic]);
 
   // Productivity Status
   const getProductivityStatus = (prod: number) => {
@@ -172,7 +195,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     const list = Array.from(map.entries()).map(([clinicName, val]) => {
       const d = val.days.size || 1;
       const avgPt = val.totalPt / d;
-      const ftc = (avgPt * settings.nhppd) / settings.stdHr;
+      const clinicNhppd = getClinicNhppd(clinicName, settings);
+      const ftc = (avgPt * clinicNhppd) / settings.stdHr;
       const out = (ftc * settings.annualHr) / (settings.workDays * 8);
       const nursing = (val.rn + val.pn + val.na) / d;
       const prod = nursing > 0 ? (out / nursing) * 100 : 0;
@@ -180,6 +204,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
 
       return {
         clinicName,
+        clinicNhppd,
         totalPt: val.totalPt,
         avgPt: Number(avgPt.toFixed(1)),
         nursingStaffPerDay: Number(nursing.toFixed(1)),
@@ -204,7 +229,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
               เมนูที่ 4: สรุป Productivity, Skill Mix และ FTC ประจำเดือน
             </h2>
             <p className="text-xs text-amber-800">
-              คำนวณอัตโนมัติตามมาตรฐานภาระงานการพยาบาล สป.สธ. (NHPPD 0.4 / Std 7 ชม. / 2080 ชม.ต่อปี)
+              คำนวณอัตโนมัติตามมาตรฐานภาระงานการพยาบาล สป.สธ. (NHPPD {stats.generalNhppd} / หน่วยคัดกรอง {stats.screeningNhppd} / Std {settings.stdHr} ชม. / {settings.annualHr} ชม.ต่อปี)
             </p>
           </div>
         </div>
@@ -221,13 +246,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-1">
-              เลือกเดือน (YYYY-MM):
+              เลือกเดือน (พ.ศ.):
             </label>
-            <input
-              type="month"
+            <ThaiMonthInput
               value={selectedMonth}
-              onChange={(e) => setSelectedMonth(e.target.value)}
-              className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border font-semibold text-gray-800"
+              onChange={setSelectedMonth}
             />
           </div>
 
@@ -304,14 +327,26 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-2xs space-y-1.5">
           <div className="flex items-center justify-between text-gray-500 text-xs">
             <span className="font-semibold">ข้อ 2) อัตรากำลังที่ต้องการ (FTC)</span>
-            <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded font-mono">(Pt * 0.4) / 7</span>
+            <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded font-mono">
+              {stats.isScreeningOnly
+                ? `(Pt * ${stats.screeningNhppd}) / ${settings.stdHr}`
+                : stats.hasScreeningRecords && selectedClinic === 'ALL'
+                ? `(Pt * ${stats.generalNhppd} / คัดกรอง ${stats.screeningNhppd}) / ${settings.stdHr}`
+                : `(Pt * ${stats.generalNhppd}) / ${settings.stdHr}`}
+            </span>
           </div>
           <div className="text-2xl font-extrabold text-indigo-900">
             {stats.ftc.toFixed(2)}{' '}
             <span className="text-xs font-normal text-gray-500">FTC</span>
           </div>
           <div className="text-[11px] text-gray-500">
-            NHPPD: {settings.nhppd} ชม. | ชั่วโมงงานมาตรฐาน: {settings.stdHr} ชม.
+            {stats.isScreeningOnly ? (
+              <>NHPPD หน่วยคัดกรอง: <strong className="text-cyan-800">{stats.screeningNhppd}</strong> ชม. | ชม.มาตรฐาน: {settings.stdHr} ชม.</>
+            ) : stats.hasScreeningRecords && selectedClinic === 'ALL' ? (
+              <>NHPPD: ทั่วไป {stats.generalNhppd} / คัดกรอง <strong className="text-cyan-800">{stats.screeningNhppd}</strong> ชม. | มาตรฐาน: {settings.stdHr} ชม.</>
+            ) : (
+              <>NHPPD: {stats.generalNhppd} ชม. (หน่วยคัดกรอง {stats.screeningNhppd}) | ชม.มาตรฐาน: {settings.stdHr} ชม.</>
+            )}
           </div>
         </div>
 
@@ -494,6 +529,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
               <tr>
                 <th className="py-2.5 px-3">ห้องตรวจ</th>
+                <th className="py-2.5 px-2 text-center">NHPPD</th>
                 <th className="py-2.5 px-2 text-right">ผู้ป่วยรวม (คน)</th>
                 <th className="py-2.5 px-2 text-right">เฉลี่ย/วัน (คน)</th>
                 <th className="py-2.5 px-2 text-right">กำลังคนพยาบาล/วัน (แรง)</th>
@@ -505,9 +541,19 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             <tbody className="divide-y divide-gray-100">
               {clinicBreakdown.map((item) => {
                 const itemStatus = getProductivityStatus(item.productivity);
+                const isScreening = item.clinicName === SCREENING_CLINIC_NAME;
                 return (
                   <tr key={item.clinicName} className="hover:bg-slate-50/80">
                     <td className="py-2 px-3 font-bold text-gray-900">{item.clinicName}</td>
+                    <td className="py-2 px-2 text-center">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                        isScreening
+                          ? 'bg-cyan-100 text-cyan-800 border border-cyan-300'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        {item.clinicNhppd}
+                      </span>
+                    </td>
                     <td className="py-2 px-2 text-right text-gray-700">{item.totalPt.toLocaleString()}</td>
                     <td className="py-2 px-2 text-right font-medium text-blue-900">{item.avgPt}</td>
                     <td className="py-2 px-2 text-right text-gray-800">{item.nursingStaffPerDay}</td>

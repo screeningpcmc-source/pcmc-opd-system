@@ -1,13 +1,46 @@
+import { AdminPinEntry, SystemSettings } from '../types';
+
 /**
  * Admin PIN Verification Utility
  * ตรวจสอบรหัสผ่านผู้ดูแลระบบโดยไม่ฝังรหัสผ่านจริงไว้ในซอร์สโค้ด
  * ลำดับการตรวจสอบ:
- * 1. รหัสที่ผู้ดูแลระบบตั้งค่าเองในเครื่อง (localStorage settings.adminPin)
- * 2. ค่าจาก Environment Variable (VITE_ADMIN_PIN ใน .env.local หรือ GitHub Secrets)
- * 3. ค่า Digest SHA-256 มาตรฐานของระบบ
+ * 1. รหัสหลัก (ค่าเริ่มต้น 4217 = หัวหน้าพยาบาล หรือรหัสที่ตั้งเองในตั้งค่า / VITE_ADMIN_PIN)
+ * 2. รหัสแอดมินเพิ่มเติม 3 รหัส พร้อมระบุชื่อเจ้าของรหัส
  */
 
+export const DEFAULT_PRIMARY_ADMIN_OWNER = 'หัวหน้าพยาบาล';
+
 const DEFAULT_PIN_SHA256 = '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88';
+
+export const DEFAULT_ADDITIONAL_ADMIN_SLOTS: {
+  id: string;
+  defaultOwnerName: string;
+  defaultSha256: string;
+}[] = [
+  {
+    id: 'admin-2',
+    defaultOwnerName: 'รองหัวหน้าหน่วย OPD (แอดมิน 2)',
+    defaultSha256: '89c1baf80810ed35b8cc4ab4bb30da6136d5ad7d4c0442988ed519e0dd68fc5e',
+  },
+  {
+    id: 'admin-3',
+    defaultOwnerName: 'พยาบาลผู้ดูแลระบบข้อมูล OPD (แอดมิน 3)',
+    defaultSha256: '6a0a323dee59cd417b5071ea2a375702d16a9c40afe1f72ac8bf5d605b7c2c9d',
+  },
+  {
+    id: 'admin-4',
+    defaultOwnerName: 'พยาบาลผู้ดูแลระบบข้อมูล OPD (แอดมิน 4)',
+    defaultSha256: 'd81c15506dffe8152eec8216c52eb7b524fa7dc78010196d3e71c489f75001d',
+  },
+];
+
+export function buildDefaultAdditionalAdminPins(): AdminPinEntry[] {
+  return DEFAULT_ADDITIONAL_ADMIN_SLOTS.map((s) => ({
+    id: s.id,
+    ownerName: s.defaultOwnerName,
+    pin: '',
+  }));
+}
 
 function rightRotate(value: number, amount: number): number {
   return (value >>> amount) | (value << (32 - amount));
@@ -93,19 +126,63 @@ function sha256Hex(ascii: string): string {
   return result;
 }
 
-export function verifyAdminPin(enteredPin: string, customStoredPin?: string): boolean {
+export interface AdminVerifyResult {
+  valid: boolean;
+  ownerName: string;
+  isPrimary: boolean;
+}
+
+export function verifyAdminPinWithOwner(
+  enteredPin: string,
+  settings?: Pick<SystemSettings, 'adminPin' | 'primaryAdminOwner' | 'additionalAdminPins'>
+): AdminVerifyResult {
   const normalized = enteredPin.trim();
-  if (!normalized) return false;
-
-  const customPin = (customStoredPin || '').trim();
-  if (customPin) {
-    return normalized === customPin;
+  if (!normalized) {
+    return { valid: false, ownerName: '', isPrimary: false };
   }
 
+  const primaryOwner = (settings?.primaryAdminOwner || '').trim() || DEFAULT_PRIMARY_ADMIN_OWNER;
+  const customPin = (settings?.adminPin || '').trim();
   const envPin = String(import.meta.env.VITE_ADMIN_PIN || '').trim();
-  if (envPin) {
-    return normalized === envPin;
+  const enteredDigest = sha256Hex(normalized);
+
+  // 1. Check Primary Admin PIN
+  if (customPin) {
+    if (normalized === customPin) {
+      return { valid: true, ownerName: primaryOwner, isPrimary: true };
+    }
+  } else if (envPin) {
+    if (normalized === envPin) {
+      return { valid: true, ownerName: primaryOwner, isPrimary: true };
+    }
+  } else if (enteredDigest === DEFAULT_PIN_SHA256) {
+    return { valid: true, ownerName: primaryOwner, isPrimary: true };
   }
 
-  return sha256Hex(normalized) === DEFAULT_PIN_SHA256;
+  // 2. Check 3 Additional Admin PIN slots (custom configured or default slot digest)
+  const configuredSlots = settings?.additionalAdminPins || [];
+  for (let i = 0; i < DEFAULT_ADDITIONAL_ADMIN_SLOTS.length; i++) {
+    const defSlot = DEFAULT_ADDITIONAL_ADMIN_SLOTS[i];
+    const userSlot = configuredSlots.find((s) => s.id === defSlot.id) || configuredSlots[i];
+    const ownerName = (userSlot?.ownerName || '').trim() || defSlot.defaultOwnerName;
+    const customSlotPin = (userSlot?.pin || '').trim();
+
+    if (customSlotPin) {
+      if (normalized === customSlotPin) {
+        return { valid: true, ownerName, isPrimary: false };
+      }
+    } else if (enteredDigest === defSlot.defaultSha256) {
+      return { valid: true, ownerName, isPrimary: false };
+    }
+  }
+
+  return { valid: false, ownerName: '', isPrimary: false };
+}
+
+export function verifyAdminPin(
+  enteredPin: string,
+  customStoredPin?: string,
+  settings?: Pick<SystemSettings, 'adminPin' | 'primaryAdminOwner' | 'additionalAdminPins'>
+): boolean {
+  return verifyAdminPinWithOwner(enteredPin, settings ?? { adminPin: customStoredPin }).valid;
 }
