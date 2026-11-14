@@ -62,9 +62,6 @@ import {
   UsersRound, 
   CheckCircle2, 
   AlertCircle,
-  RefreshCw,
-  LogOut,
-  Lock,
   X
 } from 'lucide-react';
 
@@ -75,10 +72,6 @@ export default function App() {
 
   // Auth & Sync state
   const [user, setUser] = useState<User | null>(null);
-  const [hasActiveToken, setHasActiveToken] = useState<boolean>(false);
-  const [sheetSyncStatus, setSheetSyncStatus] = useState<
-    'idle' | 'connected_write' | 'connected_gas' | 'public_readonly' | 'needs_auth'
-  >('idle');
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [isSettingUpSheet, setIsSettingUpSheet] = useState<boolean>(false);
   const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
@@ -141,13 +134,11 @@ export default function App() {
   // Initialize Firebase Auth listener (persists user across reloads)
   useEffect(() => {
     const unsubscribe = initAuth(
-      (currentUser, token) => {
+      (currentUser) => {
         setUser(currentUser);
-        setHasActiveToken(Boolean(token));
       },
       () => {
         setUser(null);
-        setHasActiveToken(false);
       }
     );
     return () => unsubscribe();
@@ -180,7 +171,6 @@ export default function App() {
       const res = await googleSignIn();
       if (res) {
         setUser(res.user);
-        setHasActiveToken(true);
         showToast(`ยินดีต้อนรับ ${res.user.displayName || res.user.email}!`, 'success');
       }
     } catch (err: any) {
@@ -196,7 +186,6 @@ export default function App() {
     try {
       await logout();
       setUser(null);
-      setHasActiveToken(false);
       setIsAdminUnlocked(false);
       setAdminOwnerName('');
       sessionStorage.removeItem('pcmc_admin_pin_unlocked');
@@ -242,7 +231,7 @@ export default function App() {
     ? db.settings.leaveTypes
     : [...LEAVE_TYPES];
 
-  // Ensure we have a valid Google OAuth token (triggers Google Sign-In cleanly if missing/expired)
+  // Ensure we have a valid Google OAuth token (used inside Admin Menu 5)
   const ensureGoogleToken = async (loginHint?: string): Promise<string | null> => {
     let token = await getAccessToken();
     if (!token) {
@@ -251,13 +240,10 @@ export default function App() {
         if (!loginRes) return null;
         token = loginRes.accessToken;
         setUser(loginRes.user);
-        setHasActiveToken(true);
       } catch (err: any) {
         showToast(`เชื่อมต่อ Google ไม่สำเร็จ: ${err?.message || err}`, 'error');
         return null;
       }
-    } else {
-      setHasActiveToken(true);
     }
     return token;
   };
@@ -270,7 +256,7 @@ export default function App() {
     });
 
   // Silent background Auto-Sync:
-  // 1) Full 2-way OAuth sync if Google token is active
+  // 1) Full 2-way OAuth sync if Google token is active (Admin)
   // 2) Apps Script Web App auto-read if gasUrl is configured (0 login)
   // 3) Public GViz read-only sync when ?sheetId= is shared as Anyone with link can view (0 login)
   const performBackgroundSync = useCallback(async (_reason: 'initial' | 'interval' | 'focus' | 'edit') => {
@@ -282,7 +268,6 @@ export default function App() {
 
     const syncKey = `${targetSheetId}|${targetGasUrl}`;
     const token = await getAccessToken();
-    setHasActiveToken(Boolean(token));
 
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
@@ -303,7 +288,6 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         lastSyncedKeyRef.current = syncKey;
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_write');
         return;
       }
 
@@ -325,7 +309,6 @@ export default function App() {
           lastSyncEpochRef.current = Date.now();
           lastSyncedKeyRef.current = syncKey;
           setLastSyncedAt(formatSyncTime());
-          setSheetSyncStatus('connected_gas');
           return;
         }
       }
@@ -347,17 +330,12 @@ export default function App() {
           lastSyncEpochRef.current = Date.now();
           lastSyncedKeyRef.current = syncKey;
           setLastSyncedAt(formatSyncTime());
-          setSheetSyncStatus('public_readonly');
         } else {
           lastSyncedKeyRef.current = syncKey;
-          setSheetSyncStatus('needs_auth');
         }
       }
     } catch (err) {
       console.warn('Auto-sync skipped:', err);
-      if (targetSheetId && !token) {
-        setSheetSyncStatus('needs_auth');
-      }
     } finally {
       isSyncInFlightRef.current = false;
       setIsSyncingSheet(false);
@@ -418,21 +396,6 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [localRevision, performBackgroundSync]);
 
-  // Connect Google specifically for shared OPD staff (Data Entry ONLY; never grants Admin)
-  const handleConnectGoogleForStaff = async () => {
-    setIsLoggingIn(true);
-    try {
-      const token = await ensureGoogleToken(user?.email || undefined);
-      if (token) {
-        lastSyncedKeyRef.current = '';
-        await performBackgroundSync('initial');
-        showToast('เชื่อมต่อ Google Sheets สำหรับนำข้อมูลเข้าเรียบร้อยแล้ว!', 'success');
-      }
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
   // Manual Sync 2-way with an existing linked Google Spreadsheet (never creates duplicates)
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
     const currentDb = dbRef.current;
@@ -464,7 +427,6 @@ export default function App() {
       lastSyncEpochRef.current = Date.now();
       lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
       setLastSyncedAt(formatSyncTime());
-      setSheetSyncStatus('connected_write');
       showToast(
         `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
         'success'
@@ -620,7 +582,7 @@ export default function App() {
 
     showToast(`บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`, 'success');
 
-    // Sync Data Entry (append-only) to Google Sheets via GAS Web App or OAuth token
+    // Silent Sync Data Entry (append-only) to Google Sheets via Code.gs Web App or active Admin Google token
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
@@ -637,34 +599,21 @@ export default function App() {
       if (allOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_gas');
       } else {
         showToast('บันทึกในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
       }
     } else if (targetSheetId) {
-      const token = await ensureGoogleToken(user?.email || undefined);
-      if (!token) {
-        showToast('บันทึกในเครื่องแล้ว (กรุณากดเชื่อมต่อ Google ด้านบนเพื่อส่งข้อมูลเข้าชีท)', 'error');
-        return;
-      }
-      let allOk = await appendDailyWorkloadToSheet(token, targetSheetId, entry);
-      for (const l of newLeaveEntries) {
-        const ok = await appendLeaveToSheet(token, targetSheetId, l);
-        if (!ok) allOk = false;
-      }
-      for (const o of newOtEntries) {
-        const ok = await appendOTToSheet(token, targetSheetId, o);
-        if (!ok) allOk = false;
-      }
-      if (allOk) {
+      const token = await getAccessToken();
+      if (token) {
+        await appendDailyWorkloadToSheet(token, targetSheetId, entry);
+        for (const l of newLeaveEntries) {
+          await appendLeaveToSheet(token, targetSheetId, l);
+        }
+        for (const o of newOtEntries) {
+          await appendOTToSheet(token, targetSheetId, o);
+        }
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_write');
-      } else {
-        showToast(
-          'บันทึกในเครื่องแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ (บัญชี Google ที่ใช้ต้องมีสิทธิ์ Editor ในชีทนี้)',
-          'error'
-        );
       }
     }
   };
@@ -771,26 +720,15 @@ export default function App() {
       if (ok) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_gas');
       } else {
         showToast('บันทึกวันลาในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่สำเร็จ', 'error');
       }
     } else if (targetSheetId) {
-      const token = await ensureGoogleToken(user?.email || undefined);
-      if (!token) {
-        showToast('บันทึกวันลาในเครื่องแล้ว (กรุณากดเชื่อมต่อ Google ด้านบนเพื่อส่งข้อมูลเข้าชีท)', 'error');
-        return;
-      }
-      const ok = await appendLeaveToSheet(token, targetSheetId, leave);
-      if (ok) {
+      const token = await getAccessToken();
+      if (token) {
+        await appendLeaveToSheet(token, targetSheetId, leave);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_write');
-      } else {
-        showToast(
-          'บันทึกวันลาในเครื่องแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ (บัญชี Google ที่ใช้ต้องมีสิทธิ์ Editor ในชีทนี้)',
-          'error'
-        );
       }
     }
   };
@@ -895,30 +833,17 @@ export default function App() {
       if (allOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_gas');
       } else {
         showToast('บันทึกเวร OT ในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
       }
     } else if (targetSheetId) {
-      const token = await ensureGoogleToken(user?.email || undefined);
-      if (!token) {
-        showToast('บันทึกเวร OT ในเครื่องแล้ว (กรุณากดเชื่อมต่อ Google ด้านบนเพื่อส่งข้อมูลเข้าชีท)', 'error');
-        return;
-      }
-      let allOk = true;
-      for (const r of records) {
-        const ok = await appendOTToSheet(token, targetSheetId, r);
-        if (!ok) allOk = false;
-      }
-      if (allOk) {
+      const token = await getAccessToken();
+      if (token) {
+        for (const r of records) {
+          await appendOTToSheet(token, targetSheetId, r);
+        }
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
-        setSheetSyncStatus('connected_write');
-      } else {
-        showToast(
-          'บันทึกเวร OT ในเครื่องแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ (บัญชี Google ที่ใช้ต้องมีสิทธิ์ Editor ในชีทนี้)',
-          'error'
-        );
       }
     }
   };
@@ -1238,109 +1163,6 @@ export default function App() {
             <span>5. จัดการบุคลากร & ตั้งค่า</span>
           </button>
         </div>
-
-        {/* Shared Google Sheet Data-Entry Connection Bar (For OPD Staff — Data Entry ONLY; Edit/Delete requires Admin PIN) */}
-        {!isAdmin && (db.settings.spreadsheetId || db.settings.gasUrl) && activeTab !== 'admin' && (
-          <div
-            className={`no-print rounded-2xl px-4 py-2.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs shadow-2xs ${
-              db.settings.gasUrl || hasActiveToken
-                ? 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
-                : 'bg-amber-50/90 border-amber-200 text-amber-950'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <span
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  isSyncingSheet
-                    ? 'bg-amber-500 animate-ping'
-                    : db.settings.gasUrl || hasActiveToken
-                    ? 'bg-emerald-500'
-                    : 'bg-amber-500'
-                }`}
-              />
-              <div className="font-semibold">
-                {db.settings.gasUrl ? (
-                  <span>เชื่อมต่อ Google Sheets อัตโนมัติพร้อมนำข้อมูลเข้าแล้ว</span>
-                ) : hasActiveToken ? (
-                  <span>
-                    เชื่อมต่อบัญชี Google ({user?.email || 'พร้อมส่งข้อมูลเข้าชีท'}) เรียบร้อยแล้ว
-                  </span>
-                ) : sheetSyncStatus === 'public_readonly' ? (
-                  <span>
-                    โหลดรายชื่อบุคลากรและข้อมูลจาก Google Sheets แล้ว — เชื่อมต่อบัญชี Google เพื่อบันทึกข้อมูลใหม่เข้าชีท
-                  </span>
-                ) : (
-                  <span>
-                    พบลิงก์ Google Sheets ของหน่วยงาน — กดเชื่อมต่อเพื่อดึงข้อมูลและนำข้อมูลเข้าชีทอัตโนมัติ
-                  </span>
-                )}
-                {lastSyncedAt && (
-                  <span className="ml-2 text-[11px] font-normal opacity-75">
-                    (อัปเดตล่าสุด {lastSyncedAt})
-                  </span>
-                )}
-              </div>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/80 border border-black/10 text-[11px] font-medium text-slate-700">
-                <Lock className="w-3 h-3 text-red-600" />
-                <span>สิทธิ์: นำข้อมูลเข้าเท่านั้น (แก้ไข/ลบใช้รหัส Admin)</span>
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              {!db.settings.gasUrl && !hasActiveToken && (
-                <button
-                  type="button"
-                  onClick={handleConnectGoogleForStaff}
-                  disabled={isLoggingIn}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 font-bold text-xs shadow-2xs transition-colors cursor-pointer disabled:opacity-60"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.98 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                    />
-                  </svg>
-                  <span>{isLoggingIn ? 'กำลังเชื่อมต่อ...' : 'เชื่อมต่อ Google (นำข้อมูลเข้า)'}</span>
-                </button>
-              )}
-              {(db.settings.gasUrl || hasActiveToken || sheetSyncStatus === 'public_readonly') && (
-                <button
-                  type="button"
-                  onClick={() => performBackgroundSync('initial')}
-                  disabled={isSyncingSheet}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white/90 hover:bg-white text-emerald-800 border border-emerald-300 font-semibold text-[11px] transition-colors cursor-pointer disabled:opacity-50"
-                  title="ดึงข้อมูลล่าสุดจาก Google Sheets"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
-                  <span>รีเฟรชข้อมูล</span>
-                </button>
-              )}
-              {hasActiveToken && (
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white/90 hover:bg-red-50 text-red-700 border border-red-200 font-semibold text-[11px] transition-colors cursor-pointer"
-                  title="ออกจากบัญชี Google"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>ออกจาก Google</span>
-                </button>
-              )}
-            </div>
-          </div>
-        )}
 
         {/* Tab 1: Daily Workload Entry */}
         {activeTab === 'workload' && (

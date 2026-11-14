@@ -1727,7 +1727,21 @@ export const readViaAppsScript = async (
       },
       db
     );
-    return { accessible: true, mergedDb };
+    const resolvedSheetId = mergedDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    return {
+      accessible: true,
+      mergedDb: {
+        ...mergedDb,
+        settings: {
+          ...mergedDb.settings,
+          spreadsheetId: resolvedSheetId || undefined,
+          spreadsheetUrl:
+            mergedDb.settings.spreadsheetUrl ||
+            (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+          gasUrl: mergedDb.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+        },
+      },
+    };
   } catch {
     return { accessible: false, mergedDb: db };
   }

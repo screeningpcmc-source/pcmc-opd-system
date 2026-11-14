@@ -1,10 +1,23 @@
 /**
  * ==============================================================================
+ * ส่วนขยาย Google Sheets (Google Apps Script Connector)
  * ระบบบริหารจัดการข้อมูล OPD โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน (PCMC)
- * ไฟล์: Code.gs (Google Apps Script Backend)
- * 5 ชีทฐานข้อมูลพร้อม Row_ID ทุกตาราง: Staff_Master, Daily_Workload, Leave_Records, OT_Attendance, Settings
+ * ==============================================================================
+ * วิธีติดตั้งใช้งาน (ทำครั้งเดียว):
+ * 1. เปิดไฟล์ Google Sheets ฐานข้อมูล OPD -> เมนู "ส่วนขยาย (Extensions)" -> "Apps Script"
+ * 2. วางโค้ดไฟล์นี้ทั้งหมดทับของเดิม แล้วกดปุ่ม "บันทึก (Ctrl+S)"
+ * 3. กดปุ่ม "ทำให้ใช้งานได้ (Deploy)" -> "การทำให้ใช้งานได้รายการใหม่ (New deployment)"
+ *    - ประเภท: เว็บแอป (Web app)
+ *    - ดำเนินการในชื่อ (Execute as): ฉัน (Me)
+ *    - ผู้ที่มีสิทธิ์เข้าถึง (Who has access): ทุกคน (Anyone)
+ * 4. คัดลอก Web App URL (/exec) ไปใส่ในเมนู "🏥 ระบบ OPD รพ.ชลประทาน" บนหน้า Google Sheets
+ *    หรือวางในหน้าเว็บ Admin -> ตั้งค่าลิงก์ชีท เพื่อสร้างลิงก์แชร์ให้เจ้าหน้าที่ OPD
+ *    (เจ้าหน้าที่ทุกคนจะดึงรายชื่อ/ข้อมูล และนำข้อมูลเข้าชีทได้อัตโนมัติทันทีโดยไม่ต้องแสดงแถบล็อกอิน
+ *     ส่วนการแก้ไขหรือลบข้อมูลยังคงสงวนสิทธิ์เฉพาะผู้ที่มีรหัส Admin PIN เท่านั้น)
  * ==============================================================================
  */
+
+var DEFAULT_WEB_APP_CLIENT_URL = 'https://screeningpcmc-source.github.io/pcmc-opd-system/';
 
 var SHEET_NAMES = {
   STAFF: 'Staff_Master',
@@ -15,79 +28,224 @@ var SHEET_NAMES = {
   AUDIT: 'Audit_Logs'
 };
 
-var DEFAULT_PIN_SHA256 = '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88';
-
-function getConfiguredAdminPin_() {
-  var propPin = PropertiesService.getScriptProperties().getProperty('ADMIN_PIN');
-  if (propPin) return String(propPin).trim();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
-  if (sheet && sheet.getLastRow() > 1) {
-    var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
-    for (var i = 0; i < data.length; i++) {
-      if (data[i][0] === 'Admin_Pin' && String(data[i][1] || '').trim()) {
-        return String(data[i][1]).trim();
-      }
-    }
-  }
-  return '';
-}
-
-function setAdminPinSecret(newPin) {
-  var cleanPin = String(newPin || '').trim();
-  if (cleanPin.length < 4) {
-    return { success: false, error: 'รหัสผ่านต้องมีอย่างน้อย 4 หลัก' };
-  }
-  PropertiesService.getScriptProperties().setProperty('ADMIN_PIN', cleanPin);
-  return { success: true, message: 'บันทึกรหัสผ่าน Admin ลงใน Script Properties เรียบร้อยแล้ว' };
-}
-
-function sha256Hex_(input) {
-  var rawHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(input || ''), Utilities.Charset.UTF_8);
-  var txtHash = '';
-  for (var i = 0; i < rawHash.length; i++) {
-    var hashVal = rawHash[i];
-    if (hashVal < 0) hashVal += 256;
-    var byteStr = hashVal.toString(16);
-    if (byteStr.length === 1) txtHash += '0';
-    txtHash += byteStr;
-  }
-  return txtHash;
-}
 var DEFAULT_IN_TIME_CLINICS = [
   'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'เวชศาสตร์ฟื้นฟู', 'ศัลยกรรม',
   'จักษุวิทยา', 'ศูนย์เลสิก', 'โสต ศอ นาสิก', 'อายุรกรรม', 'ตรวจโรคทั่วไป',
   'Echo', 'AAIRC', 'ODS', 'ประกันสังคม', 'หน่วยคัดกรอง'
 ];
+
 var DEFAULT_OUT_TIME_CLINICS = [
   'ตรวจโรคทั่วไป', 'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'ศัลยกรรม',
   'จักษุวิทยา', 'โสต ศอ นาสิก', 'อายุรกรรม', 'คลินิกหัวใจ', 'หน่วยคัดกรอง'
 ];
 
+var DEFAULT_LEAVE_TYPES = [
+  'ลาป่วย', 'ลากิจ', 'ลาพักผ่อน', 'ลาคลอด', 'ไปอบรม/ประชุม', 'ขาดเวร/อื่นๆ'
+];
+
 /**
- * 1. ฟังก์ชันแสดงผลหน้าเว็บ Single-Page Web App หรือตอบกลับ JSON API (สำหรับซิงค์ลิงก์แชร์)
+ * เพิ่มเมนูช่วยเชื่อมต่อบนแถบเครื่องมือ Google Sheets โดยอัตโนมัติเมื่อเปิดไฟล์
+ */
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi()
+      .createMenu('🏥 ระบบ OPD รพ.ชลประทาน')
+      .addItem('🔗 สร้างลิงก์เชื่อมต่ออัตโนมัติ (แชร์ทีม OPD)', 'showShareLinkDialog')
+      .addItem('⚙️ บันทึก Web App URL (/exec) ลงในชีท', 'promptAndSaveGasUrl')
+      .addSeparator()
+      .addItem('📋 ตรวจสอบ/สร้างหัวตารางทั้ง 6 ชีท', 'setupOpdDatabase')
+      .addToUi();
+  } catch (e) {
+    // Ignore when executed outside Sheets UI context
+  }
+}
+
+/**
+ * สร้างหรือตรวจสอบหัวตารางทั้ง 6 ชีท (ไม่มีข้อมูลเดโม่)
+ */
+function setupOpdDatabase() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schemas = [
+    {
+      name: SHEET_NAMES.STAFF,
+      headers: ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+      color: '#1e3a8a',
+      rows: []
+    },
+    {
+      name: SHEET_NAMES.WORKLOAD,
+      headers: [
+        'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
+        'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
+      ],
+      color: '#047857',
+      rows: []
+    },
+    {
+      name: SHEET_NAMES.LEAVE,
+      headers: ['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'],
+      color: '#b45309',
+      rows: []
+    },
+    {
+      name: SHEET_NAMES.OT,
+      headers: ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+      color: '#6d28d9',
+      rows: []
+    },
+    {
+      name: SHEET_NAMES.AUDIT,
+      headers: ['Timestamp', 'Action', 'Target_Name', 'Summary', 'Reason', 'Edited_By'],
+      color: '#991b1b',
+      rows: []
+    },
+    {
+      name: SHEET_NAMES.SETTINGS,
+      headers: ['Key', 'Value'],
+      color: '#374151',
+      rows: [
+        ['NHPPD', '0.4'],
+        ['Screening_NHPPD', '0.1'],
+        ['Std_Hr', '7'],
+        ['Annual_Hr', '2080'],
+        ['Work_Days', '245'],
+        ['Admin_Emails', 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th, headnurse@pcmc.ac.th'],
+        ['In_Time_Clinics', DEFAULT_IN_TIME_CLINICS.join(', ')],
+        ['Out_Time_Clinics', DEFAULT_OUT_TIME_CLINICS.join(', ')],
+        ['Leave_Types', DEFAULT_LEAVE_TYPES.join(', ')],
+        ['Custom_Holidays', '[]'],
+        ['Gas_Web_App_URL', getSavedGasUrl_()]
+      ]
+    }
+  ];
+
+  schemas.forEach(function(schema) {
+    var sheet = ss.getSheetByName(schema.name);
+    if (!sheet) {
+      sheet = ss.insertSheet(schema.name);
+    }
+    if (sheet.getLastRow() === 0) {
+      sheet.getRange(1, 1, 1, schema.headers.length).setValues([schema.headers]);
+      sheet.getRange(1, 1, 1, schema.headers.length)
+        .setBackground(schema.color)
+        .setFontColor('#ffffff')
+        .setFontWeight('bold')
+        .setHorizontalAlignment('center');
+      sheet.setFrozenRows(1);
+      if (schema.rows && schema.rows.length > 0) {
+        sheet.getRange(2, 1, schema.rows.length, schema.headers.length).setValues(schema.rows);
+      }
+    }
+  });
+
+  var detectedUrl = getServiceExecUrl_();
+  if (detectedUrl) {
+    saveGasUrlToSettings_(detectedUrl);
+  }
+
+  try {
+    SpreadsheetApp.getUi().alert('เตรียมโครงสร้างฐานข้อมูลทั้ง 6 ชีทเรียบร้อยแล้ว!');
+  } catch (e) {
+    // Headless execution
+  }
+  return { success: true, spreadsheetId: ss.getId(), gasUrl: getSavedGasUrl_() };
+}
+
+/**
+ * แสดงหน้าต่างคัดลอกลิงก์แชร์สำหรับส่งให้เจ้าหน้าที่ OPD (เชื่อมต่ออัตโนมัติ)
+ */
+function showShareLinkDialog() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var gasUrl = getSavedGasUrl_();
+
+  if (!gasUrl) {
+    var res = ui.prompt(
+      'ตั้งค่า Web App URL (/exec)',
+      'กรุณาวางลิงก์ Web App URL ที่ได้จากการกด Deploy (ลงท้ายด้วย /exec) เพื่อให้เจ้าหน้าที่ OPD นำข้อมูลเข้าชีทได้อัตโนมัติโดยไม่ต้องล็อกอิน:',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (res.getSelectedButton() !== ui.Button.OK) return;
+    gasUrl = String(res.getResponseText() || '').trim();
+    if (gasUrl) {
+      saveGasUrlToSettings_(gasUrl);
+    }
+  }
+
+  var clientBase = PropertiesService.getScriptProperties().getProperty('WEB_APP_CLIENT_URL') || DEFAULT_WEB_APP_CLIENT_URL;
+  var shareUrl = clientBase + '?sheetId=' + encodeURIComponent(ss.getId());
+  if (gasUrl) {
+    shareUrl += '&gasUrl=' + encodeURIComponent(gasUrl);
+  }
+
+  var html = HtmlService.createHtmlOutput(
+    '<div style="font-family:sans-serif;padding:12px;line-height:1.5;">' +
+    '<h3 style="margin:0 0 8px;color:#065f46;">ลิงก์สำหรับแชร์ให้เจ้าหน้าที่ OPD</h3>' +
+    '<p style="font-size:12px;color:#334155;margin:0 0 10px;">ส่งลิงก์ด้านล่างให้เจ้าหน้าที่เปิดใช้งานได้ทันที — ระบบจะดึงข้อมูลและส่งเฉพาะรายการที่บันทึกใหม่เข้าชีทนี้อัตโนมัติ (การแก้ไข/ลบต้องใส่รหัส Admin PIN)</p>' +
+    '<textarea id="linkBox" readonly style="width:100%;height:76px;padding:8px;font-size:12px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box;">' +
+    escapeHtml_(shareUrl) +
+    '</textarea>' +
+    '<div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end;">' +
+    '<button onclick="navigator.clipboard.writeText(document.getElementById(\'linkBox\').value);this.innerText=\'คัดลอกแล้ว ✓\';" ' +
+    'style="background:#059669;color:#fff;border:none;padding:8px 14px;border-radius:8px;font-weight:bold;cursor:pointer;">คัดลอกลิงก์</button>' +
+    '<button onclick="google.script.host.close();" style="background:#e2e8f0;color:#1e293b;border:none;padding:8px 12px;border-radius:8px;cursor:pointer;">ปิด</button>' +
+    '</div></div>'
+  ).setWidth(520).setHeight(240);
+
+  ui.showModalDialog(html, 'แชร์ลิงก์ระบบ OPD (เชื่อมต่อ Google Sheets อัตโนมัติ)');
+}
+
+/**
+ * บันทึก Web App URL (/exec) ด้วยตนเองผ่านเมนู Google Sheets
+ */
+function promptAndSaveGasUrl() {
+  var ui = SpreadsheetApp.getUi();
+  var current = getSavedGasUrl_();
+  var res = ui.prompt(
+    'บันทึก Web App URL (/exec)',
+    'วางลิงก์ Web App URL จาก Deploy > Manage deployments (ลงท้ายด้วย /exec):' +
+    (current ? '\n(ค่าปัจจุบัน: ' + current + ')' : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  var url = String(res.getResponseText() || '').trim();
+  if (!url) return;
+  saveGasUrlToSettings_(url);
+  ui.alert('บันทึก Web App URL ลงในชีท Settings และ Script Properties เรียบร้อยแล้ว!');
+}
+
+/**
+ * ==============================================================================
+ * Web App HTTP Endpoints (เชื่อมต่อโดยตรงจากหน้าเว็บ OPD)
+ * ==============================================================================
+ */
+
+/**
+ * GET ?action=readAll -> ส่งข้อมูลทั้งหมดให้หน้าเว็บอัตโนมัติ (ไม่ส่งรหัส Admin_Pin)
  */
 function doGet(e) {
   if (e && e.parameter && e.parameter.action === 'readAll') {
     return jsonResponse_(buildPublicReadAllPayload_());
   }
-  var template = HtmlService.createTemplateFromFile('Index');
-  return template.evaluate()
-    .setTitle('ระบบบริหารจัดการภาระงานและ Productivity OPD รพ.ชลประทาน')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, shrink-to-fit=no')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  return jsonResponse_({
+    success: true,
+    service: 'PCMC OPD Google Sheets Connector',
+    spreadsheetId: ss.getId(),
+    gasUrl: getSavedGasUrl_()
+  });
 }
 
 /**
- * 1.1 Webhook สำหรับรับเฉพาะการ "นำข้อมูลเข้า" (Append Only) จากบุคลากร OPD ที่เปิดลิงก์แชร์
- * ไม่อนุญาตให้แก้ไขหรือลบข้อมูลผ่าน Endpoint สาธารณะ (สงวนสิทธิ์เฉพาะ Admin PIN)
+ * POST -> รับเฉพาะการ "นำข้อมูลเข้า" (Append Only) สำหรับเจ้าหน้าที่ OPD
+ * การแก้ไขหรือลบข้อมูลทั้งหมดสงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น
  */
 function doPost(e) {
   try {
     var bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '{}';
     var req = JSON.parse(bodyText);
     var action = String(req.action || '').trim();
-    var payload = req.payload || {};
+    var payload = req.payload;
 
     if (action === 'appendWorkload') {
       return jsonResponse_(appendWorkloadFromApi_(payload));
@@ -108,9 +266,71 @@ function doPost(e) {
   }
 }
 
+/**
+ * ==============================================================================
+ * Internal Helpers
+ * ==============================================================================
+ */
+
 function jsonResponse_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+function escapeHtml_(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function getServiceExecUrl_() {
+  try {
+    var url = String(ScriptApp.getService().getUrl() || '').trim();
+    if (url && /\/exec$/.test(url)) return url;
+  } catch (e) {
+    // ignore
+  }
+  return '';
+}
+
+function getSavedGasUrl_() {
+  var propUrl = String(PropertiesService.getScriptProperties().getProperty('GAS_WEB_APP_URL') || '').trim();
+  if (propUrl) return propUrl;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+  if (sheet && sheet.getLastRow() > 1) {
+    var vals = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
+    for (var i = 0; i < vals.length; i++) {
+      if (String(vals[i][0] || '').trim() === 'Gas_Web_App_URL') {
+        var val = String(vals[i][1] || '').trim();
+        if (val) return val;
+      }
+    }
+  }
+  return getServiceExecUrl_();
+}
+
+function saveGasUrlToSettings_(gasUrl) {
+  var cleanUrl = String(gasUrl || '').trim();
+  if (!cleanUrl) return;
+  PropertiesService.getScriptProperties().setProperty('GAS_WEB_APP_URL', cleanUrl);
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.SETTINGS, ['Key', 'Value']);
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < keys.length; i++) {
+      if (String(keys[i][0] || '').trim() === 'Gas_Web_App_URL') {
+        sheet.getRange(i + 2, 2).setValue(cleanUrl);
+        return;
+      }
+    }
+  }
+  sheet.appendRow(['Gas_Web_App_URL', cleanUrl]);
 }
 
 function formatCellValue_(val) {
@@ -135,6 +355,7 @@ function getSheetRowsNormalized_(sheetName, minCols) {
 
 function buildPublicReadAllPayload_() {
   try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
     var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
     var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 15);
     var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 8);
@@ -146,8 +367,22 @@ function buildPublicReadAllPayload_() {
     var leaveHasId = leaveData.headers[0] === 'Leave_ID';
     var otHasId = otData.headers[0] === 'OT_ID';
 
+    var activeGasUrl = getSavedGasUrl_();
+    var settingsRows = settingsData.rows
+      .filter(function(r) { return r[0] && r[0] !== 'Admin_Pin'; })
+      .map(function(r) { return r.slice(0, 2); });
+
+    if (activeGasUrl) {
+      var hasGasRow = settingsRows.some(function(r) { return r[0] === 'Gas_Web_App_URL' && r[1]; });
+      if (!hasGasRow) {
+        settingsRows.push(['Gas_Web_App_URL', activeGasUrl]);
+      }
+    }
+
     return {
       success: true,
+      spreadsheetId: ss.getId(),
+      gasUrl: activeGasUrl,
       staffRows: staffData.rows.map(function(r) { return r.slice(0, 7); }),
       workloadRows: workloadData.rows.map(function(r) {
         return workloadHasId ? r.slice(1, 16) : r.slice(0, 15);
@@ -158,9 +393,7 @@ function buildPublicReadAllPayload_() {
       otRows: otData.rows.map(function(r) {
         return otHasId ? r.slice(1, 7) : r.slice(0, 6);
       }),
-      settingsRows: settingsData.rows
-        .filter(function(r) { return r[0] && r[0] !== 'Admin_Pin'; })
-        .map(function(r) { return r.slice(0, 2); }),
+      settingsRows: settingsRows,
       auditRows: auditData.rows.map(function(r) { return r.slice(0, 6); })
     };
   } catch (err) {
@@ -181,366 +414,27 @@ function ensureSheetWithHeaders_(sheetName, defaultHeaders) {
   return sheet;
 }
 
-function appendWorkloadFromApi_(entry) {
-  if (!entry || !entry.date || !entry.clinic) {
-    return { success: false, error: 'ข้อมูลภาระงานไม่ครบถ้วน' };
-  }
+function appendWorkloadFromApi_(payload) {
+  var list = Array.isArray(payload) ? payload : [payload];
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, [
     'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
     'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
   ]);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
-  var adultPt = Number(entry.adultPt || 0);
-  var childPt = Number(entry.childPt || 0);
-  var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
-  var baseRow = [
-    String(entry.date || ''),
-    String(entry.shift || ''),
-    String(entry.clinic || ''),
-    totalPt,
-    adultPt,
-    childPt,
-    Number(entry.admit || 0),
-    Number(entry.hn || 0),
-    Number(entry.rn || 0),
-    Number(entry.pn || 0),
-    Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
-    Number(entry.clerk || 0),
-    Number(entry.serviceWorker || 0),
-    String(entry.note || ''),
-    String(entry.reporter || '')
-  ];
-  if (firstHeader === 'Record_ID') {
-    var recId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-    sheet.appendRow([recId].concat(baseRow));
-  } else {
-    sheet.appendRow(baseRow);
-  }
-  return { success: true };
-}
+  var rowsToAppend = [];
 
-function appendLeaveFromApi_(leave) {
-  if (!leave || !leave.startDate || !leave.staffName) {
-    return { success: false, error: 'ข้อมูลวันลาไม่ครบถ้วน' };
-  }
-  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
-    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
-  ]);
-  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
-  var baseRow = [
-    String(leave.startDate || ''),
-    String(leave.endDate || leave.startDate || ''),
-    String(leave.staffName || ''),
-    String(leave.position || 'RN'),
-    String(leave.clinic || ''),
-    String(leave.leaveType || 'ลาป่วย'),
-    Number(leave.days || 1),
-    String(leave.note || '')
-  ];
-  if (firstHeader === 'Leave_ID') {
-    var lvId = leave.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-    sheet.appendRow([lvId].concat(baseRow));
-  } else {
-    sheet.appendRow(baseRow);
-  }
-  return { success: true };
-}
-
-function appendOTFromApi_(ot) {
-  if (!ot || !ot.date || !ot.staffName) {
-    return { success: false, error: 'ข้อมูลเวรนอกเวลาไม่ครบถ้วน' };
-  }
-  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
-    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
-  ]);
-  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
-  var baseRow = [
-    String(ot.date || ''),
-    String(ot.shift || ''),
-    String(ot.staffName || ''),
-    String(ot.position || 'RN'),
-    String(ot.homeClinic || ''),
-    String(ot.workClinic || '')
-  ];
-  if (firstHeader === 'OT_ID') {
-    var otId = ot.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-    sheet.appendRow([otId].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']));
-  } else {
-    sheet.appendRow(baseRow);
-  }
-  return { success: true };
-}
-
-function include(filename) {
-  return HtmlService.createHtmlOutputFromFile(filename).getContent();
-}
-
-/**
- * 2. ฟังก์ชัน Setup Database อัตโนมัติในการรันครั้งแรก
- */
-function setupDatabase() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  var schemas = [
-    {
-      name: SHEET_NAMES.STAFF,
-      headers: ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status'],
-      headerColor: '#1e3a8a',
-      seedData: [
-        ['STF-001', 'พว.สุดารัตน์ ศิริพรหม', 'HN', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-002', 'พว.ประภัสสร วงษ์สุวรรณ', 'HN', 'อายุรกรรม', 'Active'],
-        ['STF-003', 'พว.รัตนาภรณ์ จันทร์สว่าง', 'HN', 'กุมารเวชกรรม', 'Active'],
-        ['STF-004', 'พว.เพ็ญศรี พิทักษ์พงศ์', 'HN', 'ศัลยกรรม', 'Active'],
-        ['STF-005', 'พว.นันทนา สุขสมบูรณ์', 'HN', 'สูติ-นรีเวชกรรม', 'Active'],
-        ['STF-006', 'พว.วรรณา เจริญเกียรติ', 'HN', 'จักษุวิทยา', 'Active'],
-        ['STF-007', 'พว.อารีย์ สถิตย์พร', 'HN', 'ศูนย์เลสิก', 'Active'],
-        ['STF-008', 'พว.กมลวรรณ เทพประสิทธิ์', 'RN', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-009', 'พว.ชลธิชา บุญประสิทธิ์', 'RN', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-013', 'พว.ปวีณา บุญชู', 'RN', 'อายุรกรรม', 'Active'],
-        ['STF-015', 'พว.พรทิพย์ สถาวร', 'RN', 'อายุรกรรม', 'Active'],
-        ['STF-017', 'พว.รสริน อารีราษฎร์', 'RN', 'กุมารเวชกรรม', 'Active'],
-        ['STF-038', 'พว.เยาวภา บุญมา', 'RN', 'Echo', 'Active'],
-        ['STF-046', 'พท.กนกพร ลิ่มสกุล', 'PN', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-048', 'พท.จันทร์จิรา สมรภูมิ', 'PN', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-060', 'นายกิตติคุณ มั่นคง', 'NA', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-064', 'น.ส.ทิวารัตน์ สดใส', 'NA', 'สูติ-นรีเวชกรรม', 'Active'],
-        ['STF-080', 'น.ส.เกศินี มหาวงศ์', 'Clerk', 'หน่วยคัดกรอง', 'Active'],
-        ['STF-092', 'นายสมพร ใจกล้า', 'Service Worker', 'หน่วยคัดกรอง', 'Active']
-      ]
-    },
-    {
-      name: SHEET_NAMES.WORKLOAD,
-      headers: [
-        'Record_ID', 'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
-        'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
-      ],
-      headerColor: '#047857',
-      seedData: []
-    },
-    {
-      name: SHEET_NAMES.LEAVE,
-      headers: ['Leave_ID', 'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'],
-      headerColor: '#b45309',
-      seedData: []
-    },
-    {
-      name: SHEET_NAMES.OT,
-      headers: ['OT_ID', 'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Is_External'],
-      headerColor: '#6d28d9',
-      seedData: []
-    },
-    {
-      name: SHEET_NAMES.SETTINGS,
-      headers: ['Key', 'Value'],
-      headerColor: '#374151',
-      seedData: [
-        ['NHPPD', '0.4'],
-        ['Std_Hr', '7'],
-        ['Annual_Hr', '2080'],
-        ['Work_Days', '245'],
-        ['Admin_Emails', 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th, headnurse@pcmc.ac.th'],
-        ['Admin_Pin', getConfiguredAdminPin_()],
-        ['In_Time_Clinics', DEFAULT_IN_TIME_CLINICS.join(', ')],
-        ['Out_Time_Clinics', DEFAULT_OUT_TIME_CLINICS.join(', ')]
-      ]
-    }
-  ];
-
-  schemas.forEach(function(schema) {
-    var sheet = ss.getSheetByName(schema.name);
-    if (!sheet) {
-      sheet = ss.insertSheet(schema.name);
-    }
-
-    if (sheet.getLastRow() === 0) {
-      sheet.getRange(1, 1, 1, schema.headers.length).setValues([schema.headers]);
-      var headerRange = sheet.getRange(1, 1, 1, schema.headers.length);
-      headerRange.setBackground(schema.headerColor)
-                 .setFontColor('#ffffff')
-                 .setFontWeight('bold')
-                 .setHorizontalAlignment('center');
-      sheet.setFrozenRows(1);
-
-      if (schema.seedData && schema.seedData.length > 0) {
-        sheet.getRange(2, 1, schema.seedData.length, schema.headers.length).setValues(schema.seedData);
-      }
-    }
-  });
-
-  return { success: true, message: 'สร้างฐานข้อมูล 5 ชีทเรียบร้อยแล้ว!' };
-}
-
-/**
- * 3. ฟังก์ชันดึงข้อมูลทั้งหมดสำหรับเริ่มต้นระบบ (Initial Data)
- */
-function getInitialData() {
-  try {
-    var currentUserEmail = Session.getActiveUser().getEmail() || '';
-    var settings = getSettingsMap();
-    var adminEmails = (settings['Admin_Emails'] || '').toLowerCase().split(',').map(function(e) { return e.trim(); });
-    var isEmailAdmin = currentUserEmail ? adminEmails.indexOf(currentUserEmail.toLowerCase()) !== -1 : false;
-
-    var safeSettings = Object.assign({}, settings);
-    delete safeSettings['Admin_Pin'];
-
-    return {
-      success: true,
-      currentUserEmail: currentUserEmail,
-      isEmailAdmin: isEmailAdmin,
-      hasAdminPinConfigured: Boolean(getConfiguredAdminPin_()),
-      staff: getStaffList(),
-      workloads: getWorkloadList(),
-      leaves: getLeaveList(),
-      ot: getOTList(),
-      settings: safeSettings
-    };
-  } catch (err) {
-    return { success: false, error: err.toString() };
-  }
-}
-
-/**
- * 4. Helper: ดึงการตั้งค่าเป็น Key-Value Map
- */
-function getSettingsMap() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
-  var defaults = {
-    'NHPPD': '0.4',
-    'Std_Hr': '7',
-    'Annual_Hr': '2080',
-    'Work_Days': '245',
-    'Admin_Emails': 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th',
-    'Admin_Pin': getConfiguredAdminPin_(),
-    'In_Time_Clinics': DEFAULT_IN_TIME_CLINICS.join(', '),
-    'Out_Time_Clinics': DEFAULT_OUT_TIME_CLINICS.join(', ')
-  };
-  if (!sheet || sheet.getLastRow() <= 1) {
-    return defaults;
-  }
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
-  var map = Object.assign({}, defaults);
-  data.forEach(function(r) {
-    if (r[0]) map[r[0]] = String(r[1]);
-  });
-  return map;
-}
-
-/**
- * 5. CRUD: Staff_Master
- */
-function getStaffList() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.STAFF);
-  if (!sheet || sheet.getLastRow() <= 1) return [];
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues();
-  return data.map(function(r) {
-    return {
-      staffId: String(r[0] || ''),
-      name: String(r[1] || ''),
-      position: String(r[2] || 'RN'),
-      homeClinic: String(r[3] || ''),
-      status: String(r[4] || 'Active')
-    };
-  });
-}
-
-function addStaff(staff) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.STAFF);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.STAFF); }
-    var staffId = staff.staffId || ('STF-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 100));
-    sheet.appendRow([staffId, staff.name, staff.position, staff.homeClinic, staff.status || 'Active']);
-    return { success: true, message: 'เพิ่มบุคลากรเรียบร้อยแล้ว', staffId: staffId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function updateStaff(staffId, staff) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.STAFF);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทบุคลากร' };
-    var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < data.length; i++) {
-      if (String(data[i][0]) === String(staffId)) {
-        var rowNum = i + 2;
-        sheet.getRange(rowNum, 2, 1, 4).setValues([[staff.name, staff.position, staff.homeClinic, staff.status]]);
-        return { success: true, message: 'อัปเดตข้อมูลบุคลากรเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบข้อมูลบุคลากร ' + staffId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function deleteStaff(staffId) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.STAFF);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทบุคลากร' };
-    var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < data.length; i++) {
-      if (String(data[i][0]) === String(staffId)) {
-        sheet.deleteRow(i + 2);
-        return { success: true, message: 'ลบข้อมูลบุคลากรเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบข้อมูลบุคลากร ' + staffId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * 6. CRUD: Daily_Workload
- */
-function getWorkloadList() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.WORKLOAD);
-  if (!sheet || sheet.getLastRow() <= 1) return [];
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 16).getValues();
-  return data.map(function(r) {
-    var dateVal = r[1] instanceof Date ? Utilities.formatDate(r[1], 'Asia/Bangkok', 'yyyy-MM-dd') : String(r[1] || '');
-    return {
-      id: String(r[0] || ''),
-      date: dateVal,
-      shift: String(r[2] || ''),
-      clinic: String(r[3] || ''),
-      totalPt: Number(r[4] || 0),
-      adultPt: Number(r[5] || 0),
-      childPt: Number(r[6] || 0),
-      admit: Number(r[7] || 0),
-      hn: Number(r[8] || 0),
-      rn: Number(r[9] || 0),
-      pn: Number(r[10] || 0),
-      na: Number(r[11] || 0),
-      clerk: Number(r[12] || 0),
-      serviceWorker: Number(r[13] || 0),
-      note: String(r[14] || ''),
-      reporter: String(r[15] || '')
-    };
-  });
-}
-
-function saveDailyWorkload(entry) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.WORKLOAD);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.WORKLOAD); }
-
-    var recordId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-    var row = [
-      recordId,
-      entry.date,
-      entry.shift,
-      entry.clinic,
-      Number(entry.totalPt || 0),
-      Number(entry.adultPt || 0),
-      Number(entry.childPt || 0),
+  list.forEach(function(entry) {
+    if (!entry || !entry.date || !entry.clinic) return;
+    var adultPt = Number(entry.adultPt || 0);
+    var childPt = Number(entry.childPt || 0);
+    var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
+    var baseRow = [
+      String(entry.date || ''),
+      String(entry.shift || ''),
+      String(entry.clinic || ''),
+      totalPt,
+      adultPt,
+      childPt,
       Number(entry.admit || 0),
       Number(entry.hn || 0),
       Number(entry.rn || 0),
@@ -548,334 +442,88 @@ function saveDailyWorkload(entry) {
       Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
       Number(entry.clerk || 0),
       Number(entry.serviceWorker || 0),
-      entry.note || '',
-      entry.reporter || ''
+      String(entry.note || ''),
+      String(entry.reporter || '')
     ];
-    sheet.appendRow(row);
-    return { success: true, message: 'บันทึกข้อมูลเรียบร้อยแล้ว', id: recordId };
-  } catch (err) {
-    return { success: false, error: err.toString() };
-  }
-}
-
-function updateDailyWorkload(recordId, entry) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.WORKLOAD);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทภาระงาน' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(recordId)) {
-        var rowNum = i + 2;
-        var rowData = [
-          entry.date,
-          entry.shift,
-          entry.clinic,
-          Number(entry.totalPt || 0),
-          Number(entry.adultPt || 0),
-          Number(entry.childPt || 0),
-          Number(entry.admit || 0),
-          Number(entry.hn || 0),
-          Number(entry.rn || 0),
-          Number(entry.pn || 0),
-          Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
-          Number(entry.clerk || 0),
-          Number(entry.serviceWorker || 0),
-          entry.note || '',
-          entry.reporter || ''
-        ];
-        sheet.getRange(rowNum, 2, 1, 15).setValues([rowData]);
-        return { success: true, message: 'อัปเดตข้อมูลภาระงานเรียบร้อย' };
-      }
+    if (firstHeader === 'Record_ID') {
+      var recId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      rowsToAppend.push([recId].concat(baseRow));
+    } else {
+      rowsToAppend.push(baseRow);
     }
-    return { success: false, error: 'ไม่พบ Record_ID ' + recordId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function deleteDailyWorkload(recordId) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.WORKLOAD);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทภาระงาน' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(recordId)) {
-        sheet.deleteRow(i + 2);
-        return { success: true, message: 'ลบรายการภาระงานเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบ Record_ID ' + recordId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * 7. CRUD: Leave_Records
- */
-function getLeaveList() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.LEAVE);
-  if (!sheet || sheet.getLastRow() <= 1) return [];
-  var cols = Math.max(8, sheet.getLastColumn());
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, cols).getValues();
-  return data.map(function(r) {
-    var sDate = r[1] instanceof Date ? Utilities.formatDate(r[1], 'Asia/Bangkok', 'yyyy-MM-dd') : String(r[1] || '');
-    var eDate = r[2] instanceof Date ? Utilities.formatDate(r[2], 'Asia/Bangkok', 'yyyy-MM-dd') : String(r[2] || '');
-    return {
-      id: String(r[0] || ''),
-      startDate: sDate,
-      endDate: eDate,
-      staffName: String(r[3] || ''),
-      position: String(r[4] || 'RN'),
-      clinic: String(r[5] || ''),
-      leaveType: String(r[6] || 'ลาป่วย'),
-      days: Number(r[7] || 1),
-      note: String(r[8] || '')
-    };
   });
+
+  if (rowsToAppend.length === 0) {
+    return { success: false, error: 'ข้อมูลภาระงานไม่ครบถ้วน' };
+  }
+  sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  return { success: true, appended: rowsToAppend.length };
 }
 
-function saveLeaveRecord(leave) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.LEAVE);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.LEAVE); }
-    var leaveId = leave.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-    var row = [
-      leaveId,
-      leave.startDate,
-      leave.endDate,
-      leave.staffName,
-      leave.position,
-      leave.clinic,
-      leave.leaveType,
+function appendLeaveFromApi_(payload) {
+  var list = Array.isArray(payload) ? payload : [payload];
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var rowsToAppend = [];
+
+  list.forEach(function(leave) {
+    if (!leave || !leave.startDate || !leave.staffName) return;
+    var baseRow = [
+      String(leave.startDate || ''),
+      String(leave.endDate || leave.startDate || ''),
+      String(leave.staffName || ''),
+      String(leave.position || 'RN'),
+      String(leave.clinic || ''),
+      String(leave.leaveType || 'ลาป่วย'),
       Number(leave.days || 1),
-      leave.note || ''
+      String(leave.note || '')
     ];
-    sheet.appendRow(row);
-    return { success: true, message: 'บันทึกวันลาเรียบร้อยแล้ว', id: leaveId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function saveBatchLeave(records) {
-  try {
-    if (!records || records.length === 0) return { success: true };
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.LEAVE);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.LEAVE); }
-    var rows = records.map(function(l) {
-      var leaveId = l.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-      return [
-        leaveId,
-        l.startDate,
-        l.endDate,
-        l.staffName,
-        l.position,
-        l.clinic,
-        l.leaveType,
-        Number(l.days || 1),
-        l.note || ''
-      ];
-    });
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 9).setValues(rows);
-    return { success: true, message: 'บันทึกวันลา ' + rows.length + ' รายการสำเร็จ' };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function updateLeaveRecord(leaveId, leave) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.LEAVE);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทวันลา' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(leaveId)) {
-        var rowNum = i + 2;
-        var rowData = [
-          leave.startDate,
-          leave.endDate,
-          leave.staffName,
-          leave.position,
-          leave.clinic,
-          leave.leaveType,
-          Number(leave.days || 1),
-          leave.note || ''
-        ];
-        sheet.getRange(rowNum, 2, 1, 8).setValues([rowData]);
-        return { success: true, message: 'อัปเดตข้อมูลการลาเรียบร้อย' };
-      }
+    if (firstHeader === 'Leave_ID') {
+      var lvId = leave.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      rowsToAppend.push([lvId].concat(baseRow));
+    } else {
+      rowsToAppend.push(baseRow);
     }
-    return { success: false, error: 'ไม่พบ Leave_ID ' + leaveId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-function deleteLeaveRecord(leaveId) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.LEAVE);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีทวันลา' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(leaveId)) {
-        sheet.deleteRow(i + 2);
-        return { success: true, message: 'ลบประวัติการลาเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบ Leave_ID ' + leaveId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * 8. CRUD: OT_Attendance
- */
-function getOTList() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAMES.OT);
-  if (!sheet || sheet.getLastRow() <= 1) return [];
-  var cols = Math.max(7, sheet.getLastColumn());
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, cols).getValues();
-  return data.map(function(r) {
-    var dVal = r[1] instanceof Date ? Utilities.formatDate(r[1], 'Asia/Bangkok', 'yyyy-MM-dd') : String(r[1] || '');
-    return {
-      id: String(r[0] || ''),
-      date: dVal,
-      shift: String(r[2] || ''),
-      staffName: String(r[3] || ''),
-      position: String(r[4] || 'RN'),
-      homeClinic: String(r[5] || ''),
-      workClinic: String(r[6] || ''),
-      isExternal: r[7] === 'External' || r[7] === true || r[7] === 'TRUE'
-    };
   });
-}
 
-function saveBatchOT(records) {
-  try {
-    if (!records || records.length === 0) return { success: true };
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.OT);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.OT); }
-    var rows = records.map(function(o) {
-      var otId = o.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-      return [
-        otId,
-        o.date,
-        o.shift,
-        o.staffName,
-        o.position,
-        o.homeClinic,
-        o.workClinic,
-        o.isExternal ? 'External' : 'OPD'
-      ];
-    });
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 8).setValues(rows);
-    return { success: true, message: 'บันทึกเวรนอกเวลา ' + rows.length + ' คน สำเร็จ' };
-  } catch (e) {
-    return { success: false, error: e.toString() };
+  if (rowsToAppend.length === 0) {
+    return { success: false, error: 'ข้อมูลวันลาไม่ครบถ้วน' };
   }
+  sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  return { success: true, appended: rowsToAppend.length };
 }
 
-function updateOTRecord(otId, record) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.OT);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีท OT' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(otId)) {
-        var rowNum = i + 2;
-        var rowData = [
-          record.date,
-          record.shift,
-          record.staffName,
-          record.position,
-          record.homeClinic,
-          record.workClinic,
-          record.isExternal ? 'External' : 'OPD'
-        ];
-        sheet.getRange(rowNum, 2, 1, 7).setValues([rowData]);
-        return { success: true, message: 'อัปเดตข้อมูลเวรนอกเวลาเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบ OT_ID ' + otId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
+function appendOTFromApi_(payload) {
+  var list = Array.isArray(payload) ? payload : [payload];
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var rowsToAppend = [];
 
-function deleteOTRecord(otId) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.OT);
-    if (!sheet || sheet.getLastRow() <= 1) return { success: false, error: 'ไม่พบชีท OT' };
-    var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(otId)) {
-        sheet.deleteRow(i + 2);
-        return { success: true, message: 'ลบรายการเวรนอกเวลาเรียบร้อย' };
-      }
-    }
-    return { success: false, error: 'ไม่พบ OT_ID ' + otId };
-  } catch (e) {
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * 9. Settings Management
- */
-function saveSettings(settingsData) {
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
-    if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS); }
-
-    var existingPin = getConfiguredAdminPin_();
-    var nextPin = String(settingsData.adminPin || '').trim();
-    if (nextPin) {
-      PropertiesService.getScriptProperties().setProperty('ADMIN_PIN', nextPin);
-      existingPin = nextPin;
-    }
-
-    var rows = [
-      ['NHPPD', String(settingsData.nhppd || '0.4')],
-      ['Std_Hr', String(settingsData.stdHr || '7')],
-      ['Annual_Hr', String(settingsData.annualHr || '2080')],
-      ['Work_Days', String(settingsData.workDays || '245')],
-      ['Admin_Emails', Array.isArray(settingsData.adminEmails) ? settingsData.adminEmails.join(', ') : String(settingsData.adminEmails || '')],
-      ['Admin_Pin', existingPin],
-      ['In_Time_Clinics', Array.isArray(settingsData.inTimeClinics) ? settingsData.inTimeClinics.join(', ') : String(settingsData.inTimeClinics || DEFAULT_IN_TIME_CLINICS.join(', '))],
-      ['Out_Time_Clinics', Array.isArray(settingsData.outTimeClinics) ? settingsData.outTimeClinics.join(', ') : String(settingsData.outTimeClinics || DEFAULT_OUT_TIME_CLINICS.join(', '))]
+  list.forEach(function(ot) {
+    if (!ot || !ot.date || !ot.staffName) return;
+    var baseRow = [
+      String(ot.date || ''),
+      String(ot.shift || ''),
+      String(ot.staffName || ''),
+      String(ot.position || 'RN'),
+      String(ot.homeClinic || ''),
+      String(ot.workClinic || '')
     ];
+    if (firstHeader === 'OT_ID') {
+      var otId = ot.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      rowsToAppend.push([otId].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']));
+    } else {
+      rowsToAppend.push(baseRow);
+    }
+  });
 
-    sheet.clearContents();
-    sheet.getRange(1, 1, 1, 2).setValues([['Key', 'Value']]);
-    sheet.getRange(1, 1, 1, 2).setBackground('#374151').setFontColor('#ffffff').setFontWeight('bold');
-    sheet.getRange(2, 1, rows.length, 2).setValues(rows);
-
-    return { success: true, message: 'บันทึกการตั้งค่าเรียบร้อยแล้ว' };
-  } catch (e) {
-    return { success: false, error: e.toString() };
+  if (rowsToAppend.length === 0) {
+    return { success: false, error: 'ข้อมูลเวรนอกเวลาไม่ครบถ้วน' };
   }
-}
-
-function verifyAdminPin(pin) {
-  var entered = String(pin || '').trim();
-  if (!entered) return { success: false };
-  var savedPin = getConfiguredAdminPin_();
-  if (savedPin) {
-    return { success: entered === savedPin };
-  }
-  return { success: sha256Hex_(entered) === DEFAULT_PIN_SHA256 };
+  sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  return { success: true, appended: rowsToAppend.length };
 }
