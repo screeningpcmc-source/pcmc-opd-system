@@ -313,7 +313,7 @@ function parseSheetsApiError(errorText: string, defaultPrefix: string): Error {
       friendlyMsg =
         'ยังไม่ได้เปิดใช้งาน Google Sheets API ใน Google Cloud Console กรุณากดเปิดใช้งาน "Google Sheets API" (และ "Google Drive API") ในโปรเจกต์ของคุณ แล้วรอ 1-2 นาทีแล้วลองใหม่อีกครั้ง';
     } else if (parsedErr?.error?.code === 401 || parsedErr?.error?.status === 'UNAUTHENTICATED') {
-      friendlyMsg = 'สิทธิ์การเชื่อมต่อ Google หมดอายุ กรุณากด Sign in with Google ใหม่อีกครั้ง';
+      friendlyMsg = 'ไม่สามารถซิงค์ผ่านโทเคนเดิมได้ กรุณาใช้ Web App URL (/exec) จาก Code.gs เพื่อซิงค์โดยไม่ต้อง Sign in Google';
     } else if (parsedErr?.error?.code === 403 || parsedErr?.error?.status === 'PERMISSION_DENIED') {
       friendlyMsg = `ไม่มีสิทธิ์เข้าถึง Google Sheets นี้ (${errMsg || 'กรุณาตรวจสอบสิทธิ์การแก้ไขชีท'})`;
     } else if (parsedErr?.error?.code === 404) {
@@ -1766,6 +1766,306 @@ export const appendViaAppsScript = async (
     return Boolean(data?.success);
   } catch (err) {
     console.error(`Failed to ${action} via Apps Script:`, err);
+    return false;
+  }
+};
+
+export const hasPendingAdminDirtyFlags = (): boolean =>
+  isStaffMasterDirty() ||
+  isSettingsDirty() ||
+  isWorkloadsDirty() ||
+  isLeavesDirty() ||
+  isOtDirty();
+
+/**
+ * 2-Way Apps Script sync for general OPD staff (zero Google Sign-In, zero Admin PIN):
+ * - Reads all remote tabs
+ * - Pushes any local Workload/Leave/OT records not yet present in the remote sheet
+ */
+export const syncPublicViaAppsScript = async (
+  gasUrl: string,
+  db: AppDatabase
+): Promise<{ accessible: boolean; mergedDb: AppDatabase; pushedCount: number }> => {
+  try {
+    const sep = gasUrl.includes('?') ? '&' : '?';
+    const res = await fetch(`${gasUrl}${sep}action=readAll`, { method: 'GET' });
+    if (!res.ok) return { accessible: false, mergedDb: db, pushedCount: 0 };
+    const data = await res.json();
+    if (!data || data.success === false) return { accessible: false, mergedDb: db, pushedCount: 0 };
+
+    const remoteWorkloads: DailyWorkload[] = Array.isArray(data.workloadRows)
+      ? data.workloadRows
+          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+          .map((r: string[], idx: number) => {
+            const adultPt = Number(r[4] || 0);
+            const childPt = Number(r[5] || 0);
+            return {
+              id: `REC-GS-${idx}`,
+              date: String(r[0] || '').trim(),
+              shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+              clinic: String(r[2] || '').trim(),
+              totalPt: Math.max(Number(r[3] || 0), adultPt + childPt),
+              adultPt,
+              childPt,
+              admit: Number(r[6] || 0),
+              hn: Number(r[7] || 0),
+              rn: Number(r[8] || 0),
+              pn: Number(r[9] || 0),
+              na: Number(r[10] || 0),
+              clerk: Number(r[11] || 0),
+              serviceWorker: Number(r[12] || 0),
+              note: String(r[13] || '').trim(),
+              reporter: String(r[14] || '').trim(),
+            };
+          })
+      : [];
+
+    const remoteLeaves: LeaveRecord[] = Array.isArray(data.leaveRows)
+      ? data.leaveRows
+          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+          .map((r: string[], idx: number) => ({
+            id: `LV-GS-${idx}`,
+            startDate: String(r[0] || '').trim(),
+            endDate: String(r[1] || r[0] || '').trim(),
+            staffName: String(r[2] || '').trim(),
+            position: ((r[3] || 'RN').trim() === 'PCA' ? 'NA' : (r[3] || 'RN').trim()) as StaffPosition,
+            clinic: String(r[4] || '').trim(),
+            leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
+            days: Number(r[6] || 1),
+            note: String(r[7] || '').trim(),
+          }))
+      : [];
+
+    const remoteOt: OTAttendance[] = Array.isArray(data.otRows)
+      ? data.otRows
+          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+          .map((r: string[], idx: number) => ({
+            id: `OT-GS-${idx}`,
+            date: String(r[0] || '').trim(),
+            shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
+            staffName: String(r[2] || '').trim(),
+            position: ((r[3] || 'RN').trim() === 'PCA' ? 'NA' : (r[3] || 'RN').trim()) as StaffPosition,
+            homeClinic: String(r[4] || '').trim(),
+            workClinic: String(r[5] || '').trim(),
+          }))
+      : [];
+
+    const remoteWKeys = new Set(remoteWorkloads.map(workloadKey));
+    const remoteLKeys = new Set(remoteLeaves.map(leaveKey));
+    const remoteOKeys = new Set(remoteOt.map(otKey));
+
+    const workloadsToPush = !isWorkloadsDirty()
+      ? db.workloads.filter((w) => !remoteWKeys.has(workloadKey(w)))
+      : [];
+    const leavesToPush = !isLeavesDirty()
+      ? db.leaves.filter((l) => !remoteLKeys.has(leaveKey(l)))
+      : [];
+    const otToPush = !isOtDirty() ? db.ot.filter((o) => !remoteOKeys.has(otKey(o))) : [];
+
+    let pushedCount = 0;
+    if (workloadsToPush.length > 0) {
+      if (await appendViaAppsScript(gasUrl, 'appendWorkload', workloadsToPush)) {
+        pushedCount += workloadsToPush.length;
+      }
+    }
+    if (leavesToPush.length > 0) {
+      if (await appendViaAppsScript(gasUrl, 'appendLeave', leavesToPush)) {
+        pushedCount += leavesToPush.length;
+      }
+    }
+    if (otToPush.length > 0) {
+      if (await appendViaAppsScript(gasUrl, 'appendOT', otToPush)) {
+        pushedCount += otToPush.length;
+      }
+    }
+
+    const mergedDb = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      db
+    );
+    const resolvedSheetId =
+      mergedDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+
+    return {
+      accessible: true,
+      pushedCount,
+      mergedDb: {
+        ...mergedDb,
+        settings: {
+          ...mergedDb.settings,
+          spreadsheetId: resolvedSheetId || undefined,
+          spreadsheetUrl:
+            mergedDb.settings.spreadsheetUrl ||
+            (resolvedSheetId
+              ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit`
+              : undefined),
+          gasUrl: mergedDb.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+        },
+      },
+    };
+  } catch {
+    return { accessible: false, mergedDb: db, pushedCount: 0 };
+  }
+};
+
+/**
+ * Full 2-Way Apps Script sync for Admin PIN-unlocked session (zero Google Sign-In).
+ */
+export const syncAdminViaAppsScript = async (
+  gasUrl: string,
+  adminPin: string,
+  db: AppDatabase
+): Promise<{
+  accessible: boolean;
+  adminSynced: boolean;
+  mergedDb: AppDatabase;
+  pushedCount: number;
+  error?: string;
+}> => {
+  const pubRes = await syncPublicViaAppsScript(gasUrl, db);
+  if (!pubRes.accessible) {
+    return { accessible: false, adminSynced: false, mergedDb: db, pushedCount: 0 };
+  }
+
+  const workingDb = pubRes.mergedDb;
+  const dirty = {
+    staff: isStaffMasterDirty(),
+    settings: isSettingsDirty(),
+    workloads: isWorkloadsDirty(),
+    leaves: isLeavesDirty(),
+    ot: isOtDirty(),
+  };
+  const anyDirty =
+    dirty.staff ||
+    dirty.settings ||
+    dirty.workloads ||
+    dirty.leaves ||
+    dirty.ot ||
+    (workingDb.auditLogs && workingDb.auditLogs.length > 0);
+
+  if (!adminPin || !anyDirty) {
+    return {
+      accessible: true,
+      adminSynced: true,
+      mergedDb: workingDb,
+      pushedCount: pubRes.pushedCount,
+    };
+  }
+
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'syncAdminAll',
+        adminPin,
+        payload: {
+          dirty,
+          staff: workingDb.staff,
+          workloads: workingDb.workloads,
+          leaves: workingDb.leaves,
+          ot: workingDb.ot,
+          auditLogs: workingDb.auditLogs || [],
+          settings: workingDb.settings,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      return {
+        accessible: true,
+        adminSynced: false,
+        mergedDb: workingDb,
+        pushedCount: pubRes.pushedCount,
+      };
+    }
+
+    const data = await res.json();
+    if (!data || data.success === false) {
+      return {
+        accessible: true,
+        adminSynced: false,
+        mergedDb: workingDb,
+        pushedCount: pubRes.pushedCount,
+        error: String(data?.error || ''),
+      };
+    }
+
+    clearStaffMasterDirty();
+    clearSettingsDirty();
+    clearWorkloadsDirty();
+    clearLeavesDirty();
+    clearOtDirty();
+
+    const refreshed = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      workingDb
+    );
+    const resolvedSheetId =
+      refreshed.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+
+    return {
+      accessible: true,
+      adminSynced: true,
+      pushedCount: pubRes.pushedCount,
+      mergedDb: {
+        ...refreshed,
+        settings: {
+          ...refreshed.settings,
+          spreadsheetId: resolvedSheetId || undefined,
+          spreadsheetUrl:
+            refreshed.settings.spreadsheetUrl ||
+            (resolvedSheetId
+              ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit`
+              : undefined),
+          gasUrl: refreshed.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+        },
+      },
+    };
+  } catch {
+    return {
+      accessible: true,
+      adminSynced: false,
+      mergedDb: workingDb,
+      pushedCount: pubRes.pushedCount,
+    };
+  }
+};
+
+export const appendAuditViaAppsScript = async (
+  gasUrl: string,
+  adminPin: string,
+  entry: AuditLogEntry
+): Promise<boolean> => {
+  if (!gasUrl || !adminPin) return false;
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'appendAudit',
+        adminPin,
+        payload: entry,
+      }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.success);
+  } catch {
     return false;
   }
 };

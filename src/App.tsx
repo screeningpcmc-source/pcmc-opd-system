@@ -37,13 +37,14 @@ import {
   appendAuditLogToSheet,
   ensureSheetAnyoneReaderPermission,
   readPublicGoogleSheet,
-  readViaAppsScript,
-  appendViaAppsScript
+  appendViaAppsScript,
+  syncPublicViaAppsScript,
+  syncAdminViaAppsScript,
+  appendAuditViaAppsScript
 } from './services/sheetsService';
 import { formatThaiLeaveRange, formatThaiShortDate } from './utils/thaiDate';
 import { 
   initAuth, 
-  googleSignIn, 
   logout, 
   getAccessToken 
 } from './services/firebaseAuth';
@@ -164,21 +165,10 @@ export default function App() {
     }, 3500);
   };
 
-  // Google Sign-In Handler
+  // Google Sign-In Handler (disabled: Google Sheets sync operates without Google Sign-In)
   const handleLogin = async () => {
-    setIsLoggingIn(true);
-    try {
-      const res = await googleSignIn();
-      if (res) {
-        setUser(res.user);
-        showToast(`ยินดีต้อนรับ ${res.user.displayName || res.user.email}!`, 'success');
-      }
-    } catch (err: any) {
-      console.error('Login error:', err);
-      showToast(`เข้าสู่ระบบไม่สำเร็จ: ${err.message || err}`, 'error');
-    } finally {
-      setIsLoggingIn(false);
-    }
+    setIsLoggingIn(false);
+    showToast('ระบบเชื่อมต่อและซิงค์ Google Sheets ทำงานได้ทันทีโดยไม่ต้อง Sign in Google', 'info');
   };
 
   // Logout Handler (Google Sign-Out also locks Admin mode)
@@ -198,10 +188,14 @@ export default function App() {
   // Admin PIN Unlock State (NEVER persisted across page reloads or shared links)
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
   const [adminOwnerName, setAdminOwnerName] = useState<string>('');
+  const unlockedAdminPinRef = useRef<string>('');
+  const isAdminUnlockedRef = useRef<boolean>(false);
 
   const handleUnlockAdmin = (pin: string) => {
     const match = verifyAdminPinWithOwner(pin, db.settings);
     if (match.valid) {
+      unlockedAdminPinRef.current = pin.trim();
+      isAdminUnlockedRef.current = true;
       setIsAdminUnlocked(true);
       setAdminOwnerName(match.ownerName);
       showToast(`ปลดล็อกสิทธิ์ผู้ดูแลระบบ (${match.ownerName}) สำเร็จ!`, 'success');
@@ -211,6 +205,8 @@ export default function App() {
   };
 
   const handleLockAdmin = () => {
+    unlockedAdminPinRef.current = '';
+    isAdminUnlockedRef.current = false;
     setIsAdminUnlocked(false);
     setAdminOwnerName('');
     sessionStorage.removeItem('pcmc_admin_pin_unlocked');
@@ -231,21 +227,9 @@ export default function App() {
     ? db.settings.leaveTypes
     : [...LEAVE_TYPES];
 
-  // Ensure we have a valid Google OAuth token (used inside Admin Menu 5)
-  const ensureGoogleToken = async (loginHint?: string): Promise<string | null> => {
-    let token = await getAccessToken();
-    if (!token) {
-      try {
-        const loginRes = await googleSignIn(loginHint || user?.email || undefined);
-        if (!loginRes) return null;
-        token = loginRes.accessToken;
-        setUser(loginRes.user);
-      } catch (err: any) {
-        showToast(`เชื่อมต่อ Google ไม่สำเร็จ: ${err?.message || err}`, 'error');
-        return null;
-      }
-    }
-    return token;
+  // Passive OAuth token check only (never triggers forced Sign-In popup during sync)
+  const getPassiveGoogleToken = async (): Promise<string | null> => {
+    return await getAccessToken();
   };
 
   const formatSyncTime = () =>
@@ -255,10 +239,10 @@ export default function App() {
       second: '2-digit',
     });
 
-  // Silent background Auto-Sync:
-  // 1) Full 2-way OAuth sync if Google token is active (Admin)
-  // 2) Apps Script Web App auto-read if gasUrl is configured (0 login)
-  // 3) Public GViz read-only sync when ?sheetId= is shared as Anyone with link can view (0 login)
+  // Silent background Auto-Sync (100% works without Google Sign-In):
+  // 1) Apps Script Web App 2-way sync if gasUrl is configured (or discovered from Settings tab)
+  // 2) Public GViz read-only sync when ?sheetId= is shared as Anyone with link can view
+  // 3) Optional passive OAuth 2-way sync only if user happened to already hold a valid token
   const performBackgroundSync = useCallback(async (_reason: 'initial' | 'interval' | 'focus' | 'edit') => {
     if (isSyncInFlightRef.current) return;
     const currentDb = dbRef.current;
@@ -267,32 +251,16 @@ export default function App() {
     if ((!targetSheetId && !targetGasUrl) || currentDb.settings.autoSync === false) return;
 
     const syncKey = `${targetSheetId}|${targetGasUrl}`;
-    const token = await getAccessToken();
+    const token = await getPassiveGoogleToken();
 
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
-      if (token && targetSheetId) {
-        const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-        setDb({
-          ...result.mergedDb,
-          settings: {
-            ...result.mergedDb.settings,
-            spreadsheetId: targetSheetId,
-            spreadsheetUrl:
-              result.mergedDb.settings.spreadsheetUrl ||
-              `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-            gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
-          },
-        });
-        lastSyncEpochRef.current = Date.now();
-        lastSyncedKeyRef.current = syncKey;
-        setLastSyncedAt(formatSyncTime());
-        return;
-      }
-
       if (targetGasUrl) {
-        const gasRes = await readViaAppsScript(targetGasUrl, currentDb);
+        const gasRes =
+          isAdminUnlockedRef.current && unlockedAdminPinRef.current
+            ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, currentDb)
+            : await syncPublicViaAppsScript(targetGasUrl, currentDb);
         if (gasRes.accessible) {
           setDb({
             ...gasRes.mergedDb,
@@ -313,20 +281,58 @@ export default function App() {
         }
       }
 
+      if (token && targetSheetId) {
+        const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
+        setDb({
+          ...result.mergedDb,
+          settings: {
+            ...result.mergedDb.settings,
+            spreadsheetId: targetSheetId,
+            spreadsheetUrl:
+              result.mergedDb.settings.spreadsheetUrl ||
+              `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+            gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
+          },
+        });
+        lastSyncEpochRef.current = Date.now();
+        lastSyncedKeyRef.current = syncKey;
+        setLastSyncedAt(formatSyncTime());
+        return;
+      }
+
       if (targetSheetId) {
         const pubRes = await readPublicGoogleSheet(targetSheetId, currentDb);
         if (pubRes.accessible) {
-          setDb({
-            ...pubRes.mergedDb,
-            settings: {
-              ...pubRes.mergedDb.settings,
-              spreadsheetId: targetSheetId,
-              spreadsheetUrl:
-                pubRes.mergedDb.settings.spreadsheetUrl ||
-                `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-              gasUrl: pubRes.mergedDb.settings.gasUrl || targetGasUrl || undefined,
-            },
-          });
+          const discoveredGas = (pubRes.mergedDb.settings.gasUrl || '').trim();
+          if (discoveredGas) {
+            const gasRes =
+              isAdminUnlockedRef.current && unlockedAdminPinRef.current
+                ? await syncAdminViaAppsScript(discoveredGas, unlockedAdminPinRef.current, pubRes.mergedDb)
+                : await syncPublicViaAppsScript(discoveredGas, pubRes.mergedDb);
+            const finalDb = gasRes.accessible ? gasRes.mergedDb : pubRes.mergedDb;
+            setDb({
+              ...finalDb,
+              settings: {
+                ...finalDb.settings,
+                spreadsheetId: targetSheetId,
+                spreadsheetUrl:
+                  finalDb.settings.spreadsheetUrl ||
+                  `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+                gasUrl: discoveredGas,
+              },
+            });
+          } else {
+            setDb({
+              ...pubRes.mergedDb,
+              settings: {
+                ...pubRes.mergedDb.settings,
+                spreadsheetId: targetSheetId,
+                spreadsheetUrl:
+                  pubRes.mergedDb.settings.spreadsheetUrl ||
+                  `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+              },
+            });
+          }
           lastSyncEpochRef.current = Date.now();
           lastSyncedKeyRef.current = syncKey;
           setLastSyncedAt(formatSyncTime());
@@ -396,40 +402,118 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [localRevision, performBackgroundSync]);
 
-  // Manual Sync 2-way with an existing linked Google Spreadsheet (never creates duplicates)
+  // Manual Sync with linked Google Spreadsheet — works completely WITHOUT Google Sign-In
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
     const currentDb = dbRef.current;
     const targetSheetId = (overrideSheetId || currentDb.settings.spreadsheetId || '').trim();
-    if (!targetSheetId) {
-      showToast('ยังไม่มีลิงก์/ID Google Sheets กรุณาวางลิงก์ชีทหรือกดสร้าง 5 ชีทใหม่ก่อน', 'error');
+    let targetGasUrl = (currentDb.settings.gasUrl || '').trim();
+
+    if (!targetSheetId && !targetGasUrl) {
+      showToast('ยังไม่มีลิงก์ Google Sheets หรือ Web App URL กรุณากด "ตั้งค่าลิงก์ชีท" ก่อน', 'info');
       return;
     }
 
     if (isSyncInFlightRef.current) return;
 
-    const token = await ensureGoogleToken();
-    if (!token) return;
-
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
-      const result = await syncAllWithGoogleSheet(token, targetSheetId, dbRef.current);
-      setDb({
-        ...result.mergedDb,
-        settings: {
-          ...result.mergedDb.settings,
-          spreadsheetId: targetSheetId,
-          spreadsheetUrl:
-            result.mergedDb.settings.spreadsheetUrl ||
-            `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-        },
-      });
-      lastSyncEpochRef.current = Date.now();
-      lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
-      setLastSyncedAt(formatSyncTime());
+      let publicFallbackRes: { accessible: boolean; mergedDb: typeof currentDb } | null = null;
+
+      // If gasUrl isn't saved yet but spreadsheetId exists, check public sheet first to read & auto-discover Gas_Web_App_URL
+      if (!targetGasUrl && targetSheetId) {
+        publicFallbackRes = await readPublicGoogleSheet(targetSheetId, currentDb);
+        if (publicFallbackRes.accessible && publicFallbackRes.mergedDb.settings.gasUrl) {
+          targetGasUrl = publicFallbackRes.mergedDb.settings.gasUrl.trim();
+        }
+      }
+
+      // 1) Preferred: Full sync via Apps Script Web App URL (ZERO Google Sign-In)
+      if (targetGasUrl) {
+        const workingDb = publicFallbackRes?.accessible ? publicFallbackRes.mergedDb : currentDb;
+        const useAdminSync = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
+        const gasRes = useAdminSync
+          ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, workingDb)
+          : await syncPublicViaAppsScript(targetGasUrl, workingDb);
+
+        if (gasRes.accessible) {
+          const finalSheetId = targetSheetId || gasRes.mergedDb.settings.spreadsheetId || '';
+          setDb({
+            ...gasRes.mergedDb,
+            settings: {
+              ...gasRes.mergedDb.settings,
+              spreadsheetId: finalSheetId || undefined,
+              spreadsheetUrl:
+                gasRes.mergedDb.settings.spreadsheetUrl ||
+                (finalSheetId ? `https://docs.google.com/spreadsheets/d/${finalSheetId}/edit` : undefined),
+              gasUrl: targetGasUrl,
+            },
+          });
+          lastSyncEpochRef.current = Date.now();
+          lastSyncedKeyRef.current = `${finalSheetId}|${targetGasUrl}`;
+          setLastSyncedAt(formatSyncTime());
+
+          const syncDetail =
+            gasRes.pushedCount > 0
+              ? ` (บุคลากร ${gasRes.mergedDb.staff.length} คน, ส่งขึ้น ${gasRes.pushedCount} รายการ)`
+              : ` (บุคลากร ${gasRes.mergedDb.staff.length} คน)`;
+          showToast(`ซิงค์ข้อมูลกับ Google Sheet สำเร็จ!${syncDetail}`, 'success');
+          return;
+        }
+      }
+
+      // 2) Passive OAuth fallback ONLY if a valid token already exists (never opens Sign-In popup)
+      const token = await getPassiveGoogleToken();
+      if (token && targetSheetId) {
+        const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
+        setDb({
+          ...result.mergedDb,
+          settings: {
+            ...result.mergedDb.settings,
+            spreadsheetId: targetSheetId,
+            spreadsheetUrl:
+              result.mergedDb.settings.spreadsheetUrl ||
+              `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+          },
+        });
+        lastSyncEpochRef.current = Date.now();
+        lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
+        setLastSyncedAt(formatSyncTime());
+        showToast(
+          `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
+          'success'
+        );
+        return;
+      }
+
+      // 3) Public GViz read-only sync fallback (ZERO Google Sign-In)
+      if (targetSheetId) {
+        const pubRes = publicFallbackRes || (await readPublicGoogleSheet(targetSheetId, currentDb));
+        if (pubRes.accessible) {
+          setDb({
+            ...pubRes.mergedDb,
+            settings: {
+              ...pubRes.mergedDb.settings,
+              spreadsheetId: targetSheetId,
+              spreadsheetUrl:
+                pubRes.mergedDb.settings.spreadsheetUrl ||
+                `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+            },
+          });
+          lastSyncEpochRef.current = Date.now();
+          lastSyncedKeyRef.current = `${targetSheetId}|${pubRes.mergedDb.settings.gasUrl || ''}`;
+          setLastSyncedAt(formatSyncTime());
+          showToast(
+            `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${pubRes.mergedDb.staff.length} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
+            'success'
+          );
+          return;
+        }
+      }
+
       showToast(
-        `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
-        'success'
+        'ไม่สามารถซิงค์แบบไม่ต้อง Sign in ได้ กรุณาวาง Web App URL (/exec) จาก Code.gs ใน "ตั้งค่าลิงก์ชีท" หรือเปิดสิทธิ์ชีทเป็น "ทุกคนที่มีลิงก์อ่านได้"',
+        'info'
       );
     } catch (err: any) {
       console.error('Sync spreadsheet error:', err);
@@ -440,15 +524,18 @@ export default function App() {
     }
   };
 
-  // Setup Google Spreadsheet (Creates 5 sheets ONLY when no Sheet link/ID is configured yet)
+  // Setup Google Spreadsheet (never forces Google Sign-In popup)
   const handleSetupSpreadsheet = async () => {
-    if (db.settings.spreadsheetId) {
+    if (db.settings.spreadsheetId || db.settings.gasUrl) {
       await handleSyncSpreadsheet(db.settings.spreadsheetId);
       return;
     }
 
-    const token = await ensureGoogleToken();
-    if (!token) return;
+    const token = await getPassiveGoogleToken();
+    if (!token) {
+      showToast('กรุณากด "ตั้งค่าลิงก์ชีท" เพื่อวางลิงก์ Google Sheets และ Web App URL (/exec) จาก Code.gs (ไม่ต้อง Sign in Google)', 'info');
+      return;
+    }
 
     setIsSettingUpSheet(true);
     try {
@@ -467,7 +554,7 @@ export default function App() {
         }
       }));
 
-      showToast('สร้างฐานข้อมูล Google Sheets 5 ชีทเรียบร้อยแล้ว!', 'success');
+      showToast('สร้างฐานข้อมูล Google Sheets เรียบร้อยแล้ว!', 'success');
     } catch (err: any) {
       console.error('Setup spreadsheet error:', err);
       showToast(`เกิดข้อผิดพลาดในการสร้างชีท: ${err.message || err}`, 'error');
@@ -619,6 +706,11 @@ export default function App() {
   };
 
   const recordAuditToSheet = async (auditEntry: AuditLogEntry) => {
+    const gasUrl = (dbRef.current.settings.gasUrl || '').trim();
+    if (gasUrl && unlockedAdminPinRef.current) {
+      const ok = await appendAuditViaAppsScript(gasUrl, unlockedAdminPinRef.current, auditEntry);
+      if (ok) return;
+    }
     const token = await getAccessToken();
     if (token && dbRef.current.settings.spreadsheetId) {
       await appendAuditLogToSheet(token, dbRef.current.settings.spreadsheetId, auditEntry);
@@ -939,6 +1031,7 @@ export default function App() {
       ...prev,
       staff: nextStaff,
     }));
+    setLocalRevision(r => r + 1);
     showToast(`เพิ่มเจ้าหน้าที่ ${staff.name} เข้าสู่ระบบแล้ว`, 'success');
 
     const token = await getAccessToken();
@@ -962,6 +1055,7 @@ export default function App() {
       ...prev,
       staff: nextStaff,
     }));
+    setLocalRevision(r => r + 1);
     showToast(`ลบบุคลากร ${target?.name || ''} ออกจากระบบแล้ว`, 'info');
 
     const token = await getAccessToken();
@@ -984,6 +1078,7 @@ export default function App() {
       ...prev,
       staff: nextStaff,
     }));
+    setLocalRevision(r => r + 1);
     showToast(`อัปเดตข้อมูลบุคลากร ${updatedStaff.name} เรียบร้อยแล้ว`, 'success');
 
     const token = await getAccessToken();
@@ -1013,6 +1108,7 @@ export default function App() {
       ...prev,
       staff: nextStaff,
     }));
+    setLocalRevision(r => r + 1);
     showToast(`อัปเดตสถานะเป็น ${status} สำเร็จ`, 'info');
 
     const token = await getAccessToken();

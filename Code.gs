@@ -237,8 +237,8 @@ function doGet(e) {
 }
 
 /**
- * POST -> รับเฉพาะการ "นำข้อมูลเข้า" (Append Only) สำหรับเจ้าหน้าที่ OPD
- * การแก้ไขหรือลบข้อมูลทั้งหมดสงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น
+ * POST -> รับการ "นำข้อมูลเข้า" (Append Only) สำหรับเจ้าหน้าที่ OPD โดยไม่ต้อง Sign in
+ * และรองรับการซิงค์ฐานข้อมูลผู้ดูแลระบบ (Staff / Settings / แก้ไข / ลบ / Audit) เมื่อยืนยันรหัส Admin PIN
  */
 function doPost(e) {
   try {
@@ -246,6 +246,7 @@ function doPost(e) {
     var req = JSON.parse(bodyText);
     var action = String(req.action || '').trim();
     var payload = req.payload;
+    var adminPin = String(req.adminPin || (payload && payload.adminPin) || '').trim();
 
     if (action === 'appendWorkload') {
       return jsonResponse_(appendWorkloadFromApi_(payload));
@@ -255,6 +256,30 @@ function doPost(e) {
     }
     if (action === 'appendOT') {
       return jsonResponse_(appendOTFromApi_(payload));
+    }
+
+    if (action === 'syncAdminAll' || action === 'syncStaff' || action === 'syncSettings' || action === 'appendAudit') {
+      if (!verifyAdminPinInGas_(adminPin)) {
+        return jsonResponse_({
+          success: false,
+          error: 'รหัส Admin PIN ไม่ถูกต้อง หรือไม่มีสิทธิ์แก้ไขข้อมูลผู้ดูแลระบบ'
+        });
+      }
+      if (action === 'syncAdminAll') {
+        return jsonResponse_(syncAdminAllFromApi_(payload || {}));
+      }
+      if (action === 'syncStaff') {
+        writeStaffRowsToSheet_(Array.isArray(payload) ? payload : (payload && payload.staff) || []);
+        return jsonResponse_(buildPublicReadAllPayload_());
+      }
+      if (action === 'syncSettings') {
+        writeSettingsToSheet_((payload && payload.settings) || payload || {});
+        return jsonResponse_(buildPublicReadAllPayload_());
+      }
+      if (action === 'appendAudit') {
+        appendAuditRowsToSheet_(Array.isArray(payload) ? payload : [payload]);
+        return jsonResponse_({ success: true });
+      }
     }
 
     return jsonResponse_({
@@ -527,3 +552,260 @@ function appendOTFromApi_(payload) {
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
   return { success: true, appended: rowsToAppend.length };
 }
+
+var DEFAULT_ADMIN_PIN_HASHES = [
+  '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88',
+  '89c1baf80810ed35b8cc4ab4bb30da6136d5ad7d4c0442988ed519e0dd68fc5e',
+  '6a0a323dee59cd417b5071ea2a375702d16a9c40afe1f72ac8bf5d605b7c2c9d',
+  'd81c15506dffe8152eec8216c52eb7b524fa7dc78010196d3e71c489f75001d'
+];
+
+function sha256HexGas_(text) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(text || ''),
+    Utilities.Charset.UTF_8
+  );
+  return digest.map(function(b) {
+    var v = (b < 0 ? b + 256 : b).toString(16);
+    return v.length === 1 ? '0' + v : v;
+  }).join('');
+}
+
+function verifyAdminPinInGas_(enteredPin) {
+  var pin = String(enteredPin || '').trim();
+  if (!pin) return false;
+  var enteredHash = sha256HexGas_(pin);
+
+  var settingsData = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
+  var customPrimaryPin = '';
+  var customAdditionalPinsJson = '';
+  settingsData.rows.forEach(function(r) {
+    var k = String(r[0] || '').trim();
+    if (k === 'Admin_Pin') customPrimaryPin = String(r[1] || '').trim();
+    if (k === 'Additional_Admin_Pins') customAdditionalPinsJson = String(r[1] || '').trim();
+  });
+
+  if (customPrimaryPin) {
+    if (pin === customPrimaryPin) return true;
+  } else if (enteredHash === DEFAULT_ADMIN_PIN_HASHES[0]) {
+    return true;
+  }
+
+  if (customAdditionalPinsJson) {
+    try {
+      var slots = JSON.parse(customAdditionalPinsJson);
+      if (Array.isArray(slots)) {
+        for (var i = 0; i < slots.length; i++) {
+          var slotPin = String((slots[i] && slots[i].pin) || '').trim();
+          if (slotPin && pin === slotPin) return true;
+        }
+      }
+    } catch (e) {
+      // ignore invalid JSON
+    }
+  }
+
+  for (var j = 1; j < DEFAULT_ADMIN_PIN_HASHES.length; j++) {
+    if (enteredHash === DEFAULT_ADMIN_PIN_HASHES[j]) return true;
+  }
+  return false;
+}
+
+function replaceSheetBodyRows_(sheet, rows) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, Math.max(sheet.getLastColumn(), 1)).clearContent();
+  }
+  if (rows && rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  }
+}
+
+function writeStaffRowsToSheet_(staffList) {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
+    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'
+  ]);
+  var rows = (staffList || []).map(function(s) {
+    return [
+      String(s.staffId || ''),
+      String(s.name || ''),
+      String(s.position || 'RN'),
+      String(s.homeClinic || ''),
+      String(s.status || 'Active'),
+      String(s.startDate || ''),
+      String(s.endDate || '')
+    ];
+  });
+  replaceSheetBodyRows_(sheet, rows);
+}
+
+function writeWorkloadRowsToSheet_(workloads) {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, [
+    'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
+    'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var rows = (workloads || []).map(function(entry, idx) {
+    var adultPt = Number(entry.adultPt || 0);
+    var childPt = Number(entry.childPt || 0);
+    var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
+    var baseRow = [
+      String(entry.date || ''),
+      String(entry.shift || ''),
+      String(entry.clinic || ''),
+      totalPt,
+      adultPt,
+      childPt,
+      Number(entry.admit || 0),
+      Number(entry.hn || 0),
+      Number(entry.rn || 0),
+      Number(entry.pn || 0),
+      Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
+      Number(entry.clerk || 0),
+      Number(entry.serviceWorker || 0),
+      String(entry.note || ''),
+      String(entry.reporter || '')
+    ];
+    if (firstHeader === 'Record_ID') {
+      return [String(entry.id || ('REC-' + idx))].concat(baseRow);
+    }
+    return baseRow;
+  });
+  replaceSheetBodyRows_(sheet, rows);
+}
+
+function writeLeaveRowsToSheet_(leaves) {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var rows = (leaves || []).map(function(leave, idx) {
+    var baseRow = [
+      String(leave.startDate || ''),
+      String(leave.endDate || leave.startDate || ''),
+      String(leave.staffName || ''),
+      String(leave.position || 'RN'),
+      String(leave.clinic || ''),
+      String(leave.leaveType || 'ลาป่วย'),
+      Number(leave.days || 1),
+      String(leave.note || '')
+    ];
+    if (firstHeader === 'Leave_ID') {
+      return [String(leave.id || ('LV-' + idx))].concat(baseRow);
+    }
+    return baseRow;
+  });
+  replaceSheetBodyRows_(sheet, rows);
+}
+
+function writeOtRowsToSheet_(otList) {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var rows = (otList || []).map(function(ot, idx) {
+    var baseRow = [
+      String(ot.date || ''),
+      String(ot.shift || ''),
+      String(ot.staffName || ''),
+      String(ot.position || 'RN'),
+      String(ot.homeClinic || ''),
+      String(ot.workClinic || '')
+    ];
+    if (firstHeader === 'OT_ID') {
+      return [String(ot.id || ('OT-' + idx))].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']);
+    }
+    return baseRow;
+  });
+  replaceSheetBodyRows_(sheet, rows);
+}
+
+function writeSettingsToSheet_(settings) {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.SETTINGS, ['Key', 'Value']);
+  var existingData = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
+  var existingMap = {};
+  existingData.rows.forEach(function(r) {
+    if (r[0]) existingMap[String(r[0]).trim()] = String(r[1] || '');
+  });
+
+  var resolvedGasUrl = String(settings.gasUrl || existingMap['Gas_Web_App_URL'] || getSavedGasUrl_() || '').trim();
+  var resolvedPin = String(settings.adminPin || existingMap['Admin_Pin'] || '').trim();
+  var entries = [
+    ['NHPPD', String(settings.nhppd || 0.4)],
+    ['Screening_NHPPD', String(settings.screeningNhppd || 0.1)],
+    ['Std_Hr', String(settings.stdHr || 7)],
+    ['Annual_Hr', String(settings.annualHr || 2080)],
+    ['Work_Days', String(settings.workDays || 245)],
+    ['In_Time_Clinics', Array.isArray(settings.inTimeClinics) ? settings.inTimeClinics.join(', ') : DEFAULT_IN_TIME_CLINICS.join(', ')],
+    ['Out_Time_Clinics', Array.isArray(settings.outTimeClinics) ? settings.outTimeClinics.join(', ') : DEFAULT_OUT_TIME_CLINICS.join(', ')],
+    ['Leave_Types', Array.isArray(settings.leaveTypes) ? settings.leaveTypes.join(', ') : DEFAULT_LEAVE_TYPES.join(', ')],
+    ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
+    ['Primary_Admin_Owner', String(settings.primaryAdminOwner || 'หัวหน้าพยาบาล')],
+    ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || [])],
+    ['Gas_Web_App_URL', resolvedGasUrl]
+  ];
+  if (resolvedPin) {
+    entries.push(['Admin_Pin', resolvedPin]);
+  }
+  replaceSheetBodyRows_(sheet, entries);
+}
+
+function appendAuditRowsToSheet_(auditList) {
+  if (!auditList || auditList.length === 0) return;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.AUDIT, [
+    'Timestamp', 'Action', 'Target_Name', 'Summary', 'Reason', 'Edited_By'
+  ]);
+  var existingData = getSheetRowsNormalized_(SHEET_NAMES.AUDIT, 6);
+  var existingKeys = {};
+  existingData.rows.forEach(function(r) {
+    existingKeys[String(r[0]) + '|' + String(r[1]) + '|' + String(r[2])] = true;
+  });
+
+  var toAppend = [];
+  auditList.forEach(function(a) {
+    if (!a || !a.timestamp) return;
+    var k = String(a.timestamp) + '|' + String(a.action || '') + '|' + String(a.targetName || '');
+    if (!existingKeys[k]) {
+      existingKeys[k] = true;
+      toAppend.push([
+        String(a.timestamp || ''),
+        String(a.action || ''),
+        String(a.targetName || ''),
+        String(a.summary || ''),
+        String(a.reason || ''),
+        String(a.editedBy || '')
+      ]);
+    }
+  });
+
+  if (toAppend.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, 6).setValues(toAppend);
+  }
+}
+
+function syncAdminAllFromApi_(payload) {
+  var dirty = payload.dirty || {};
+  var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
+
+  if (dirty.staff || (staffData.rows.length === 0 && Array.isArray(payload.staff) && payload.staff.length > 0)) {
+    writeStaffRowsToSheet_(payload.staff || []);
+  }
+  if (dirty.workloads && Array.isArray(payload.workloads)) {
+    writeWorkloadRowsToSheet_(payload.workloads);
+  }
+  if (dirty.leaves && Array.isArray(payload.leaves)) {
+    writeLeaveRowsToSheet_(payload.leaves);
+  }
+  if (dirty.ot && Array.isArray(payload.ot)) {
+    writeOtRowsToSheet_(payload.ot);
+  }
+  if (dirty.settings && payload.settings) {
+    writeSettingsToSheet_(payload.settings);
+  }
+  if (Array.isArray(payload.auditLogs) && payload.auditLogs.length > 0) {
+    appendAuditRowsToSheet_(payload.auditLogs);
+  }
+  return buildPublicReadAllPayload_();
+}
+
