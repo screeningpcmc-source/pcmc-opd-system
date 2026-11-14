@@ -21,6 +21,8 @@ export interface StaffMember {
   position: StaffPosition;
   homeClinic: string;
   status: StaffStatus;
+  startDate?: string; // วันที่เริ่มปฏิบัติงาน (YYYY-MM-DD)
+  endDate?: string; // วันที่ลาออก/เกษียณ (YYYY-MM-DD)
 }
 
 export interface DailyWorkload {
@@ -116,19 +118,22 @@ export const OUT_TIME_CLINICS = [
 export const ALL_POSITIONS: StaffPosition[] = ['HN', 'RN', 'PN', 'NA', 'Clerk', 'Service Worker'];
 
 export const POSITION_LABELS: Record<StaffPosition, string> = {
-  HN: 'HN (หัวหน้าพยาบาล/หัวหน้าเวร)',
-  RN: 'RN (พยาบาลวิชาชีพ)',
-  PN: 'PN (ผู้ช่วยพยาบาล)',
-  NA: 'NA (ผู้ช่วยเหลือคนไข้)',
-  PCA: 'NA (ผู้ช่วยเหลือคนไข้)',
+  HN: 'หัวหน้าพยาบาล/หัวหน้าเวร',
+  RN: 'พยาบาลวิชาชีพ',
+  PN: 'ผู้ช่วยพยาบาล',
+  NA: 'ผู้ช่วยเหลือคนไข้',
+  PCA: 'ผู้ช่วยเหลือคนไข้',
   Clerk: 'ผู้ปฏิบัติงานทั่วไป',
   'Service Worker': 'พนักงานบริการ'
 };
 
 export const formatPositionLabel = (pos: StaffPosition | string): string => {
+  if (pos === 'HN') return 'หัวหน้าพยาบาล/หัวหน้าเวร';
+  if (pos === 'RN') return 'พยาบาลวิชาชีพ';
+  if (pos === 'PN') return 'ผู้ช่วยพยาบาล';
+  if (pos === 'NA' || pos === 'PCA') return 'ผู้ช่วยเหลือคนไข้';
   if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
   if (pos === 'Service Worker') return 'พนักงานบริการ';
-  if (pos === 'PCA') return 'NA';
   return pos;
 };
 

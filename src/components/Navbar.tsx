@@ -15,7 +15,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLockAdmin,
 }) => {
   return (
-    <header className="bg-gradient-to-r from-emerald-800 via-teal-800 to-cyan-900 text-white shadow-lg sticky top-0 z-50">
+    <header className="no-print bg-gradient-to-r from-emerald-800 via-teal-800 to-cyan-900 text-white shadow-lg sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         {/* Hospital Branding */}
         <div className="flex items-center gap-3">

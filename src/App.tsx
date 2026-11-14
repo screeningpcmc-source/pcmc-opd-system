@@ -512,9 +512,32 @@ export default function App() {
     }
   };
 
+  // Handler: Update Staff Member (Admin)
+  const handleUpdateStaff = async (updatedStaff: StaffMember) => {
+    const nextStaff = db.staff.map(s => s.staffId === updatedStaff.staffId ? updatedStaff : s);
+    markStaffMasterDirty();
+    setDb(prev => ({
+      ...prev,
+      staff: nextStaff,
+    }));
+    showToast(`อัปเดตข้อมูลบุคลากร ${updatedStaff.name} เรียบร้อยแล้ว`, 'success');
+
+    const token = await getAccessToken();
+    if (token && db.settings.spreadsheetId) {
+      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+    }
+  };
+
   // Handler: Update Staff Status (Active / Resigned / Retired)
   const handleUpdateStaffStatus = async (staffId: string, status: StaffStatus) => {
-    const nextStaff = db.staff.map(s => s.staffId === staffId ? { ...s, status } : s);
+    const todayStr = new Date().toISOString().split('T')[0];
+    const nextStaff = db.staff.map(s => {
+      if (s.staffId !== staffId) return s;
+      if (status === 'Resigned' || status === 'Retired') {
+        return { ...s, status, endDate: s.endDate || todayStr };
+      }
+      return { ...s, status, endDate: undefined };
+    });
     markStaffMasterDirty();
     setDb(prev => ({
       ...prev,
@@ -716,6 +739,7 @@ export default function App() {
             onLogout={handleLogout}
             isLoggingIn={isLoggingIn}
             onAddStaff={handleAddStaff}
+            onUpdateStaff={handleUpdateStaff}
             onDeleteStaff={handleDeleteStaff}
             onUpdateStaffStatus={handleUpdateStaffStatus}
             onSaveSettings={handleSaveSettings}

@@ -12,6 +12,7 @@ import {
   POSITION_LABELS,
   formatPositionLabel
 } from '../types';
+import { formatThaiShortDate } from '../utils/thaiDate';
 import { verifyAdminPin } from '../services/adminSecurity';
 import { 
   ShieldCheck, 
@@ -40,7 +41,10 @@ import {
   Share2,
   Copy,
   Unlink,
-  CalendarOff
+  CalendarOff,
+  Pencil,
+  Calendar,
+  X
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
@@ -56,6 +60,7 @@ interface AdminPanelTabProps {
   onLogout: () => void;
   isLoggingIn: boolean;
   onAddStaff: (staff: StaffMember) => void;
+  onUpdateStaff?: (staff: StaffMember) => void;
   onDeleteStaff: (staffId: string) => void;
   onUpdateStaffStatus: (staffId: string, status: StaffStatus) => void;
   onSaveSettings: (settings: SystemSettings) => void;
@@ -81,6 +86,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   onLogout,
   isLoggingIn,
   onAddStaff,
+  onUpdateStaff,
   onDeleteStaff,
   onUpdateStaffStatus,
   onSaveSettings,
@@ -100,11 +106,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [clinicFilter, setClinicFilter] = useState<string>('ALL');
 
   // Add new staff form state (No visible Staff ID)
+  const todayStr = new Date().toISOString().split('T')[0];
   const [showAddForm, setShowAddForm] = useState<boolean>(false);
   const [newName, setNewName] = useState<string>('');
   const [newPosition, setNewPosition] = useState<StaffPosition>('RN');
   const [newClinic, setNewClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
   const [newStatus, setNewStatus] = useState<StaffStatus>('Active');
+  const [newStartDate, setNewStartDate] = useState<string>(todayStr);
+  const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
   const [confirmDeleteStaffId, setConfirmDeleteStaffId] = useState<string | null>(null);
   const [confirmResetAll, setConfirmResetAll] = useState<boolean>(false);
   const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
@@ -225,11 +234,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       position: newPosition,
       homeClinic: newClinic,
       status: newStatus,
+      startDate: newStartDate || todayStr,
     };
 
     onAddStaff(staff);
     setNewName('');
     setNewStatus('Active');
+    setNewStartDate(new Date().toISOString().split('T')[0]);
     setShowAddForm(false);
   };
 
@@ -815,7 +826,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               กรอกข้อมูลบุคลากรใหม่
             </h4>
 
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
               <div className="sm:col-span-2">
                 <label className="block text-[11px] font-semibold text-gray-700 mb-1">
                   ชื่อ - นามสกุล (พร้อมคำนำหน้า) <span className="text-red-500">*</span>
@@ -855,9 +866,24 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   ))}
                 </select>
               </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                  วันเริ่มงาน (วันแรก)
+                </label>
+                <input
+                  type="date"
+                  value={newStartDate}
+                  onChange={(e) => setNewStartDate(e.target.value)}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white"
+                />
+              </div>
             </div>
 
-            <div className="flex justify-end pt-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+              <span className="text-[11px] text-gray-500">
+                * ระบบจะตั้งวันเริ่มงานเป็นวันที่เพิ่มรายชื่อโดยอัตโนมัติ (สามารถแก้ไขภายหลังได้)
+              </span>
               <button
                 type="submit"
                 className="px-4 py-1.5 bg-red-700 hover:bg-red-600 text-white font-semibold text-xs rounded-lg shadow-2xs transition-colors cursor-pointer"
@@ -929,14 +955,15 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 <th className="py-2.5 px-3">ชื่อ - นามสกุล</th>
                 <th className="py-2.5 px-2">ตำแหน่งวิชาชีพ</th>
                 <th className="py-2.5 px-3">ห้องตรวจสังกัด</th>
+                <th className="py-2.5 px-2 whitespace-nowrap">วันเริ่มงาน / ลาออก</th>
                 <th className="py-2.5 px-2 text-center">สถานะ</th>
-                <th className="py-2.5 px-3 text-center">เปลี่ยนสถานะ / ลบรายชื่อ</th>
+                <th className="py-2.5 px-3 text-center">เปลี่ยนสถานะ / แก้ไข / ลบ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredStaff.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-gray-400">
+                  <td colSpan={6} className="py-8 text-center text-gray-400">
                     ไม่พบบุคลากรตามเงื่อนไขที่ค้นหา
                   </td>
                 </tr>
@@ -957,6 +984,40 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                       </span>
                     </td>
                     <td className="py-2 px-3 text-gray-700">{staff.homeClinic}</td>
+                    <td className="py-2 px-2 text-[11px] text-gray-600 whitespace-nowrap">
+                      <div className="space-y-0.5">
+                        <div>
+                          <span className="text-gray-400">เริ่ม: </span>
+                          {staff.startDate ? (
+                            <span className="font-semibold text-emerald-800">{formatThaiShortDate(staff.startDate)}</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setEditingStaff({ ...staff })}
+                              className="text-blue-600 hover:underline font-medium cursor-pointer"
+                            >
+                              + เติมวันเริ่มงาน
+                            </button>
+                          )}
+                        </div>
+                        {(staff.endDate || staff.status !== 'Active') && (
+                          <div>
+                            <span className="text-gray-400">สิ้นสุด: </span>
+                            {staff.endDate ? (
+                              <span className="font-semibold text-amber-800">{formatThaiShortDate(staff.endDate)}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setEditingStaff({ ...staff })}
+                                className="text-amber-700 hover:underline font-medium cursor-pointer"
+                              >
+                                + ระบุวันที่
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </td>
                     <td className="py-2 px-2 text-center">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                         staff.status === 'Active' ? 'bg-emerald-50 text-emerald-800 border border-emerald-300' :
@@ -1003,6 +1064,18 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                             Retired
                           </button>
                         </div>
+
+                        {onUpdateStaff && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingStaff({ ...staff })}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold text-blue-700 hover:text-white bg-blue-50 hover:bg-blue-600 border border-blue-200 hover:border-blue-600 rounded-md transition-colors cursor-pointer"
+                            title={`แก้ไขข้อมูล / วันเริ่มงาน ${staff.name}`}
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>แก้ไข</span>
+                          </button>
+                        )}
 
                         {confirmDeleteStaffId === staff.staffId ? (
                           <div className="inline-flex items-center gap-1 bg-red-50 border border-red-200 rounded-md px-1.5 py-0.5">
@@ -1397,6 +1470,156 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Edit Staff Modal (Name, Position, Clinic, Status, Start Date & End Date) */}
+      {editingStaff && onUpdateStaff && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-blue-600" />
+                <h3 className="text-base font-bold text-gray-900">
+                  แก้ไขข้อมูลบุคลากร &amp; วันที่เริ่ม/สิ้นสุดปฏิบัติงาน
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingStaff(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-gray-700 mb-1">ชื่อ - นามสกุล</label>
+                <input
+                  type="text"
+                  value={editingStaff.name}
+                  onChange={(e) => setEditingStaff({ ...editingStaff, name: e.target.value })}
+                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">ตำแหน่งวิชาชีพ</label>
+                  <select
+                    value={editingStaff.position}
+                    onChange={(e) => setEditingStaff({ ...editingStaff, position: e.target.value as StaffPosition })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
+                  >
+                    {ALL_POSITIONS.map(p => (
+                      <option key={p} value={p}>{POSITION_LABELS[p]}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">ห้องตรวจสังกัด</label>
+                  <select
+                    value={editingStaff.homeClinic}
+                    onChange={(e) => setEditingStaff({ ...editingStaff, homeClinic: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
+                  >
+                    {allClinicsForFilter.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">สถานะ</label>
+                  <select
+                    value={editingStaff.status}
+                    onChange={(e) => {
+                      const nextStatus = e.target.value as StaffStatus;
+                      setEditingStaff({
+                        ...editingStaff,
+                        status: nextStatus,
+                        endDate:
+                          nextStatus === 'Active'
+                            ? undefined
+                            : editingStaff.endDate || todayStr,
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white font-semibold"
+                  >
+                    <option value="Active">Active (ปฏิบัติงาน)</option>
+                    <option value="Resigned">Resigned (ลาออก/ย้าย)</option>
+                    <option value="Retired">Retired (เกษียณอายุ)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-emerald-800 mb-1">
+                    วันเริ่มปฏิบัติงาน (วันแรก)
+                  </label>
+                  <input
+                    type="date"
+                    value={editingStaff.startDate || ''}
+                    onChange={(e) =>
+                      setEditingStaff({
+                        ...editingStaff,
+                        startDate: e.target.value || undefined,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg text-xs bg-emerald-50/30"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-amber-800 mb-1">
+                    วันลาออก / เกษียณ
+                  </label>
+                  <input
+                    type="date"
+                    value={editingStaff.endDate || ''}
+                    onChange={(e) =>
+                      setEditingStaff({
+                        ...editingStaff,
+                        endDate: e.target.value || undefined,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 border border-amber-300 rounded-lg text-xs bg-amber-50/30"
+                  />
+                </div>
+              </div>
+
+              <p className="text-[11px] text-gray-500 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                ระบบ <strong>สรุป 12 เดือนปีงบประมาณ</strong> จะคำนวณวันทำงานตามช่วงระหว่างวันเริ่มปฏิบัติงานถึงวันลาออก/เกษียณ (หากยังไม่ระบุวันเริ่มงาน จะนับตั้งแต่วันแรกของปีงบประมาณ)
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 border-t pt-3">
+              <button
+                type="button"
+                onClick={() => setEditingStaff(null)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!editingStaff.name.trim()) return;
+                  onUpdateStaff({
+                    ...editingStaff,
+                    name: editingStaff.name.trim(),
+                  });
+                  setEditingStaff(null);
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>บันทึกข้อมูลบุคลากร</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

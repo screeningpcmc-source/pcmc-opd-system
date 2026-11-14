@@ -287,7 +287,15 @@ export const createGoogleSpreadsheet = async (
   const spreadsheetId = createdData.spreadsheetId;
   const spreadsheetUrl = createdData.spreadsheetUrl;
 
-  const staffRows = staffList.map((s) => [s.staffId, s.name, s.position, s.homeClinic, s.status]);
+  const staffRows = staffList.map((s) => [
+    s.staffId,
+    s.name,
+    s.position,
+    s.homeClinic,
+    s.status,
+    s.startDate || '',
+    s.endDate || '',
+  ]);
   const settingsRows = [
     ['Key', 'Value'],
     ['NHPPD', settings.nhppd.toString()],
@@ -304,8 +312,11 @@ export const createGoogleSpreadsheet = async (
     valueInputOption: 'USER_ENTERED',
     data: [
       {
-        range: 'Staff_Master!A1:E',
-        values: [['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status'], ...staffRows],
+        range: 'Staff_Master!A1:G',
+        values: [
+          ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+          ...staffRows,
+        ],
       },
       {
         range: 'Daily_Workload!A1:O1',
@@ -376,7 +387,7 @@ export const syncStaffMasterToSheet = async (
     await ensureSpreadsheetTabs(accessToken, spreadsheetId);
 
     const clearRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:E:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:G:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -388,12 +399,20 @@ export const syncStaffMasterToSheet = async (
     }
 
     const rows = [
-      ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status'],
-      ...staffList.map((s) => [s.staffId, s.name, s.position, s.homeClinic, s.status]),
+      ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+      ...staffList.map((s) => [
+        s.staffId,
+        s.name,
+        s.position,
+        s.homeClinic,
+        s.status,
+        s.startDate || '',
+        s.endDate || '',
+      ]),
     ];
 
     const putRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A1:E${rows.length}?valueInputOption=USER_ENTERED`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A1:G${rows.length}?valueInputOption=USER_ENTERED`,
       {
         method: 'PUT',
         headers: {
@@ -462,7 +481,7 @@ export const syncAllWithGoogleSheet = async (
 
   const batchGetRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?ranges=${encodeURIComponent(
-      'Staff_Master!A:E'
+      'Staff_Master!A:G'
     )}&ranges=${encodeURIComponent('Daily_Workload!A:O')}&ranges=${encodeURIComponent(
       'Leave_Records!A:H'
     )}&ranges=${encodeURIComponent('OT_Attendance!A:F')}&ranges=${encodeURIComponent('Settings!A:B')}`,
@@ -501,6 +520,8 @@ export const syncAllWithGoogleSheet = async (
         position: pos,
         homeClinic: (r[3] || '').trim(),
         status,
+        startDate: (r[5] || '').trim() || undefined,
+        endDate: (r[6] || '').trim() || undefined,
       };
     });
 
@@ -645,17 +666,25 @@ export const syncAllWithGoogleSheet = async (
 
   if (shouldPushStaff) {
     await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:E:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:G:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
       }
     );
     writeData.push({
-      range: 'Staff_Master!A1:E',
+      range: 'Staff_Master!A1:G',
       values: [
-        ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status'],
-        ...finalStaff.map((s) => [s.staffId, s.name, s.position, s.homeClinic, s.status]),
+        ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+        ...finalStaff.map((s) => [
+          s.staffId,
+          s.name,
+          s.position,
+          s.homeClinic,
+          s.status,
+          s.startDate || '',
+          s.endDate || '',
+        ]),
       ],
     });
   }

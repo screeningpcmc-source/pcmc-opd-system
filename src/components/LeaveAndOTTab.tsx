@@ -68,6 +68,22 @@ interface ExternalOtDraft {
   affiliation: string;
 }
 
+function countWeekdaysInRange(startIso: string, endIso: string): number {
+  const [sy, sm, sd] = startIso.split('-').map(Number);
+  const [ey, em, ed] = endIso.split('-').map(Number);
+  if (!sy || !sm || !sd || !ey || !em || !ed) return 0;
+  const cur = new Date(sy, sm - 1, sd);
+  const end = new Date(ey, em - 1, ed);
+  if (cur > end) return 0;
+  let count = 0;
+  while (cur <= end) {
+    const day = cur.getDay();
+    if (day !== 0 && day !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
 export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   staffList,
   leaves,
@@ -90,7 +106,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [summaryReportMode, setSummaryReportMode] = useState<'ALL' | 'WORK_OT' | 'LEAVE_REPORT'>('ALL');
   const [onlyStaffWithLeaves, setOnlyStaffWithLeaves] = useState<boolean>(false);
   const [isExportingLeaveJpeg, setIsExportingLeaveJpeg] = useState<boolean>(false);
+  const [printTarget, setPrintTarget] = useState<'NONE' | 'LEAVE_REPORT'>('NONE');
   const leaveReportRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleAfterPrint = () => setPrintTarget('NONE');
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => window.removeEventListener('afterprint', handleAfterPrint);
+  }, []);
 
   const activeStaff = useMemo(() => {
     return staffList.filter((s) => s.status === 'Active');
@@ -363,9 +386,37 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     []
   );
 
+  const summaryEligibleStaff = useMemo(() => {
+    const targetCeEndYear = selectedFiscalYear - 543;
+    const targetCeStartYear = targetCeEndYear - 1;
+    const fyStart = `${targetCeStartYear}-10-01`;
+    const fyEnd = `${targetCeEndYear}-09-30`;
+
+    return staffList.filter((s) => {
+      if (s.status === 'Active') {
+        if (s.startDate && s.startDate > fyEnd) return false;
+        return true;
+      }
+      if (s.startDate || s.endDate) {
+        const effStart = s.startDate || '0000-01-01';
+        const effEnd = s.endDate || '9999-12-31';
+        if (effStart <= fyEnd && effEnd >= fyStart) return true;
+      }
+      const hasOtInFy = otRecords.some(
+        (o) => o.staffName === s.name && o.date >= fyStart && o.date <= fyEnd
+      );
+      const hasLeaveInFy = leaves.some(
+        (l) => l.staffName === s.name && l.endDate >= fyStart && l.startDate <= fyEnd
+      );
+      return hasOtInFy || hasLeaveInFy;
+    });
+  }, [staffList, otRecords, leaves, selectedFiscalYear]);
+
   const fiscalSummaryData = useMemo(() => {
     const targetCeEndYear = selectedFiscalYear - 543;
     const targetCeStartYear = targetCeEndYear - 1;
+    const now = new Date();
+    const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
     const clinicOperationalDaysMap = new Map<string, Set<string>>();
     workloads.forEach((w) => {
@@ -379,7 +430,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       }
     });
 
-    return activeStaff.map((staff) => {
+    return summaryEligibleStaff.map((staff) => {
       const monthDetails: Record<
         string,
         {
@@ -399,6 +450,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       fiscalMonths.forEach((m) => {
         const year = m.yearOffset === -1 ? targetCeStartYear : targetCeEndYear;
         const ymPrefix = `${year}-${m.key}`;
+        const lastDay = new Date(year, Number(m.key), 0).getDate();
+        const monthStart = `${ymPrefix}-01`;
+        const monthEnd = `${ymPrefix}-${String(lastDay).padStart(2, '0')}`;
 
         const staffOts = otRecords.filter(
           (o) => o.staffName === staff.name && o.date.startsWith(ymPrefix)
@@ -421,11 +475,31 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         const recordedCount = recordedDatesSet ? recordedDatesSet.size : 0;
 
         let inTimeDays = 0;
-        if (recordedCount > 0) {
-          inTimeDays = Math.max(0, recordedCount - leaveDays);
-        } else {
-          const isPastOrCurrent = year < 2026 || (year === 2026 && Number(m.key) <= 11);
-          inTimeDays = isPastOrCurrent ? Math.max(0, 20 - leaveDays) : 0;
+        const isNotYetStarted = Boolean(staff.startDate && staff.startDate > monthEnd);
+        const isAlreadyEnded = Boolean(staff.endDate && staff.endDate < monthStart);
+        const isInactiveWithoutEndDate = staff.status !== 'Active' && !staff.endDate;
+
+        if (!isNotYetStarted && !isAlreadyEnded && !isInactiveWithoutEndDate) {
+          const effectiveStart =
+            staff.startDate && staff.startDate > monthStart ? staff.startDate : monthStart;
+          const effectiveEnd =
+            staff.endDate && staff.endDate < monthEnd ? staff.endDate : monthEnd;
+
+          if (recordedCount > 0 && recordedDatesSet) {
+            let activeRecordedDays = 0;
+            recordedDatesSet.forEach((d) => {
+              if (d >= effectiveStart && d <= effectiveEnd) {
+                activeRecordedDays++;
+              }
+            });
+            inTimeDays = Math.max(0, activeRecordedDays - leaveDays);
+          } else if (ymPrefix <= currentYm) {
+            const isFullMonth = effectiveStart === monthStart && effectiveEnd === monthEnd;
+            const baseWorkDays = isFullMonth
+              ? 20
+              : Math.min(20, countWeekdaysInRange(effectiveStart, effectiveEnd));
+            inTimeDays = Math.max(0, baseWorkDays - leaveDays);
+          }
         }
 
         const totalMonthDays = inTimeDays + otCount;
@@ -455,7 +529,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         grandTotal,
       };
     });
-  }, [activeStaff, otRecords, leaves, workloads, selectedFiscalYear, fiscalMonths]);
+  }, [summaryEligibleStaff, otRecords, leaves, workloads, selectedFiscalYear, fiscalMonths]);
 
   const filteredSummaryData = useMemo(() => {
     return fiscalSummaryData
@@ -800,7 +874,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       i + 1,
       `"${r.firstName}"`,
       `"${r.lastName}"`,
-      `"${r.position}"`,
+      `"${formatPositionLabel(r.position)}"`,
       `"${r.clinic}"`,
       ...leaveReportColumns.allCols.map((c) => r.daysByType[c.type] || 0),
       r.totalLeaveDays,
@@ -830,10 +904,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
   };
 
+  const handlePrintLeaveReport = () => {
+    setPrintTarget('LEAVE_REPORT');
+    setTimeout(() => {
+      window.print();
+    }, 60);
+  };
+
   return (
     <div className="space-y-6">
-      {/* Tab Header Banner */}
-      <div className="bg-gradient-to-r from-teal-50 via-cyan-50 to-emerald-50 border border-teal-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+      {/* Tab Header Banner (Hidden on Print) */}
+      <div className="no-print bg-gradient-to-r from-teal-50 via-cyan-50 to-emerald-50 border border-teal-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-lg bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-sm">
             <CalendarClock className="w-5 h-5" />
@@ -1641,9 +1722,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
       {/* --- SUB-TAB 3: FISCAL YEAR SUMMARY (12 MONTHS / MONTHLY / CLINIC / INDIVIDUAL) --- */}
       {activeSubTab === 'fiscalSummary' && (
-        <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
-          {/* Header Title & Actions */}
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b pb-4">
+        <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4 print:border-none print:shadow-none print:p-0">
+          {/* Header Title & Actions (Hidden on Print) */}
+          <div className="no-print flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b pb-4">
             <div>
               <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
                 <Award className="w-5 h-5 text-teal-700" />
@@ -1719,8 +1800,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           </div>
 
-          {/* Interactive Filters Grid */}
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
+          {/* Interactive Filters Grid (Hidden on Print) */}
+          <div className="no-print bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
               <Filter className="w-4 h-4 text-teal-700" />
               <span>ตัวกรองการแสดงผล (Filters)</span>
@@ -1795,10 +1876,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   onChange={(e) => setStaffFilter(e.target.value)}
                   className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-medium text-gray-900 focus:ring-1 focus:ring-teal-500"
                 >
-                  <option value="ALL">-- บุคลากรทุกคน ({activeStaff.length} คน) --</option>
-                  {activeStaff.map((s) => (
+                  <option value="ALL">-- บุคลากรทุกคน ({summaryEligibleStaff.length} คน) --</option>
+                  {summaryEligibleStaff.map((s) => (
                     <option key={s.staffId} value={s.staffId}>
                       {s.name} ({formatPositionLabel(s.position)} - {s.homeClinic})
+                      {s.status !== 'Active' ? ` [${s.status}]` : ''}
                     </option>
                   ))}
                 </select>
@@ -1845,8 +1927,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           </div>
 
-          {/* KPI Metrics Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* KPI Metrics Cards (Hidden on Print) */}
+          <div className="no-print grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-gradient-to-br from-teal-50 to-emerald-50 rounded-2xl p-3.5 border border-teal-200/70 shadow-2xs">
               <span className="text-[11px] font-bold text-teal-800 block">
                 {monthFilter === 'ALL' ? 'รวมวันทำงานทั้งสิ้น (ปีงบ)' : 'รวมวันทำงานในเดือนนี้'}
@@ -1888,7 +1970,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           </div>
 
           {/* VIEW A & B: Work & OT Summary Grid */}
-          {summaryReportMode !== 'LEAVE_REPORT' && (monthFilter === 'ALL' ? (
+          {summaryReportMode !== 'LEAVE_REPORT' && (
+            <div className={printTarget === 'LEAVE_REPORT' ? 'no-print' : ''}>
+              {monthFilter === 'ALL' ? (
             <div className="overflow-x-auto border border-gray-200 rounded-xl">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px]">
@@ -2140,11 +2224,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </tbody>
               </table>
             </div>
-          ))}
+              )}
+            </div>
+          )}
 
           {/* OFFICIAL LEAVE SUMMARY REPORT (Image 4 Form + Leave Reason & Thai Date Range) */}
           {summaryReportMode !== 'WORK_OT' && (
-            <div className="space-y-3 pt-4 border-t border-gray-200">
+            <div className="space-y-3 pt-4 border-t border-gray-200 print:border-none print:pt-0">
               <div className="no-print flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h4 className="text-sm font-bold text-gray-900 flex items-center gap-2">
@@ -2188,7 +2274,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => window.print()}
+                    onClick={handlePrintLeaveReport}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg shadow-2xs cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5" />
@@ -2262,7 +2348,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               {row.lastName}
                             </td>
                             <td className="border border-gray-400 py-1.5 px-2 text-center font-semibold text-gray-800 whitespace-nowrap">
-                              {row.position}
+                              {formatPositionLabel(row.position)}
                             </td>
                             {leaveReportColumns.allCols.map((col) => {
                               const val = row.daysByType[col.type] || 0;

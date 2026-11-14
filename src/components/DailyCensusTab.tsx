@@ -259,8 +259,8 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
       </div>
 
-      {/* Summary KPI Cards (Visible on screen and print) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+      {/* Summary KPI Cards (Hidden on Print) */}
+      <div className="no-print grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
         <div className="bg-white rounded-2xl p-4 border border-blue-200 shadow-2xs">
           <div className="flex items-center justify-between text-blue-600 mb-1">
             <span className="text-xs font-bold">ผู้ป่วยนอกรวม</span>
