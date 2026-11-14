@@ -1,20 +1,16 @@
 import React from 'react';
 import { 
   Building2, 
-  CheckCircle2,
   ShieldCheck,
   Lock
 } from 'lucide-react';
-import { User } from 'firebase/auth';
 
 interface NavbarProps {
-  user: User | null;
   isAdmin: boolean;
   onLockAdmin?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
-  user,
   isAdmin,
   onLockAdmin,
 }) => {
@@ -41,7 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Clean Status Indicators */}
+        {/* Admin Mode Indicator */}
         <div className="flex flex-wrap items-center gap-2">
           {isAdmin && (
             <div className="inline-flex items-center gap-1.5 bg-emerald-500/25 text-emerald-100 border border-emerald-400/40 rounded-lg px-2.5 py-1">
@@ -58,19 +54,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span>ล็อกสิทธิ์</span>
                 </button>
               )}
-            </div>
-          )}
-          {user && (
-            <div className="flex items-center gap-2 bg-black/20 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10">
-              <div className="text-right">
-                <div className="text-xs font-semibold text-white truncate max-w-[160px]">
-                  {user.displayName || user.email?.split('@')[0]}
-                </div>
-                <div className="text-[10px] text-emerald-200 flex items-center gap-1 justify-end">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400 inline" />
-                  <span>เชื่อมต่อ Google แล้ว</span>
-                </div>
-              </div>
             </div>
           )}
         </div>

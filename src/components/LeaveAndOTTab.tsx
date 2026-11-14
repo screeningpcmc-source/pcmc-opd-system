@@ -38,7 +38,11 @@ import {
   ChevronDown,
   AlertCircle,
   BadgePlus,
+  ImageDown,
+  Printer,
 } from 'lucide-react';
+import { formatThaiLeaveRange, splitThaiName } from '../utils/thaiDate';
+import { exportElementAsJpeg } from '../utils/exportImage';
 
 interface LeaveAndOTTabProps {
   staffList: StaffMember[];
@@ -47,6 +51,7 @@ interface LeaveAndOTTabProps {
   workloads?: DailyWorkload[];
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  leaveTypes?: string[];
   isAdmin?: boolean;
   onSaveLeave: (leave: LeaveRecord) => void;
   onSaveBatchOT: (records: OTAttendance[]) => void;
@@ -70,6 +75,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   workloads = [],
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
+  leaveTypes = [...LEAVE_TYPES],
   isAdmin = false,
   onSaveLeave,
   onSaveBatchOT,
@@ -81,6 +87,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [activeSubTab, setActiveSubTab] = useState<'leave' | 'ot' | 'fiscalSummary'>('leave');
+  const [summaryReportMode, setSummaryReportMode] = useState<'ALL' | 'WORK_OT' | 'LEAVE_REPORT'>('ALL');
+  const [onlyStaffWithLeaves, setOnlyStaffWithLeaves] = useState<boolean>(false);
+  const [isExportingLeaveJpeg, setIsExportingLeaveJpeg] = useState<boolean>(false);
+  const leaveReportRef = useRef<HTMLDivElement | null>(null);
 
   const activeStaff = useMemo(() => {
     return staffList.filter((s) => s.status === 'Active');
@@ -99,9 +109,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [leaveFormError, setLeaveFormError] = useState<string>('');
   const leaveDropdownRef = useRef<HTMLDivElement | null>(null);
 
-  const [leaveType, setLeaveType] = useState<LeaveType>('ลาพักผ่อน');
+  const [leaveType, setLeaveType] = useState<LeaveType>(leaveTypes[0] || 'ลาพักผ่อน');
   const [leaveDays, setLeaveDays] = useState<number>(1);
   const [leaveNote, setLeaveNote] = useState<string>('');
+
+  useEffect(() => {
+    if (leaveTypes.length > 0 && !leaveTypes.includes(leaveType)) {
+      setLeaveType(leaveTypes[0]);
+    }
+  }, [leaveTypes, leaveType]);
 
   // Dual Filter for Leave History (Search staff name + Filter leave type)
   const [leaveSearchStaff, setLeaveSearchStaff] = useState<string>('');
@@ -613,6 +629,207 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
   };
 
+  // --- Image 4 Official Leave Report Data & Columns ---
+  const leaveReportColumns = useMemo(() => {
+    const coreCols: { type: string; shortLabel: string }[] = [
+      { type: 'ลาพักผ่อน', shortLabel: 'พักผ่อน' },
+      { type: 'ลาป่วย', shortLabel: 'ป่วย' },
+      { type: 'ลากิจ', shortLabel: 'กิจ' },
+      { type: 'ลาคลอด', shortLabel: 'คลอด' },
+    ];
+    const coreTypesSet = new Set(coreCols.map((c) => c.type));
+    const extraTypes = new Set<string>();
+    leaveTypes.forEach((lt) => {
+      if (!coreTypesSet.has(lt)) extraTypes.add(lt);
+    });
+    leaves.forEach((lv) => {
+      if (lv.leaveType && !coreTypesSet.has(lv.leaveType)) extraTypes.add(lv.leaveType);
+    });
+
+    const formatShortCol = (t: string) => {
+      if (t === 'ลาบวช') return 'บวช';
+      if (t === 'ลาศึกษาต่อ') return 'ศึกษาต่อ';
+      if (t === 'ไปอบรม/ประชุม') return 'อบรม/ประชุม';
+      return t;
+    };
+
+    const extraCols = Array.from(extraTypes).map((t) => ({
+      type: t,
+      shortLabel: formatShortCol(t),
+    }));
+
+    return { coreCols, extraCols, allCols: [...coreCols, ...extraCols] };
+  }, [leaveTypes, leaves]);
+
+  const leaveReportData = useMemo(() => {
+    const targetCeEndYear = selectedFiscalYear - 543;
+    const targetCeStartYear = targetCeEndYear - 1;
+
+    const allowedYearMonths = new Set<string>();
+    fiscalMonths.forEach((m) => {
+      if (monthFilter === 'ALL' || m.key === monthFilter) {
+        const y = m.yearOffset === -1 ? targetCeStartYear : targetCeEndYear;
+        allowedYearMonths.add(`${y}-${m.key}`);
+      }
+    });
+
+    const periodLeaves = leaves.filter((lv) => {
+      const startYm = (lv.startDate || '').slice(0, 7);
+      const endYm = (lv.endDate || lv.startDate || '').slice(0, 7);
+      if (allowedYearMonths.has(startYm) || allowedYearMonths.has(endYm)) return true;
+      for (const ym of allowedYearMonths) {
+        if (startYm && endYm && startYm <= ym && endYm >= ym) return true;
+      }
+      return false;
+    });
+
+    // Build roster combining activeStaff + any unlinked leave staff in the period
+    const rosterMap = new Map<string, { id: string; name: string; position: StaffPosition; clinic: string }>();
+    activeStaff.forEach((s) => {
+      rosterMap.set(s.name, {
+        id: s.staffId,
+        name: s.name,
+        position: s.position,
+        clinic: s.homeClinic,
+      });
+    });
+    periodLeaves.forEach((lv) => {
+      if (!rosterMap.has(lv.staffName)) {
+        rosterMap.set(lv.staffName, {
+          id: `UNLINKED-${lv.staffName}`,
+          name: lv.staffName,
+          position: lv.position,
+          clinic: lv.clinic || '-',
+        });
+      }
+    });
+
+    const q = summarySearchQuery.toLowerCase().trim();
+    const filteredRoster = Array.from(rosterMap.values()).filter((person) => {
+      if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
+      if (staffFilter !== 'ALL' && person.id !== staffFilter) return false;
+      if (q) {
+        const match =
+          person.name.toLowerCase().includes(q) ||
+          person.clinic.toLowerCase().includes(q) ||
+          person.position.toLowerCase().includes(q) ||
+          formatPositionLabel(person.position).toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    const rows = filteredRoster
+      .map((person) => {
+        const personLeaves = periodLeaves
+          .filter((lv) => lv.staffName === person.name)
+          .sort((a, b) => a.startDate.localeCompare(b.startDate));
+
+        const daysByType: Record<string, number> = {};
+        let totalLeaveDays = 0;
+
+        personLeaves.forEach((lv) => {
+          const d = Number(lv.days) || 1;
+          daysByType[lv.leaveType] = (daysByType[lv.leaveType] || 0) + d;
+          totalLeaveDays += d;
+        });
+
+        const details = personLeaves.map((lv) => {
+          const rangeText = formatThaiLeaveRange(lv.startDate, lv.endDate);
+          const reasonSuffix = lv.note && lv.note.trim() ? ` (เหตุผล: ${lv.note.trim()})` : '';
+          return `${lv.leaveType} ${lv.days} วัน ${rangeText}${reasonSuffix}`;
+        });
+
+        const { firstName, lastName } = splitThaiName(person.name);
+
+        return {
+          id: person.id,
+          fullName: person.name,
+          firstName,
+          lastName,
+          position: person.position,
+          clinic: person.clinic,
+          daysByType,
+          totalLeaveDays,
+          details,
+        };
+      })
+      .filter((row) => !onlyStaffWithLeaves || row.totalLeaveDays > 0);
+
+    const totalsByType: Record<string, number> = {};
+    leaveReportColumns.allCols.forEach((c) => {
+      totalsByType[c.type] = rows.reduce((sum, r) => sum + (r.daysByType[c.type] || 0), 0);
+    });
+    const grandTotalDays = rows.reduce((sum, r) => sum + r.totalLeaveDays, 0);
+
+    return { rows, totalsByType, grandTotalDays };
+  }, [
+    selectedFiscalYear,
+    fiscalMonths,
+    monthFilter,
+    leaves,
+    activeStaff,
+    clinicFilter,
+    staffFilter,
+    summarySearchQuery,
+    onlyStaffWithLeaves,
+    leaveReportColumns,
+  ]);
+
+  const leaveReportPeriodLabel = useMemo(() => {
+    if (monthFilter === 'ALL') {
+      return `ปีงบประมาณ ${selectedFiscalYear} (ต.ค. ${String(selectedFiscalYear - 1).slice(-2)} - ก.ย. ${String(selectedFiscalYear).slice(-2)})`;
+    }
+    const m = fiscalMonths.find((fm) => fm.key === monthFilter);
+    const beYear = m?.yearOffset === -1 ? selectedFiscalYear - 1 : selectedFiscalYear;
+    return `เดือน ${m?.fullName || monthFilter} พ.ศ. ${beYear}`;
+  }, [monthFilter, selectedFiscalYear, fiscalMonths]);
+
+  const exportLeaveReportCsv = () => {
+    const headers = [
+      'ลำดับ',
+      'ชื่อ',
+      'สกุล',
+      'ตำแหน่ง',
+      'คลินิกสังกัด',
+      ...leaveReportColumns.allCols.map((c) => c.shortLabel),
+      'รวมวันลา (วัน)',
+      'เหตุผลการลาและวันที่ลา',
+    ];
+    const rows = leaveReportData.rows.map((r, i) => [
+      i + 1,
+      `"${r.firstName}"`,
+      `"${r.lastName}"`,
+      `"${r.position}"`,
+      `"${r.clinic}"`,
+      ...leaveReportColumns.allCols.map((c) => r.daysByType[c.type] || 0),
+      r.totalLeaveDays,
+      `"${r.details.join(' | ') || '-'}"`,
+    ]);
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `รายงานการลา_หน่วยการพยาบาลผู้ป่วยนอก_ปีงบ_${selectedFiscalYear}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleExportLeaveJpeg = async () => {
+    if (!leaveReportRef.current || isExportingLeaveJpeg) return;
+    setIsExportingLeaveJpeg(true);
+    try {
+      await exportElementAsJpeg(
+        leaveReportRef.current,
+        `รายงานสรุปวันลา_หน่วยการพยาบาลผู้ป่วยนอก_ปีงบ_${selectedFiscalYear}.jpeg`
+      );
+    } finally {
+      setIsExportingLeaveJpeg(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Tab Header Banner */}
@@ -787,7 +1004,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   required
                   className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-amber-900"
                 >
-                  {LEAVE_TYPES.map((lt) => (
+                  {leaveTypes.map((lt) => (
                     <option key={lt} value={lt}>
                       {lt}
                     </option>
@@ -898,7 +1115,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       className="w-full py-1.5 px-2.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700"
                     >
                       <option value="ALL">-- ทุกประเภทการลา / อบรม --</option>
-                      {LEAVE_TYPES.map((lt) => (
+                      {leaveTypes.map((lt) => (
                         <option key={lt} value={lt}>
                           {lt}
                         </option>
@@ -1463,6 +1680,45 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           </div>
 
+          {/* Sub-view Switcher inside Summary */}
+          <div className="no-print flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200/80 rounded-xl p-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSummaryReportMode('ALL')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  summaryReportMode === 'ALL'
+                    ? 'bg-teal-700 text-white shadow-2xs'
+                    : 'bg-white text-gray-600 hover:text-teal-800 border border-gray-200'
+                }`}
+              >
+                แสดงทั้งหมด (วันทำงาน + รายงานการลา)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSummaryReportMode('LEAVE_REPORT')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  summaryReportMode === 'LEAVE_REPORT'
+                    ? 'bg-amber-600 text-white shadow-2xs'
+                    : 'bg-white text-gray-600 hover:text-amber-800 border border-gray-200'
+                }`}
+              >
+                รายงานสรุปวันลารายบุคคล (แบบฟอร์ม)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSummaryReportMode('WORK_OT')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  summaryReportMode === 'WORK_OT'
+                    ? 'bg-blue-700 text-white shadow-2xs'
+                    : 'bg-white text-gray-600 hover:text-blue-800 border border-gray-200'
+                }`}
+              >
+                ตารางวันทำงานในเวลา &amp; เวร OT
+              </button>
+            </div>
+          </div>
+
           {/* Interactive Filters Grid */}
           <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
@@ -1631,8 +1887,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           </div>
 
-          {/* VIEW A: 12-Month Grid View */}
-          {monthFilter === 'ALL' ? (
+          {/* VIEW A & B: Work & OT Summary Grid */}
+          {summaryReportMode !== 'LEAVE_REPORT' && (monthFilter === 'ALL' ? (
             <div className="overflow-x-auto border border-gray-200 rounded-xl">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px]">
@@ -1884,6 +2140,200 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </tbody>
               </table>
             </div>
+          ))}
+
+          {/* OFFICIAL LEAVE SUMMARY REPORT (Image 4 Form + Leave Reason & Thai Date Range) */}
+          {summaryReportMode !== 'WORK_OT' && (
+            <div className="space-y-3 pt-4 border-t border-gray-200">
+              <div className="no-print flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                    <CalendarDays className="w-4 h-4 text-amber-600" />
+                    <span>รายงานสรุปวันลาประจำหน่วยงาน (แยกประเภทการลา พร้อมเหตุผลและวันที่ลา)</span>
+                  </h4>
+                  <p className="text-[11px] text-gray-500">
+                    อ้างอิงตามช่วงเวลาและตัวกรองด้านบน • ช่วงข้อมูล: {leaveReportPeriodLabel}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-700 bg-slate-100 hover:bg-slate-200/70 px-2.5 py-1.5 rounded-lg cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={onlyStaffWithLeaves}
+                      onChange={(e) => setOnlyStaffWithLeaves(e.target.checked)}
+                      className="rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    <span>แสดงเฉพาะผู้ที่มีประวัติลา</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={exportLeaveReportCsv}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white rounded-lg shadow-2xs cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>ส่งออก CSV รายงานการลา</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleExportLeaveJpeg}
+                    disabled={isExportingLeaveJpeg}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white rounded-lg shadow-2xs cursor-pointer"
+                  >
+                    <ImageDown className="w-3.5 h-3.5" />
+                    <span>{isExportingLeaveJpeg ? 'กำลังสร้างรูป...' : 'บันทึกเป็น .JPEG'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg shadow-2xs cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>พิมพ์รายงาน / PDF</span>
+                  </button>
+                </div>
+              </div>
+
+              <div
+                ref={leaveReportRef}
+                className="bg-white border border-gray-300 rounded-xl p-4 sm:p-6 space-y-4 print:border-none print:p-2"
+              >
+                <div className="text-center space-y-1 border-b border-gray-300 pb-3">
+                  <div className="text-sm sm:text-base font-extrabold text-gray-900">
+                    ชื่อหน่วยงาน : หน่วยการพยาบาลผู้ป่วยนอก
+                  </div>
+                  <div className="text-xs text-gray-600 font-medium">
+                    รายงานสรุปวันลาบุคลากร • {leaveReportPeriodLabel}
+                    {clinicFilter !== 'ALL' ? ` • คลินิก: ${clinicFilter}` : ''}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs border-collapse border border-gray-400">
+                    <thead className="bg-slate-100 text-gray-900 font-bold">
+                      <tr>
+                        <th className="border border-gray-400 py-2 px-2 text-center w-12">ลำดับ</th>
+                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap">ชื่อ</th>
+                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap">สกุล</th>
+                        <th className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap">ตำแหน่ง</th>
+                        {leaveReportColumns.allCols.map((col) => (
+                          <th
+                            key={col.type}
+                            className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap min-w-[58px]"
+                            title={col.type}
+                          >
+                            {col.shortLabel}
+                          </th>
+                        ))}
+                        <th className="border border-gray-400 py-2 px-2 text-center bg-amber-50 whitespace-nowrap">
+                          รวมวันลา
+                        </th>
+                        <th className="border border-gray-400 py-2 px-3 text-left min-w-[260px]">
+                          เหตุผลการลาและวันที่ลา
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {leaveReportData.rows.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={6 + leaveReportColumns.allCols.length}
+                            className="border border-gray-400 py-8 text-center text-gray-400"
+                          >
+                            ไม่พบข้อมูลการลาในตัวกรองที่เลือก
+                          </td>
+                        </tr>
+                      ) : (
+                        leaveReportData.rows.map((row, idx) => (
+                          <tr
+                            key={row.id}
+                            className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}
+                          >
+                            <td className="border border-gray-400 py-1.5 px-2 text-center text-gray-700 font-medium">
+                              {idx + 1}
+                            </td>
+                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 font-semibold whitespace-nowrap">
+                              {row.firstName}
+                            </td>
+                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 whitespace-nowrap">
+                              {row.lastName}
+                            </td>
+                            <td className="border border-gray-400 py-1.5 px-2 text-center font-semibold text-gray-800 whitespace-nowrap">
+                              {row.position}
+                            </td>
+                            {leaveReportColumns.allCols.map((col) => {
+                              const val = row.daysByType[col.type] || 0;
+                              return (
+                                <td
+                                  key={col.type}
+                                  className={`border border-gray-400 py-1.5 px-2 text-center ${
+                                    val > 0 ? 'font-bold text-amber-900 bg-amber-50/40' : 'text-gray-400'
+                                  }`}
+                                >
+                                  {val > 0 ? val : ''}
+                                </td>
+                              );
+                            })}
+                            <td className="border border-gray-400 py-1.5 px-2 text-center font-extrabold text-amber-950 bg-amber-50/60">
+                              {row.totalLeaveDays > 0 ? row.totalLeaveDays : ''}
+                            </td>
+                            <td className="border border-gray-400 py-1.5 px-3 text-[11px] text-gray-800">
+                              {row.details.length > 0 ? (
+                                <ul className="space-y-0.5 list-disc list-inside">
+                                  {row.details.map((d, dIdx) => (
+                                    <li key={dIdx}>{d}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {leaveReportData.rows.length > 0 && (
+                      <tfoot className="bg-slate-100 font-bold text-gray-900">
+                        <tr>
+                          <td colSpan={4} className="border border-gray-400 py-2 px-3 text-right">
+                            รวมทั้งหมด ({leaveReportData.rows.length} คน)
+                          </td>
+                          {leaveReportColumns.allCols.map((col) => (
+                            <td key={col.type} className="border border-gray-400 py-2 px-2 text-center">
+                              {leaveReportData.totalsByType[col.type] > 0
+                                ? leaveReportData.totalsByType[col.type]
+                                : '-'}
+                            </td>
+                          ))}
+                          <td className="border border-gray-400 py-2 px-2 text-center bg-amber-100 text-amber-950 font-extrabold">
+                            {leaveReportData.grandTotalDays}
+                          </td>
+                          <td className="border border-gray-400 py-2 px-3 text-[11px] text-gray-600 font-normal">
+                            หน่วยนับ: วันทำการ/วันลา
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+
+                <div className="pt-4 grid grid-cols-1 sm:grid-cols-2 gap-6 text-center text-xs text-gray-700">
+                  <div>
+                    <p className="mb-8">ผู้จัดทำรายงาน</p>
+                    <p>ลงชื่อ......................................................</p>
+                    <p className="mt-1">(......................................................)</p>
+                  </div>
+                  <div>
+                    <p className="mb-8">ผู้ตรวจทาน / รับรองข้อมูล</p>
+                    <p>ลงชื่อ......................................................</p>
+                    <p className="mt-1">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</p>
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -1971,7 +2421,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     }
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-medium"
                   >
-                    {LEAVE_TYPES.map((lt) => (
+                    {leaveTypes.map((lt) => (
                       <option key={lt} value={lt}>
                         {lt}
                       </option>

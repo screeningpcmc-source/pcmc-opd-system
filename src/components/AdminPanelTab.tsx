@@ -8,6 +8,7 @@ import {
   ALL_POSITIONS, 
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS,
+  LEAVE_TYPES,
   POSITION_LABELS,
   formatPositionLabel
 } from '../types';
@@ -38,7 +39,8 @@ import {
   Link2,
   Share2,
   Copy,
-  Unlink
+  Unlink,
+  CalendarOff
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
@@ -46,6 +48,7 @@ interface AdminPanelTabProps {
   settings: SystemSettings;
   inTimeClinics: string[];
   outTimeClinics: string[];
+  leaveTypes: string[];
   isAdmin: boolean;
   isAdminUnlocked?: boolean;
   user: User | null;
@@ -71,6 +74,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   settings,
   inTimeClinics,
   outTimeClinics,
+  leaveTypes,
   isAdminUnlocked = false,
   user,
   onLogin,
@@ -106,9 +110,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
   const [inlineError, setInlineError] = useState<string>('');
 
-  // Clinic Management state
+  // Clinic & Leave Type Management state
   const [newInClinicName, setNewInClinicName] = useState<string>('');
   const [newOutClinicName, setNewOutClinicName] = useState<string>('');
+  const [newLeaveTypeName, setNewLeaveTypeName] = useState<string>('');
+  const [showSheetLinkConfig, setShowSheetLinkConfig] = useState<boolean>(false);
 
   // PIN Security Gate State
   const [pinInput, setPinInput] = useState<string>('');
@@ -344,6 +350,43 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       : base;
   }, [settings.spreadsheetId]);
 
+  // Leave Type Management Handlers (Admin Add / Remove)
+  const handleAddLeaveType = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newLeaveTypeName.trim();
+    if (!trimmed) return;
+    if (leaveTypes.includes(trimmed)) {
+      setInlineError(`ประเภทการลา "${trimmed}" มีอยู่ในรายการแล้ว`);
+      return;
+    }
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      leaveTypes: [...leaveTypes, trimmed],
+    });
+    setNewLeaveTypeName('');
+  };
+
+  const handleRemoveLeaveType = (typeName: string) => {
+    if (leaveTypes.length <= 1) {
+      setInlineError('ต้องมีประเภทการลาอย่างน้อย 1 รายการ');
+      return;
+    }
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      leaveTypes: leaveTypes.filter((lt) => lt !== typeName),
+    });
+  };
+
+  const handleRestoreDefaultLeaveTypes = () => {
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      leaveTypes: [...LEAVE_TYPES],
+    });
+  };
+
   // Handle Save Settings
   const handleSaveSettingsSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -362,6 +405,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       adminPin: adminPinSetting.trim(),
       inTimeClinics,
       outTimeClinics,
+      leaveTypes,
     };
 
     onSaveSettings(updated);
@@ -510,8 +554,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </h3>
             <p className="text-xs text-emerald-100/80">
               {settings.spreadsheetId
-                ? `เชื่อมโยงฐานข้อมูลเรียบร้อยแล้ว (จำค่าถาวร): ${settings.spreadsheetId}`
-                : 'ลงชื่อเข้าใช้ Google เพื่อสร้างฐานข้อมูล 5 ชีทใหม่ หรือวางลิงก์ / ID Google Sheets ที่มีอยู่แล้วด้านล่าง'}
+                ? 'เชื่อมโยงฐานข้อมูล Google Sheets เรียบร้อยแล้ว (ซ่อนรหัสและลิงก์ชีทเพื่อความปลอดภัย)'
+                : 'ลงชื่อเข้าใช้ Google เพื่อสร้างฐานข้อมูล 5 ชีทใหม่ หรือตั้งค่าลิงก์ Google Sheets'}
             </p>
           </div>
 
@@ -575,6 +619,17 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               <span>{copiedShareLink ? 'คัดลอกลิงก์แล้ว!' : 'คัดลอกลิงก์แชร์ให้ OPD'}</span>
             </button>
 
+            {/* Discrete toggle for Sheet ID config (hidden by default per Image 2) */}
+            <button
+              type="button"
+              onClick={() => setShowSheetLinkConfig((prev) => !prev)}
+              className="inline-flex items-center gap-1 px-2.5 py-2 text-xs font-semibold bg-black/20 hover:bg-black/35 text-emerald-100/80 border border-white/15 rounded-xl transition-colors cursor-pointer"
+              title="แสดง/ซ่อนช่องตั้งค่าลิงก์ Google Sheets"
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span>{showSheetLinkConfig ? 'ซ่อนตั้งค่าลิงก์' : 'ตั้งค่าลิงก์ชีท'}</span>
+            </button>
+
             {/* 3. Google Sign-In / Account Status (persisted across reloads) */}
             {user ? (
               <div className="flex items-center gap-2 bg-black/25 backdrop-blur px-3 py-1.5 rounded-xl border border-white/15">
@@ -627,55 +682,57 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </div>
         </div>
 
-        {/* Remember Existing Spreadsheet URL/ID & Share Link Preview */}
-        <div className="bg-black/20 rounded-xl p-3 border border-white/10 space-y-2.5">
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-            <div className="flex items-center gap-1.5 text-xs text-emerald-200 font-semibold shrink-0">
-              <Link2 className="w-4 h-4" />
-              <span>ลิงก์ / ID Google Sheets ที่ต้องการจำค่า:</span>
-            </div>
-            <input
-              type="text"
-              value={customSheetUrl}
-              onChange={(e) => setCustomSheetUrl(e.target.value)}
-              placeholder="วาง URL หรือ Spreadsheet ID ที่มีอยู่เพื่อบันทึกลิงก์ถาวร..."
-              className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
-            />
-            <button
-              type="button"
-              onClick={handleSaveSheetLink}
-              className="px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer shrink-0"
-            >
-              จำค่าลิงก์ชีท
-            </button>
-            {(settings.spreadsheetId || settings.spreadsheetUrl) && (
+        {/* Hidden by default (Image 2): Existing Spreadsheet URL/ID & Share Link */}
+        {showSheetLinkConfig && (
+          <div className="bg-black/20 rounded-xl p-3 border border-white/10 space-y-2.5">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              <div className="flex items-center gap-1.5 text-xs text-emerald-200 font-semibold shrink-0">
+                <Link2 className="w-4 h-4" />
+                <span>ลิงก์ / ID Google Sheets ที่ต้องการจำค่า:</span>
+              </div>
+              <input
+                type="text"
+                value={customSheetUrl}
+                onChange={(e) => setCustomSheetUrl(e.target.value)}
+                placeholder="วาง URL หรือ Spreadsheet ID ที่มีอยู่เพื่อบันทึกลิงก์ถาวร..."
+                className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
+              />
               <button
                 type="button"
-                onClick={handleUnlinkSheet}
-                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white/10 hover:bg-red-500/30 text-red-100 border border-white/15 rounded-lg transition-colors cursor-pointer shrink-0"
-                title="ล้างลิงก์ที่จำไว้ออก"
+                onClick={handleSaveSheetLink}
+                className="px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer shrink-0"
               >
-                <Unlink className="w-3.5 h-3.5" />
-                <span>ยกเลิกเชื่อมโยง</span>
+                จำค่าลิงก์ชีท
               </button>
-            )}
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-emerald-100/85">
-            <div className="truncate">
-              <span className="font-semibold text-cyan-200">ลิงก์สำหรับแชร์บุคลากร OPD: </span>
-              <span className="font-mono text-white/90 select-all">{shareableOpdUrl}</span>
+              {(settings.spreadsheetId || settings.spreadsheetUrl) && (
+                <button
+                  type="button"
+                  onClick={handleUnlinkSheet}
+                  className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white/10 hover:bg-red-500/30 text-red-100 border border-white/15 rounded-lg transition-colors cursor-pointer shrink-0"
+                  title="ล้างลิงก์ที่จำไว้ออก"
+                >
+                  <Unlink className="w-3.5 h-3.5" />
+                  <span>ยกเลิกเชื่อมโยง</span>
+                </button>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={handleCopyLinkClick}
-              className="inline-flex items-center gap-1 px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-md font-semibold transition-colors cursor-pointer shrink-0 self-start sm:self-auto"
-            >
-              <Copy className="w-3 h-3" />
-              <span>{copiedShareLink ? 'คัดลอกแล้ว' : 'คัดลอกลิงก์'}</span>
-            </button>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-emerald-100/85">
+              <div className="truncate">
+                <span className="font-semibold text-cyan-200">ลิงก์สำหรับแชร์บุคลากร OPD: </span>
+                <span className="font-mono text-white/90 select-all">{shareableOpdUrl}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyLinkClick}
+                className="inline-flex items-center gap-1 px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-md font-semibold transition-colors cursor-pointer shrink-0 self-start sm:self-auto"
+              >
+                <Copy className="w-3 h-3" />
+                <span>{copiedShareLink ? 'คัดลอกแล้ว' : 'คัดลอกลิงก์'}</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {inlineError && (
@@ -1101,6 +1158,69 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 3.5: Leave Type Management (Admin Add / Remove Leave Types - Image 5) */}
+      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3">
+          <div className="flex items-center gap-2">
+            <CalendarOff className="w-5 h-5 text-amber-600" />
+            <div>
+              <h3 className="text-sm font-bold text-gray-900">
+                จัดการประเภทการลา / สิทธิ์การลา (เพิ่ม / ลดประเภทการลา)
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                ประเภทการลาที่เพิ่มจะไปแสดงในเมนูบันทึกวันลา, เมนูบันทึกภาระงาน และรายงานสรุปวันลาอัตโนมัติ
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleRestoreDefaultLeaveTypes}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:text-gray-800 hover:bg-slate-100 rounded-lg border border-gray-200 transition-colors cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>คืนค่าประเภทการลามาตรฐาน</span>
+          </button>
+        </div>
+
+        <div className="bg-amber-50/40 border border-amber-200/80 rounded-xl p-4 space-y-3">
+          <form onSubmit={handleAddLeaveType} className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={newLeaveTypeName}
+              onChange={(e) => setNewLeaveTypeName(e.target.value)}
+              placeholder="พิมพ์ชื่อประเภทการลาที่ต้องการเพิ่ม (เช่น ลาดูแลบุตร, ลาช่วยภริยาคลอด)..."
+              className="flex-1 text-xs rounded-lg border border-amber-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-amber-200"
+            />
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center gap-1 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>เพิ่มประเภทการลา</span>
+            </button>
+          </form>
+
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {leaveTypes.map((lt) => (
+              <div
+                key={lt}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-amber-200 rounded-lg text-xs font-medium text-amber-950 shadow-2xs"
+              >
+                <span>{lt}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveLeaveType(lt)}
+                  className="text-gray-400 hover:text-red-600 transition-colors cursor-pointer"
+                  title={`ลบประเภทการลา ${lt}`}
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </div>

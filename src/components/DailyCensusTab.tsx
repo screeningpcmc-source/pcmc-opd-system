@@ -1,11 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { DailyWorkload, WorkShift, SHIFTS, getEffectiveTotalPt } from '../types';
+import { formatThaiFullDate } from '../utils/thaiDate';
+import { exportElementAsJpeg } from '../utils/exportImage';
 import { 
   FileText, 
   Printer, 
   Download, 
-  Share2, 
-  Building2, 
   Calendar, 
   Clock, 
   Users, 
@@ -14,12 +14,11 @@ import {
   Copy, 
   Check, 
   TrendingUp,
-  FileSpreadsheet,
   Pencil,
   Trash2,
   X,
   Save,
-  ShieldCheck
+  ImageDown
 } from 'lucide-react';
 
 interface DailyCensusTabProps {
@@ -40,7 +39,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const [date, setDate] = useState<string>(todayStr);
   const [shiftFilter, setShiftFilter] = useState<string>('ALL');
   const [copied, setCopied] = useState<boolean>(false);
+  const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
+  const reportSheetRef = useRef<HTMLDivElement | null>(null);
+  const formattedThaiDate = useMemo(() => formatThaiFullDate(date), [date]);
 
   // Filter workloads for this date and shift
   const filteredWorkloads = useMemo(() => {
@@ -75,6 +77,20 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   // Print function
   const handlePrint = () => {
     window.print();
+  };
+
+  // Export Report as .JPEG image
+  const handleExportJpeg = async () => {
+    if (!reportSheetRef.current) return;
+    setIsExportingJpeg(true);
+    try {
+      const shiftSlug = shiftFilter === 'ALL' ? 'ทุกกะ' : shiftFilter.replace(/[^\wก-ฮะ-์]+/g, '_');
+      await exportElementAsJpeg(reportSheetRef.current, `OPD_Census_${date}_${shiftSlug}.jpeg`);
+    } catch (err) {
+      console.error('Export JPEG error:', err);
+    } finally {
+      setIsExportingJpeg(false);
+    }
   };
 
   // Export CSV
@@ -137,7 +153,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     const shiftLabel = shiftFilter === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftFilter;
     const text = `📊 รายงานภาระงานผู้ป่วยนอก OPD PCMC
 🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน
-📅 ประจำวันที่: ${date} (${shiftLabel})
+📅 ประจำวันที่: ${formattedThaiDate} (${shiftLabel})
 ──────────────────
 👥 ผู้ป่วยนอกรวม: ${totals.totalPt.toLocaleString()} ราย
 🛌 รับไว้รักษา (Admit): ${totals.admit.toLocaleString()} ราย
@@ -171,8 +187,9 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
             onClick={handleCopySummary}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white text-blue-800 border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors cursor-pointer"
           >
@@ -180,6 +197,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <span>{copied ? 'คัดลอกข้อความแล้ว!' : 'คัดลอกสรุปส่ง LINE'}</span>
           </button>
           <button
+            type="button"
             onClick={handleExportCSV}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white text-emerald-800 border border-emerald-300 rounded-lg hover:bg-emerald-50 transition-colors cursor-pointer"
           >
@@ -187,6 +205,16 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <span>ส่งออก CSV</span>
           </button>
           <button
+            type="button"
+            onClick={handleExportJpeg}
+            disabled={isExportingJpeg}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+          >
+            <ImageDown className="w-3.5 h-3.5" />
+            <span>{isExportingJpeg ? 'กำลังสร้างรูป...' : 'บันทึกเป็น .JPEG'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handlePrint}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-blue-700 hover:bg-blue-600 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
           >
@@ -287,8 +315,11 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
       </div>
 
-      {/* Main Census Report Sheet (Print Optimized) */}
-      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-6 space-y-4 print:p-0 print:border-none print:shadow-none">
+      {/* Main Census Report Sheet (Print & JPEG Optimized) */}
+      <div
+        ref={reportSheetRef}
+        className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-6 space-y-4 print:p-0 print:border-none print:shadow-none"
+      >
         {/* Printable Hospital Header */}
         <div className="border-b border-gray-300 pb-3 text-center">
           <h3 className="text-base sm:text-lg font-bold text-gray-950">
@@ -297,8 +328,8 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
           <p className="text-xs font-semibold text-gray-700 mt-0.5">
             รายงานสถิติผู้ป่วยนอกและอัตรากำลังประจำวัน (Daily OPD Census Report)
           </p>
-          <div className="flex justify-center items-center gap-4 text-xs text-gray-600 mt-1">
-            <span><strong>วันที่:</strong> {date}</span>
+          <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-1 text-xs text-gray-600 mt-1">
+            <span><strong>วันที่:</strong> {formattedThaiDate}</span>
             <span>•</span>
             <span><strong>กะเวลา:</strong> {shiftFilter === 'ALL' ? 'ทุกกะเวลา' : shiftFilter}</span>
             <span>•</span>
@@ -431,7 +462,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
           <div>
             <div className="h-12 border-b border-gray-400 w-48 mx-auto"></div>
             <div className="mt-2 font-semibold">ลงชื่อ .....................................................</div>
-            <div className="text-[11px] text-gray-500 mt-0.5">(หัวหน้ากลุ่มงานการพยาบาลผู้ป่วยนอก)</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</div>
           </div>
         </div>
       </div>

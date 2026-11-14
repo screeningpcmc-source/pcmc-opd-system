@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   DailyWorkload, 
   StaffMember, 
@@ -6,7 +6,7 @@ import {
   IN_TIME_CLINICS, 
   OUT_TIME_CLINICS, 
   LeaveType,
-  REGULAR_LEAVE_TYPES,
+  LEAVE_TYPES,
   formatPositionLabel,
   getEffectiveTotalPt
 } from '../types';
@@ -43,6 +43,7 @@ interface DailyWorkloadTabProps {
   staffList: StaffMember[];
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  leaveTypes?: string[];
   onSaveWorkload: (
     entry: DailyWorkload, 
     leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
@@ -61,6 +62,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   staffList,
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
+  leaveTypes = [...LEAVE_TYPES],
   onSaveWorkload,
   onUpdateWorkload,
   onDeleteWorkload,
@@ -112,6 +114,17 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [crossStaffSearch, setCrossStaffSearch] = useState<string>('');
   const [crossStaffName, setCrossStaffName] = useState<string>('');
   const [crossTargetClinic, setCrossTargetClinic] = useState<string>('');
+
+  const regularLeaveOptions = useMemo(() => {
+    const filtered = leaveTypes.filter(lt => lt !== 'ไปอบรม/ประชุม');
+    return filtered.length > 0 ? filtered : ['ลาป่วย', 'ลากิจ', 'ลาพักผ่อน'];
+  }, [leaveTypes]);
+
+  useEffect(() => {
+    if (regularLeaveOptions.length > 0 && !regularLeaveOptions.includes(leaveType)) {
+      setLeaveType(regularLeaveOptions[0]);
+    }
+  }, [regularLeaveOptions, leaveType]);
 
   // Shift & Clinics logic
   const isOutTime = shift !== 'ในเวลา 08:00-16:00';
@@ -840,7 +853,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         onChange={(e) => setLeaveType(e.target.value as LeaveType)}
                         className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
                       >
-                        {REGULAR_LEAVE_TYPES.map(lt => (
+                        {regularLeaveOptions.map(lt => (
                           <option key={lt} value={lt}>{lt}</option>
                         ))}
                       </select>

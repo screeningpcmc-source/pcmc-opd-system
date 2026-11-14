@@ -1,4 +1,4 @@
-import { StaffMember, DailyWorkload, LeaveRecord, OTAttendance, SystemSettings } from '../types';
+import { StaffMember, DailyWorkload, LeaveRecord, OTAttendance, SystemSettings, LEAVE_TYPES } from '../types';
 
 export const INITIAL_SETTINGS: SystemSettings = {
   nhppd: 0.4,
@@ -35,7 +35,8 @@ export const INITIAL_SETTINGS: SystemSettings = {
     'อายุรกรรม',
     'คลินิกหัวใจ',
     'หน่วยคัดกรอง'
-  ]
+  ],
+  leaveTypes: [...LEAVE_TYPES]
 };
 
 // Production mode: start with empty data ready for real hospital records

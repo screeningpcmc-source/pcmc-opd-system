@@ -13,14 +13,7 @@ export type WorkShift =
   | 'นอกเวลาวันหยุด 08:00-12:00'
   | 'OT ในเวลาราชการ 08:00-16:00';
 
-export type LeaveType = 
-  | 'ลาป่วย'
-  | 'ลากิจ'
-  | 'ลาพักผ่อน'
-  | 'ลาคลอด'
-  | 'ลาบวช'
-  | 'ลาศึกษาต่อ'
-  | 'ไปอบรม/ประชุม';
+export type LeaveType = string;
 
 export interface StaffMember {
   staffId: string;
@@ -86,6 +79,7 @@ export interface SystemSettings {
   spreadsheetUrl?: string;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  leaveTypes?: string[];
 }
 
 export const IN_TIME_CLINICS = [

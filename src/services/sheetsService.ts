@@ -10,6 +10,7 @@ import {
   LeaveType,
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS,
+  LEAVE_TYPES,
   getEffectiveTotalPt
 } from '../types';
 import {
@@ -121,6 +122,10 @@ export const loadLocalDatabase = (): AppDatabase => {
           Array.isArray(parsed.settings?.outTimeClinics) && parsed.settings.outTimeClinics.length > 0
             ? parsed.settings.outTimeClinics
             : INITIAL_SETTINGS.outTimeClinics,
+        leaveTypes:
+          Array.isArray(parsed.settings?.leaveTypes) && parsed.settings.leaveTypes.length > 0
+            ? parsed.settings.leaveTypes
+            : INITIAL_SETTINGS.leaveTypes,
       };
 
       const cleanDb: AppDatabase = {
@@ -292,6 +297,7 @@ export const createGoogleSpreadsheet = async (
     ['Admin_Emails', settings.adminEmails.join(', ')],
     ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
     ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
+    ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
   ];
 
   const batchUpdateValues = {
@@ -332,7 +338,7 @@ export const createGoogleSpreadsheet = async (
         values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
       },
       {
-        range: 'Settings!A1:B8',
+        range: 'Settings!A1:B9',
         values: settingsRows,
       },
     ],
@@ -626,6 +632,12 @@ export const syncAllWithGoogleSheet = async (
         : settingsMap['Out_Time_Clinics']
         ? settingsMap['Out_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
         : [...OUT_TIME_CLINICS],
+    leaveTypes:
+      db.settings.leaveTypes && db.settings.leaveTypes.length > 0
+        ? db.settings.leaveTypes
+        : settingsMap['Leave_Types']
+        ? settingsMap['Leave_Types'].split(',').map((s) => s.trim()).filter(Boolean)
+        : [...LEAVE_TYPES],
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -687,7 +699,7 @@ export const syncAllWithGoogleSheet = async (
   }
 
   writeData.push({
-    range: 'Settings!A1:B8',
+    range: 'Settings!A1:B9',
     values: [
       ['Key', 'Value'],
       ['NHPPD', finalSettings.nhppd.toString()],
@@ -697,6 +709,7 @@ export const syncAllWithGoogleSheet = async (
       ['Admin_Emails', finalSettings.adminEmails.join(', ')],
       ['In_Time_Clinics', (finalSettings.inTimeClinics || []).join(', ')],
       ['Out_Time_Clinics', (finalSettings.outTimeClinics || []).join(', ')],
+      ['Leave_Types', (finalSettings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
     ],
   });
 

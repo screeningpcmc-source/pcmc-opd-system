@@ -14,6 +14,7 @@ import {
   SystemSettings, 
   StaffStatus,
   LeaveType,
+  LEAVE_TYPES,
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS
 } from './types';
@@ -194,6 +195,9 @@ export default function App() {
   const outTimeClinics = db.settings.outTimeClinics && db.settings.outTimeClinics.length > 0
     ? db.settings.outTimeClinics
     : [...OUT_TIME_CLINICS];
+  const leaveTypes = db.settings.leaveTypes && db.settings.leaveTypes.length > 0
+    ? db.settings.leaveTypes
+    : [...LEAVE_TYPES];
 
   // Ensure we have a valid Google OAuth token (triggers Google Sign-In cleanly if missing/expired)
   const ensureGoogleToken = async (): Promise<string | null> => {
@@ -545,7 +549,6 @@ export default function App() {
     <div className="min-h-screen bg-slate-100/70 text-slate-800 flex flex-col font-sans">
       {/* Top Navbar */}
       <Navbar
-        user={user}
         isAdmin={isAdmin}
         onLockAdmin={handleLockAdmin}
       />
@@ -648,6 +651,7 @@ export default function App() {
             staffList={db.staff}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            leaveTypes={leaveTypes}
             onSaveWorkload={handleSaveWorkload}
             onUpdateWorkload={handleUpdateWorkload}
             onDeleteWorkload={handleDeleteWorkload}
@@ -666,6 +670,7 @@ export default function App() {
             workloads={db.workloads}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            leaveTypes={leaveTypes}
             isAdmin={isAdmin}
             onSaveLeave={handleSaveLeave}
             onSaveBatchOT={handleSaveBatchOT}
@@ -703,6 +708,7 @@ export default function App() {
             settings={db.settings}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            leaveTypes={leaveTypes}
             isAdmin={isAdmin}
             isAdminUnlocked={isAdminUnlocked}
             user={user}
