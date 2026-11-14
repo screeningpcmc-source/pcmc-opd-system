@@ -70,6 +70,11 @@ export interface OTAttendance {
   affiliation?: string; // สังกัด / หน่วยงานต้นสังกัด
 }
 
+export interface CustomHoliday {
+  date: string; // YYYY-MM-DD
+  name: string;
+}
+
 export interface SystemSettings {
   nhppd: number; // default 0.4
   stdHr: number; // default 7
@@ -82,6 +87,8 @@ export interface SystemSettings {
   inTimeClinics?: string[];
   outTimeClinics?: string[];
   leaveTypes?: string[];
+  customHolidays?: CustomHoliday[];
+  autoSync?: boolean;
 }
 
 export const IN_TIME_CLINICS = [
@@ -135,6 +142,35 @@ export const formatPositionLabel = (pos: StaffPosition | string): string => {
   if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
   if (pos === 'Service Worker') return 'พนักงานบริการ';
   return pos;
+};
+
+export const POSITION_SORT_ORDER: Record<StaffPosition, number> = {
+  HN: 1,
+  RN: 2,
+  PN: 3,
+  NA: 4,
+  PCA: 4,
+  Clerk: 5,
+  'Service Worker': 6,
+};
+
+export const compareStaffByPositionAndStartDate = (
+  a: Pick<StaffMember, 'position' | 'startDate' | 'name'>,
+  b: Pick<StaffMember, 'position' | 'startDate' | 'name'>
+): number => {
+  const rankA = POSITION_SORT_ORDER[a.position] ?? 99;
+  const rankB = POSITION_SORT_ORDER[b.position] ?? 99;
+  if (rankA !== rankB) return rankA - rankB;
+
+  const startA = (a.startDate || '').trim();
+  const startB = (b.startDate || '').trim();
+  if (startA && startB && startA !== startB) {
+    return startA.localeCompare(startB);
+  }
+  if (startA && !startB) return -1;
+  if (!startA && startB) return 1;
+
+  return (a.name || '').localeCompare(b.name || '', 'th');
 };
 
 export const LEAVE_TYPES: LeaveType[] = [

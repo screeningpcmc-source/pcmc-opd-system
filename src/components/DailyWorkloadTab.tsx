@@ -8,7 +8,8 @@ import {
   LeaveType,
   LEAVE_TYPES,
   formatPositionLabel,
-  getEffectiveTotalPt
+  getEffectiveTotalPt,
+  compareStaffByPositionAndStartDate
 } from '../types';
 import { 
   ClipboardPen, 
@@ -167,9 +168,21 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setTotalPt(adultPt + v);
   };
 
-  // Filter staff by selected clinic
-  const clinicStaff = staffList.filter(s => s.status === 'Active' && s.homeClinic === clinic);
-  const activeStaffAll = staffList.filter(s => s.status === 'Active');
+  // Filter & sort staff by position rank (1→6) and startDate
+  const clinicStaff = useMemo(
+    () =>
+      staffList
+        .filter(s => s.status === 'Active' && s.homeClinic === clinic)
+        .sort(compareStaffByPositionAndStartDate),
+    [staffList, clinic]
+  );
+  const activeStaffAll = useMemo(
+    () =>
+      staffList
+        .filter(s => s.status === 'Active')
+        .sort(compareStaffByPositionAndStartDate),
+    [staffList]
+  );
 
   const adjustStaff = (setter: React.Dispatch<React.SetStateAction<number>>, delta: number) => {
     setter(prev => Math.max(0, Math.round((prev + delta) * 10) / 10));

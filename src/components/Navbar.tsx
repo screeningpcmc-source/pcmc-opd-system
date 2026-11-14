@@ -2,17 +2,29 @@ import React from 'react';
 import { 
   Building2, 
   ShieldCheck,
-  Lock
+  Lock,
+  RefreshCw,
+  CheckCircle2
 } from 'lucide-react';
 
 interface NavbarProps {
   isAdmin: boolean;
   onLockAdmin?: () => void;
+  hasSpreadsheet?: boolean;
+  isSyncingSheet?: boolean;
+  autoSyncEnabled?: boolean;
+  lastSyncedAt?: string | null;
+  onManualSync?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   isAdmin,
   onLockAdmin,
+  hasSpreadsheet = false,
+  isSyncingSheet = false,
+  autoSyncEnabled = true,
+  lastSyncedAt = null,
+  onManualSync,
 }) => {
   return (
     <header className="no-print bg-gradient-to-r from-emerald-800 via-teal-800 to-cyan-900 text-white shadow-lg sticky top-0 z-50">
@@ -37,8 +49,49 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Admin Mode Indicator */}
+        {/* Sync Status + Manual Sync Button + Admin Mode Indicator */}
         <div className="flex flex-wrap items-center gap-2">
+          {hasSpreadsheet && onManualSync && (
+            <div className="flex items-center gap-2">
+              <div
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/20 border border-white/15 text-[11px] text-emerald-100"
+                title={
+                  autoSyncEnabled
+                    ? 'ระบบจะซิงค์ข้อมูลกับ Google Sheet อัตโนมัติเมื่อเปิดเว็บ, หลังแก้ไขข้อมูล และทุก 3 นาที'
+                    : 'ปิดโหมด Auto ซิงค์อยู่ (สามารถกดปุ่มซิงค์ด้วยตนเองได้)'
+                }
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    isSyncingSheet
+                      ? 'bg-amber-400 animate-ping'
+                      : autoSyncEnabled
+                      ? 'bg-emerald-400'
+                      : 'bg-slate-400'
+                  }`}
+                />
+                <span>{autoSyncEnabled ? 'Auto ซิงค์' : 'ซิงค์ด้วยตนเอง'}</span>
+                {lastSyncedAt && (
+                  <span className="text-emerald-200/80 flex items-center gap-0.5">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-300" />
+                    {lastSyncedAt}
+                  </span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={onManualSync}
+                disabled={isSyncingSheet}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white border border-teal-400/50 rounded-full shadow-sm transition-colors cursor-pointer disabled:opacity-60"
+                title="กดเพื่อซิงค์ข้อมูลไป-กลับกับ Google Sheet ทันที"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
+                <span>{isSyncingSheet ? 'กำลังซิงค์...' : 'ซิงค์ข้อมูลกับ Google Sheet'}</span>
+              </button>
+            </div>
+          )}
+
           {isAdmin && (
             <div className="inline-flex items-center gap-1.5 bg-emerald-500/25 text-emerald-100 border border-emerald-400/40 rounded-lg px-2.5 py-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />

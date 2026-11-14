@@ -31,6 +31,7 @@ export interface AppDatabase {
 
 const STORAGE_KEY = 'pcmc_opd_system_db_v1';
 const STAFF_DIRTY_KEY = 'pcmc_staff_master_dirty_v1';
+const SETTINGS_DIRTY_KEY = 'pcmc_settings_dirty_v1';
 const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
@@ -57,6 +58,30 @@ export const clearStaffMasterDirty = (): void => {
 export const isStaffMasterDirty = (): boolean => {
   try {
     return localStorage.getItem(STAFF_DIRTY_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+export const markSettingsDirty = (): void => {
+  try {
+    localStorage.setItem(SETTINGS_DIRTY_KEY, 'true');
+  } catch {
+    // ignore
+  }
+};
+
+export const clearSettingsDirty = (): void => {
+  try {
+    localStorage.removeItem(SETTINGS_DIRTY_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+export const isSettingsDirty = (): boolean => {
+  try {
+    return localStorage.getItem(SETTINGS_DIRTY_KEY) === 'true';
   } catch {
     return false;
   }
@@ -126,6 +151,10 @@ export const loadLocalDatabase = (): AppDatabase => {
           Array.isArray(parsed.settings?.leaveTypes) && parsed.settings.leaveTypes.length > 0
             ? parsed.settings.leaveTypes
             : INITIAL_SETTINGS.leaveTypes,
+        customHolidays: Array.isArray(parsed.settings?.customHolidays)
+          ? parsed.settings.customHolidays
+          : INITIAL_SETTINGS.customHolidays,
+        autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
 
       const cleanDb: AppDatabase = {
@@ -306,6 +335,7 @@ export const createGoogleSpreadsheet = async (
     ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
     ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
     ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
+    ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
   ];
 
   const batchUpdateValues = {
@@ -349,7 +379,7 @@ export const createGoogleSpreadsheet = async (
         values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
       },
       {
-        range: 'Settings!A1:B9',
+        range: 'Settings!A1:B10',
         values: settingsRows,
       },
     ],
@@ -635,6 +665,20 @@ export const syncAllWithGoogleSheet = async (
     if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
   });
 
+  const settingsDirty = isSettingsDirty();
+  const parsedRemoteHolidays = (() => {
+    try {
+      const raw = settingsMap['Custom_Holidays'];
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // ignore malformed JSON
+    }
+    return [];
+  })();
+
   const finalSettings: SystemSettings = {
     ...db.settings,
     nhppd: db.settings.nhppd || Number(settingsMap['NHPPD']) || 0.4,
@@ -659,6 +703,11 @@ export const syncAllWithGoogleSheet = async (
         : settingsMap['Leave_Types']
         ? settingsMap['Leave_Types'].split(',').map((s) => s.trim()).filter(Boolean)
         : [...LEAVE_TYPES],
+    customHolidays: settingsDirty
+      ? db.settings.customHolidays || []
+      : db.settings.customHolidays && db.settings.customHolidays.length > 0
+      ? db.settings.customHolidays
+      : parsedRemoteHolidays,
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -728,7 +777,7 @@ export const syncAllWithGoogleSheet = async (
   }
 
   writeData.push({
-    range: 'Settings!A1:B9',
+    range: 'Settings!A1:B10',
     values: [
       ['Key', 'Value'],
       ['NHPPD', finalSettings.nhppd.toString()],
@@ -739,6 +788,7 @@ export const syncAllWithGoogleSheet = async (
       ['In_Time_Clinics', (finalSettings.inTimeClinics || []).join(', ')],
       ['Out_Time_Clinics', (finalSettings.outTimeClinics || []).join(', ')],
       ['Leave_Types', (finalSettings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
+      ['Custom_Holidays', JSON.stringify(finalSettings.customHolidays || [])],
     ],
   });
 
@@ -845,6 +895,7 @@ export const syncAllWithGoogleSheet = async (
   }
 
   clearStaffMasterDirty();
+  clearSettingsDirty();
 
   return {
     mergedDb: {

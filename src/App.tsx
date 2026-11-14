@@ -3,7 +3,7 @@
  * โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน (PCMC)
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { User } from 'firebase/auth';
 import confetti from 'canvas-confetti';
 import { 
@@ -25,6 +25,7 @@ import {
   syncAllWithGoogleSheet,
   syncStaffMasterToSheet,
   markStaffMasterDirty,
+  markSettingsDirty,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
   appendOTToSheet
@@ -58,11 +59,19 @@ export default function App() {
   const [db, setDb] = useState(() => loadLocalDatabase());
   const [activeTab, setActiveTab] = useState<'workload' | 'leave_ot' | 'census' | 'productivity' | 'admin'>('workload');
 
-  // Auth state
+  // Auth & Sync state
   const [user, setUser] = useState<User | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [isSettingUpSheet, setIsSettingUpSheet] = useState<boolean>(false);
   const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [localRevision, setLocalRevision] = useState<number>(0);
+
+  const dbRef = useRef(db);
+  dbRef.current = db;
+  const isSyncInFlightRef = useRef<boolean>(false);
+  const lastSyncEpochRef = useRef<number>(0);
+  const lastSyncedSheetIdRef = useRef<string>('');
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -216,20 +225,27 @@ export default function App() {
     return token;
   };
 
-  // Sync data 2-way with an existing linked Google Spreadsheet (never creates duplicates)
-  const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
-    const targetSheetId = (overrideSheetId || db.settings.spreadsheetId || '').trim();
-    if (!targetSheetId) {
-      showToast('ยังไม่มีลิงก์/ID Google Sheets กรุณาวางลิงก์ชีทหรือกดสร้าง 5 ชีทใหม่ก่อน', 'error');
-      return;
-    }
+  const formatSyncTime = () =>
+    new Date().toLocaleTimeString('th-TH', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
 
-    const token = await ensureGoogleToken();
+  // Silent background 2-way Auto-Sync (never forces login popup)
+  const performBackgroundSync = useCallback(async (_reason: 'initial' | 'interval' | 'focus' | 'edit') => {
+    if (isSyncInFlightRef.current) return;
+    const currentDb = dbRef.current;
+    const targetSheetId = (currentDb.settings.spreadsheetId || '').trim();
+    if (!targetSheetId || currentDb.settings.autoSync === false) return;
+
+    const token = await getAccessToken();
     if (!token) return;
 
+    isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
-      const result = await syncAllWithGoogleSheet(token, targetSheetId, db);
+      const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
       setDb({
         ...result.mergedDb,
         settings: {
@@ -240,6 +256,98 @@ export default function App() {
             `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
         },
       });
+      lastSyncEpochRef.current = Date.now();
+      lastSyncedSheetIdRef.current = targetSheetId;
+      setLastSyncedAt(formatSyncTime());
+    } catch (err) {
+      console.warn('Auto-sync skipped:', err);
+    } finally {
+      isSyncInFlightRef.current = false;
+      setIsSyncingSheet(false);
+    }
+  }, []);
+
+  // Auto-Sync: initial load / when user or spreadsheetId changes
+  useEffect(() => {
+    const sheetId = (db.settings.spreadsheetId || '').trim();
+    if (!sheetId || db.settings.autoSync === false) return;
+    if (lastSyncedSheetIdRef.current !== sheetId || user) {
+      const timer = setTimeout(() => {
+        performBackgroundSync('initial');
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+  }, [user, db.settings.spreadsheetId, db.settings.autoSync, performBackgroundSync]);
+
+  // Auto-Sync: periodic every 3 minutes + on window focus/visibility
+  useEffect(() => {
+    const sheetId = (db.settings.spreadsheetId || '').trim();
+    if (!sheetId || db.settings.autoSync === false) return;
+
+    const intervalId = window.setInterval(() => {
+      performBackgroundSync('interval');
+    }, 3 * 60 * 1000);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastSyncEpochRef.current > 60 * 1000) {
+        performBackgroundSync('focus');
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [db.settings.spreadsheetId, db.settings.autoSync, performBackgroundSync]);
+
+  // Auto-Sync: debounced sync after local edits (workloads, leaves, OT, staff, settings)
+  useEffect(() => {
+    if (localRevision === 0) return;
+    const sheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+    if (!sheetId || dbRef.current.settings.autoSync === false) return;
+
+    const timer = window.setTimeout(() => {
+      performBackgroundSync('edit');
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [localRevision, performBackgroundSync]);
+
+  // Manual Sync 2-way with an existing linked Google Spreadsheet (never creates duplicates)
+  const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
+    const currentDb = dbRef.current;
+    const targetSheetId = (overrideSheetId || currentDb.settings.spreadsheetId || '').trim();
+    if (!targetSheetId) {
+      showToast('ยังไม่มีลิงก์/ID Google Sheets กรุณาวางลิงก์ชีทหรือกดสร้าง 5 ชีทใหม่ก่อน', 'error');
+      return;
+    }
+
+    if (isSyncInFlightRef.current) return;
+
+    const token = await ensureGoogleToken();
+    if (!token) return;
+
+    isSyncInFlightRef.current = true;
+    setIsSyncingSheet(true);
+    try {
+      const result = await syncAllWithGoogleSheet(token, targetSheetId, dbRef.current);
+      setDb({
+        ...result.mergedDb,
+        settings: {
+          ...result.mergedDb.settings,
+          spreadsheetId: targetSheetId,
+          spreadsheetUrl:
+            result.mergedDb.settings.spreadsheetUrl ||
+            `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+        },
+      });
+      lastSyncEpochRef.current = Date.now();
+      lastSyncedSheetIdRef.current = targetSheetId;
+      setLastSyncedAt(formatSyncTime());
       showToast(
         `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
         'success'
@@ -248,6 +356,7 @@ export default function App() {
       console.error('Sync spreadsheet error:', err);
       showToast(`ซิงค์ข้อมูลไม่สำเร็จ: ${err?.message || err}`, 'error');
     } finally {
+      isSyncInFlightRef.current = false;
       setIsSyncingSheet(false);
     }
   };
@@ -385,9 +494,15 @@ export default function App() {
     // Async sync to Google Sheets if connected
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
-      appendDailyWorkloadToSheet(token, db.settings.spreadsheetId, entry);
-      newLeaveEntries.forEach(l => appendLeaveToSheet(token, db.settings.spreadsheetId!, l));
-      newOtEntries.forEach(o => appendOTToSheet(token, db.settings.spreadsheetId!, o));
+      await appendDailyWorkloadToSheet(token, db.settings.spreadsheetId, entry);
+      for (const l of newLeaveEntries) {
+        await appendLeaveToSheet(token, db.settings.spreadsheetId, l);
+      }
+      for (const o of newOtEntries) {
+        await appendOTToSheet(token, db.settings.spreadsheetId, o);
+      }
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -397,6 +512,7 @@ export default function App() {
       ...prev,
       workloads: prev.workloads.map(w => w.id === updated.id ? updated : w),
     }));
+    setLocalRevision(r => r + 1);
     showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} สำเร็จ!`, 'success');
   };
 
@@ -407,6 +523,7 @@ export default function App() {
         ...prev,
         workloads: prev.workloads.filter(w => w.id !== id),
       }));
+      setLocalRevision(r => r + 1);
       showToast('ลบรายการเรียบร้อยแล้ว', 'info');
     }
   };
@@ -421,7 +538,9 @@ export default function App() {
 
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
-      appendLeaveToSheet(token, db.settings.spreadsheetId, leave);
+      await appendLeaveToSheet(token, db.settings.spreadsheetId, leave);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -431,6 +550,7 @@ export default function App() {
       ...prev,
       leaves: prev.leaves.map(l => l.id === updated.id ? updated : l),
     }));
+    setLocalRevision(r => r + 1);
     showToast(`อัปเดตประวัติการลา ${updated.staffName} เรียบร้อยแล้ว`, 'success');
   };
 
@@ -441,6 +561,7 @@ export default function App() {
         ...prev,
         leaves: prev.leaves.filter(l => l.id !== id),
       }));
+      setLocalRevision(r => r + 1);
       showToast('ลบประวัติการลาเรียบร้อยแล้ว', 'info');
     }
   };
@@ -455,9 +576,11 @@ export default function App() {
 
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
-      records.forEach(r => {
-        appendOTToSheet(token, db.settings.spreadsheetId!, r);
-      });
+      for (const r of records) {
+        await appendOTToSheet(token, db.settings.spreadsheetId, r);
+      }
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -467,6 +590,7 @@ export default function App() {
       ...prev,
       ot: prev.ot.map(o => o.id === updated.id ? updated : o),
     }));
+    setLocalRevision(r => r + 1);
     showToast(`อัปเดตเวรนอกเวลา ${updated.staffName} เรียบร้อยแล้ว`, 'success');
   };
 
@@ -476,6 +600,7 @@ export default function App() {
       ...prev,
       ot: prev.ot.filter(o => o.id !== id),
     }));
+    setLocalRevision(r => r + 1);
     showToast('ลบรายการเวรนอกเวลาแล้ว', 'info');
   };
 
@@ -492,6 +617,8 @@ export default function App() {
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
       await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -509,6 +636,8 @@ export default function App() {
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
       await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -525,6 +654,8 @@ export default function App() {
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
       await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
@@ -548,16 +679,33 @@ export default function App() {
     const token = await getAccessToken();
     if (token && db.settings.spreadsheetId) {
       await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(formatSyncTime());
     }
   };
 
   // Handler: Save Settings
   const handleSaveSettings = (settings: SystemSettings) => {
+    markSettingsDirty();
     setDb(prev => ({
       ...prev,
       settings,
     }));
+    setLocalRevision(r => r + 1);
     showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
+  };
+
+  // Handler: Toggle Auto Sync
+  const handleToggleAutoSync = (enabled: boolean) => {
+    markSettingsDirty();
+    setDb(prev => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        autoSync: enabled,
+      },
+    }));
+    showToast(enabled ? 'เปิดใช้งาน Auto ซิงค์อัตโนมัติแล้ว' : 'ปิดโหมด Auto ซิงค์ชั่วคราว (สามารถกดปุ่มซิงค์เองได้)', 'info');
   };
 
   // Handler: Reset to clean empty production data
@@ -574,6 +722,11 @@ export default function App() {
       <Navbar
         isAdmin={isAdmin}
         onLockAdmin={handleLockAdmin}
+        hasSpreadsheet={Boolean(db.settings.spreadsheetId)}
+        isSyncingSheet={isSyncingSheet}
+        autoSyncEnabled={db.settings.autoSync !== false}
+        lastSyncedAt={lastSyncedAt}
+        onManualSync={() => handleSyncSpreadsheet()}
       />
 
       {/* Floating Toast Message */}
@@ -694,6 +847,7 @@ export default function App() {
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
             leaveTypes={leaveTypes}
+            customHolidays={db.settings.customHolidays || []}
             isAdmin={isAdmin}
             onSaveLeave={handleSaveLeave}
             onSaveBatchOT={handleSaveBatchOT}
@@ -751,6 +905,8 @@ export default function App() {
             onCopyShareLink={handleCopyShareLink}
             onUnlockAdmin={handleUnlockAdmin}
             onLockAdmin={handleLockAdmin}
+            lastSyncedAt={lastSyncedAt}
+            onToggleAutoSync={handleToggleAutoSync}
           />
         )}
       </main>

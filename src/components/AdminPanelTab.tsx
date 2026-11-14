@@ -10,9 +10,12 @@ import {
   OUT_TIME_CLINICS,
   LEAVE_TYPES,
   POSITION_LABELS,
-  formatPositionLabel
+  formatPositionLabel,
+  CustomHoliday,
+  compareStaffByPositionAndStartDate
 } from '../types';
 import { formatThaiShortDate } from '../utils/thaiDate';
+import { getHolidaysForYear } from '../utils/thaiHolidays';
 import { verifyAdminPin } from '../services/adminSecurity';
 import { 
   ShieldCheck, 
@@ -72,6 +75,8 @@ interface AdminPanelTabProps {
   onCopyShareLink: () => void;
   onUnlockAdmin?: (pin: string) => boolean;
   onLockAdmin?: () => void;
+  lastSyncedAt?: string | null;
+  onToggleAutoSync?: (enabled: boolean) => void;
 }
 
 export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
@@ -98,6 +103,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   onCopyShareLink,
   onUnlockAdmin,
   onLockAdmin,
+  lastSyncedAt = null,
+  onToggleAutoSync,
 }) => {
   // Staff search & filters
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -119,10 +126,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
   const [inlineError, setInlineError] = useState<string>('');
 
-  // Clinic & Leave Type Management state
+  // Clinic, Leave Type & Custom Holiday Management state
   const [newInClinicName, setNewInClinicName] = useState<string>('');
   const [newOutClinicName, setNewOutClinicName] = useState<string>('');
   const [newLeaveTypeName, setNewLeaveTypeName] = useState<string>('');
+  const [newHolidayDate, setNewHolidayDate] = useState<string>(todayStr);
+  const [newHolidayName, setNewHolidayName] = useState<string>('');
+  const [showBuiltInHolidays, setShowBuiltInHolidays] = useState<boolean>(false);
+  const [holidayPreviewYear, setHolidayPreviewYear] = useState<number>(new Date().getFullYear());
   const [showSheetLinkConfig, setShowSheetLinkConfig] = useState<boolean>(false);
 
   // PIN Security Gate State
@@ -196,22 +207,24 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     return Array.from(new Set([...inTimeClinics, ...outTimeClinics]));
   }, [inTimeClinics, outTimeClinics]);
 
-  // Filtered staff list (search by name, position label, or clinic — no ID)
+  // Filtered staff list (sorted strictly by Position 1→6 then Start Date ascending)
   const filteredStaff = useMemo(() => {
-    return staffList.filter(s => {
-      const q = searchQuery.toLowerCase().trim();
-      const posLabel = formatPositionLabel(s.position).toLowerCase();
-      const matchSearch = !q ||
-        s.name.toLowerCase().includes(q) ||
-        s.position.toLowerCase().includes(q) ||
-        posLabel.includes(q) ||
-        s.homeClinic.toLowerCase().includes(q);
-      const matchPos = positionFilter === 'ALL' || s.position === positionFilter;
-      const matchStat = statusFilter === 'ALL' || s.status === statusFilter;
-      const matchClinic = clinicFilter === 'ALL' || s.homeClinic === clinicFilter;
+    return staffList
+      .filter(s => {
+        const q = searchQuery.toLowerCase().trim();
+        const posLabel = formatPositionLabel(s.position).toLowerCase();
+        const matchSearch = !q ||
+          s.name.toLowerCase().includes(q) ||
+          s.position.toLowerCase().includes(q) ||
+          posLabel.includes(q) ||
+          s.homeClinic.toLowerCase().includes(q);
+        const matchPos = positionFilter === 'ALL' || s.position === positionFilter;
+        const matchStat = statusFilter === 'ALL' || s.status === statusFilter;
+        const matchClinic = clinicFilter === 'ALL' || s.homeClinic === clinicFilter;
 
-      return matchSearch && matchPos && matchStat && matchClinic;
-    });
+        return matchSearch && matchPos && matchStat && matchClinic;
+      })
+      .sort(compareStaffByPositionAndStartDate);
   }, [staffList, searchQuery, positionFilter, statusFilter, clinicFilter]);
 
   // Statistics
@@ -395,6 +408,51 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     onSaveSettings({
       ...settings,
       leaveTypes: [...LEAVE_TYPES],
+    });
+  };
+
+  // Custom Hospital Holiday Handlers
+  const customHolidays: CustomHoliday[] = useMemo(() => {
+    return [...(settings.customHolidays || [])].sort((a, b) => a.date.localeCompare(b.date));
+  }, [settings.customHolidays]);
+
+  const builtInHolidaysForPreview = useMemo(() => {
+    const map = getHolidaysForYear(holidayPreviewYear, []);
+    return Array.from(map.entries())
+      .map(([date, info]) => ({ date, name: info.name }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [holidayPreviewYear]);
+
+  const handleAddCustomHoliday = (e: React.FormEvent) => {
+    e.preventDefault();
+    const dateVal = newHolidayDate.trim();
+    const nameVal = newHolidayName.trim();
+    if (!dateVal) {
+      setInlineError('กรุณาเลือกวันที่วันหยุดพิเศษ');
+      return;
+    }
+    if (!nameVal) {
+      setInlineError('กรุณาระบุชื่อวันหยุดพิเศษ');
+      return;
+    }
+    setInlineError('');
+    const nextList = [
+      ...customHolidays.filter((h) => h.date !== dateVal),
+      { date: dateVal, name: nameVal },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+
+    onSaveSettings({
+      ...settings,
+      customHolidays: nextList,
+    });
+    setNewHolidayName('');
+  };
+
+  const handleRemoveCustomHoliday = (dateVal: string) => {
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      customHolidays: customHolidays.filter((h) => h.date !== dateVal),
     });
   };
 
@@ -593,6 +651,32 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
                   <span>{isSyncingSheet ? 'กำลังซิงค์ข้อมูล...' : 'ซิงค์ข้อมูลกับ Google Sheet'}</span>
                 </button>
+                {onToggleAutoSync && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleAutoSync(!(settings.autoSync !== false))}
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors cursor-pointer ${
+                      settings.autoSync !== false
+                        ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/50 hover:bg-emerald-500/35'
+                        : 'bg-black/25 text-slate-300 border-white/15 hover:bg-black/35'
+                    }`}
+                    title="เปิด/ปิด การซิงค์ข้อมูลกับ Google Sheet อัตโนมัติ"
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        isSyncingSheet
+                          ? 'bg-amber-300 animate-ping'
+                          : settings.autoSync !== false
+                          ? 'bg-emerald-400'
+                          : 'bg-slate-400'
+                      }`}
+                    />
+                    <span>{settings.autoSync !== false ? 'Auto ซิงค์: เปิด' : 'Auto ซิงค์: ปิด'}</span>
+                    {lastSyncedAt && (
+                      <span className="text-[10px] text-emerald-200/80">({lastSyncedAt})</span>
+                    )}
+                  </button>
+                )}
               </div>
             ) : (
               <button
@@ -1295,6 +1379,135 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* SECTION 3.6: Custom Hospital Holidays Management */}
+      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3">
+          <div className="flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-rose-600" />
+            <div>
+              <h3 className="text-sm font-bold text-gray-900">
+                จัดการวันหยุดพิเศษที่โรงพยาบาลกำหนดเอง (สำหรับคำนวณวันลาราชการ)
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                ระบบนับวันลาเฉพาะวันราชการ (ตัดเสาร์-อาทิตย์ และวันหยุดนักขัตฤกษ์ไทยรวมวันหยุดชดเชยอัตโนมัติ) พร้อมหักวันหยุดพิเศษที่กำหนดที่นี่
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowBuiltInHolidays((prev) => !prev)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 rounded-lg border border-rose-200 transition-colors cursor-pointer"
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            <span>{showBuiltInHolidays ? 'ซ่อนปฏิทินวันหยุดไทยในระบบ' : 'ดูปฏิทินวันหยุดนักขัตฤกษ์ไทย'}</span>
+          </button>
+        </div>
+
+        <div className="bg-rose-50/40 border border-rose-200/80 rounded-xl p-4 space-y-3">
+          <form onSubmit={handleAddCustomHoliday} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+            <div className="sm:col-span-3">
+              <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                วันที่หยุดพิเศษ <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                value={newHolidayDate}
+                onChange={(e) => setNewHolidayDate(e.target.value)}
+                required
+                className="w-full text-xs rounded-lg border border-rose-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200"
+              />
+            </div>
+            <div className="sm:col-span-7">
+              <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                ชื่อวันหยุดพิเศษที่โรงพยาบาลกำหนด <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={newHolidayName}
+                onChange={(e) => setNewHolidayName(e.target.value)}
+                placeholder="เช่น วันหยุดราชการพิเศษตามมติ ครม., วันหยุดสถาปนาโรงพยาบาล"
+                className="w-full text-xs rounded-lg border border-rose-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <button
+                type="submit"
+                className="w-full inline-flex items-center justify-center gap-1 px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>เพิ่มวันหยุด</span>
+              </button>
+            </div>
+          </form>
+
+          {customHolidays.length === 0 ? (
+            <div className="text-xs text-gray-500 bg-white/80 border border-dashed border-rose-200 rounded-lg p-3 text-center">
+              ยังไม่มีวันหยุดพิเศษที่โรงพยาบาลกำหนดเพิ่มเติม (ระบบยังตัดเสาร์-อาทิตย์ และวันหยุดนักขัตฤกษ์ไทยให้อัตโนมัติ)
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+              {customHolidays.map((h) => (
+                <div
+                  key={h.date}
+                  className="flex items-center justify-between gap-2 px-3 py-2 bg-white border border-rose-200 rounded-lg text-xs shadow-2xs"
+                >
+                  <div className="min-w-0">
+                    <div className="font-bold text-rose-900">{formatThaiShortDate(h.date)}</div>
+                    <div className="text-[11px] text-gray-700 truncate" title={h.name}>
+                      {h.name}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveCustomHoliday(h.date)}
+                    className="text-gray-400 hover:text-red-600 p-1 rounded transition-colors cursor-pointer shrink-0"
+                    title={`ลบวันหยุด ${h.name}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showBuiltInHolidays && (
+            <div className="mt-3 pt-3 border-t border-rose-200/70 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-rose-950">
+                  วันหยุดนักขัตฤกษ์และวันหยุดชดเชยตามปฏิทินไทยในระบบ
+                </span>
+                <select
+                  value={holidayPreviewYear}
+                  onChange={(e) => setHolidayPreviewYear(Number(e.target.value))}
+                  className="text-xs rounded-lg border border-rose-200 bg-white px-2.5 py-1 font-semibold text-rose-900"
+                >
+                  {[2024, 2025, 2026, 2027, 2028].map((y) => (
+                    <option key={y} value={y}>
+                      ปี พ.ศ. {y + 543} ({y})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-56 overflow-y-auto pr-1">
+                {builtInHolidaysForPreview.map((item) => (
+                  <div
+                    key={item.date}
+                    className="px-2.5 py-1.5 bg-white/90 border border-slate-200 rounded-lg text-[11px] flex items-center justify-between gap-2"
+                  >
+                    <span className="font-semibold text-slate-800 shrink-0">
+                      {formatThaiShortDate(item.date)}
+                    </span>
+                    <span className="text-gray-600 truncate" title={item.name}>
+                      {item.name}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

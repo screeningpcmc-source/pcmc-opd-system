@@ -36,7 +36,9 @@ export const INITIAL_SETTINGS: SystemSettings = {
     'คลินิกหัวใจ',
     'หน่วยคัดกรอง'
   ],
-  leaveTypes: [...LEAVE_TYPES]
+  leaveTypes: [...LEAVE_TYPES],
+  customHolidays: [],
+  autoSync: true
 };
 
 // Production mode: start with empty data ready for real hospital records

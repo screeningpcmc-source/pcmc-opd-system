@@ -14,6 +14,8 @@ import {
   ALL_POSITIONS,
   POSITION_LABELS,
   formatPositionLabel,
+  CustomHoliday,
+  compareStaffByPositionAndStartDate,
 } from '../types';
 import {
   CalendarClock,
@@ -41,7 +43,11 @@ import {
   ImageDown,
   Printer,
 } from 'lucide-react';
-import { formatThaiLeaveRange, splitThaiName } from '../utils/thaiDate';
+import { formatThaiLeaveRange, formatThaiShortDate, splitThaiName } from '../utils/thaiDate';
+import {
+  calculateGovernmentLeaveStats,
+  countGovernmentWorkdaysInRange,
+} from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
 
 interface LeaveAndOTTabProps {
@@ -52,6 +58,7 @@ interface LeaveAndOTTabProps {
   inTimeClinics?: string[];
   outTimeClinics?: string[];
   leaveTypes?: string[];
+  customHolidays?: CustomHoliday[];
   isAdmin?: boolean;
   onSaveLeave: (leave: LeaveRecord) => void;
   onSaveBatchOT: (records: OTAttendance[]) => void;
@@ -68,22 +75,6 @@ interface ExternalOtDraft {
   affiliation: string;
 }
 
-function countWeekdaysInRange(startIso: string, endIso: string): number {
-  const [sy, sm, sd] = startIso.split('-').map(Number);
-  const [ey, em, ed] = endIso.split('-').map(Number);
-  if (!sy || !sm || !sd || !ey || !em || !ed) return 0;
-  const cur = new Date(sy, sm - 1, sd);
-  const end = new Date(ey, em - 1, ed);
-  if (cur > end) return 0;
-  let count = 0;
-  while (cur <= end) {
-    const day = cur.getDay();
-    if (day !== 0 && day !== 6) count++;
-    cur.setDate(cur.getDate() + 1);
-  }
-  return count;
-}
-
 export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   staffList,
   leaves,
@@ -92,6 +83,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
   leaveTypes = [...LEAVE_TYPES],
+  customHolidays = [],
   isAdmin = false,
   onSaveLeave,
   onSaveBatchOT,
@@ -116,7 +108,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   }, []);
 
   const activeStaff = useMemo(() => {
-    return staffList.filter((s) => s.status === 'Active');
+    return staffList
+      .filter((s) => s.status === 'Active')
+      .sort(compareStaffByPositionAndStartDate);
   }, [staffList]);
 
   const allClinics = useMemo(() => {
@@ -186,27 +180,27 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     return filteredLeaves.reduce((sum, l) => sum + (Number(l.days) || 0), 0);
   }, [filteredLeaves]);
 
-  const calculateLeaveDays = (start: string, end: string) => {
-    try {
-      const d1 = new Date(start);
-      const d2 = new Date(end);
-      const diffTime = Math.abs(d2.getTime() - d1.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-      setLeaveDays(diffDays > 0 ? diffDays : 1);
-    } catch {
-      setLeaveDays(1);
-    }
-  };
+  const leaveDayStats = useMemo(() => {
+    return calculateGovernmentLeaveStats(leaveStartDate, leaveEndDate, customHolidays);
+  }, [leaveStartDate, leaveEndDate, customHolidays]);
+
+  useEffect(() => {
+    setLeaveDays(leaveDayStats.workDays);
+  }, [leaveDayStats.workDays]);
 
   const handleStartDateChange = (d: string) => {
     setLeaveStartDate(d);
     if (d > leaveEndDate) setLeaveEndDate(d);
-    calculateLeaveDays(d, leaveEndDate >= d ? leaveEndDate : d);
+    setLeaveFormError('');
   };
 
   const handleEndDateChange = (d: string) => {
-    setLeaveEndDate(d);
-    calculateLeaveDays(leaveStartDate, d);
+    if (d < leaveStartDate) {
+      setLeaveEndDate(leaveStartDate);
+    } else {
+      setLeaveEndDate(d);
+    }
+    setLeaveFormError('');
   };
 
   // --- Sub-Tab 2: OT Entry State (Multi-Select + External Substitute) ---
@@ -272,6 +266,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       setLeaveFormError('กรุณาพิมพ์ค้นหาและเลือกเจ้าหน้าที่จากรายการ');
       return;
     }
+    const numericDays = Number(leaveDays) || 0;
+    if (numericDays <= 0) {
+      setLeaveFormError('ช่วงวันที่เลือกตรงกับวันหยุดราชการทั้งหมด (0 วัน) กรุณาเลือกวันทำการ หรือระบุจำนวนวันลาด้วยตนเอง');
+      return;
+    }
     setLeaveFormError('');
 
     const newLeave: LeaveRecord = {
@@ -282,7 +281,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       position: staff.position,
       clinic: staff.homeClinic,
       leaveType,
-      days: Number(leaveDays) || 1,
+      days: numericDays,
       note: leaveNote,
     };
 
@@ -392,24 +391,26 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const fyStart = `${targetCeStartYear}-10-01`;
     const fyEnd = `${targetCeEndYear}-09-30`;
 
-    return staffList.filter((s) => {
-      if (s.status === 'Active') {
-        if (s.startDate && s.startDate > fyEnd) return false;
-        return true;
-      }
-      if (s.startDate || s.endDate) {
-        const effStart = s.startDate || '0000-01-01';
-        const effEnd = s.endDate || '9999-12-31';
-        if (effStart <= fyEnd && effEnd >= fyStart) return true;
-      }
-      const hasOtInFy = otRecords.some(
-        (o) => o.staffName === s.name && o.date >= fyStart && o.date <= fyEnd
-      );
-      const hasLeaveInFy = leaves.some(
-        (l) => l.staffName === s.name && l.endDate >= fyStart && l.startDate <= fyEnd
-      );
-      return hasOtInFy || hasLeaveInFy;
-    });
+    return staffList
+      .filter((s) => {
+        if (s.status === 'Active') {
+          if (s.startDate && s.startDate > fyEnd) return false;
+          return true;
+        }
+        if (s.startDate || s.endDate) {
+          const effStart = s.startDate || '0000-01-01';
+          const effEnd = s.endDate || '9999-12-31';
+          if (effStart <= fyEnd && effEnd >= fyStart) return true;
+        }
+        const hasOtInFy = otRecords.some(
+          (o) => o.staffName === s.name && o.date >= fyStart && o.date <= fyEnd
+        );
+        const hasLeaveInFy = leaves.some(
+          (l) => l.staffName === s.name && l.endDate >= fyStart && l.startDate <= fyEnd
+        );
+        return hasOtInFy || hasLeaveInFy;
+      })
+      .sort(compareStaffByPositionAndStartDate);
   }, [staffList, otRecords, leaves, selectedFiscalYear]);
 
   const fiscalSummaryData = useMemo(() => {
@@ -497,7 +498,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             const isFullMonth = effectiveStart === monthStart && effectiveEnd === monthEnd;
             const baseWorkDays = isFullMonth
               ? 20
-              : Math.min(20, countWeekdaysInRange(effectiveStart, effectiveEnd));
+              : Math.min(20, countGovernmentWorkdaysInRange(effectiveStart, effectiveEnd, customHolidays));
             inTimeDays = Math.max(0, baseWorkDays - leaveDays);
           }
         }
@@ -529,7 +530,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         grandTotal,
       };
     });
-  }, [summaryEligibleStaff, otRecords, leaves, workloads, selectedFiscalYear, fiscalMonths]);
+  }, [summaryEligibleStaff, otRecords, leaves, workloads, selectedFiscalYear, fiscalMonths, customHolidays]);
 
   const filteredSummaryData = useMemo(() => {
     return fiscalSummaryData
@@ -551,30 +552,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         }
         return true;
       })
-      .sort((a, b) => {
-        if (shiftFilter === 'IN_TIME') {
-          if (monthFilter !== 'ALL') {
-            return (
-              (b.monthDetails[monthFilter]?.inTime || 0) -
-              (a.monthDetails[monthFilter]?.inTime || 0)
-            );
-          }
-          return b.totalInTime - a.totalInTime;
-        }
-        if (shiftFilter === 'OT') {
-          if (monthFilter !== 'ALL') {
-            return (b.monthDetails[monthFilter]?.ot || 0) - (a.monthDetails[monthFilter]?.ot || 0);
-          }
-          return b.totalOT - a.totalOT;
-        }
-        if (monthFilter !== 'ALL') {
-          return (
-            (b.monthDetails[monthFilter]?.total || 0) - (a.monthDetails[monthFilter]?.total || 0)
-          );
-        }
-        return b.grandTotal - a.grandTotal;
-      });
-  }, [fiscalSummaryData, clinicFilter, staffFilter, summarySearchQuery, shiftFilter, monthFilter]);
+      .sort((a, b) => compareStaffByPositionAndStartDate(a.staff, b.staff));
+  }, [fiscalSummaryData, clinicFilter, staffFilter, summarySearchQuery]);
 
   const summaryKpis = useMemo(() => {
     if (monthFilter === 'ALL') {
@@ -758,40 +737,48 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     });
 
     // Build roster combining activeStaff + any unlinked leave staff in the period
-    const rosterMap = new Map<string, { id: string; name: string; position: StaffPosition; clinic: string }>();
+    const rosterMap = new Map<
+      string,
+      { id: string; name: string; position: StaffPosition; clinic: string; startDate?: string }
+    >();
     activeStaff.forEach((s) => {
       rosterMap.set(s.name, {
         id: s.staffId,
         name: s.name,
         position: s.position,
         clinic: s.homeClinic,
+        startDate: s.startDate,
       });
     });
     periodLeaves.forEach((lv) => {
       if (!rosterMap.has(lv.staffName)) {
+        const matchedStaff = staffList.find((s) => s.name === lv.staffName);
         rosterMap.set(lv.staffName, {
-          id: `UNLINKED-${lv.staffName}`,
+          id: matchedStaff?.staffId || `UNLINKED-${lv.staffName}`,
           name: lv.staffName,
           position: lv.position,
           clinic: lv.clinic || '-',
+          startDate: matchedStaff?.startDate,
         });
       }
     });
 
     const q = summarySearchQuery.toLowerCase().trim();
-    const filteredRoster = Array.from(rosterMap.values()).filter((person) => {
-      if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
-      if (staffFilter !== 'ALL' && person.id !== staffFilter) return false;
-      if (q) {
-        const match =
-          person.name.toLowerCase().includes(q) ||
-          person.clinic.toLowerCase().includes(q) ||
-          person.position.toLowerCase().includes(q) ||
-          formatPositionLabel(person.position).toLowerCase().includes(q);
-        if (!match) return false;
-      }
-      return true;
-    });
+    const filteredRoster = Array.from(rosterMap.values())
+      .filter((person) => {
+        if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
+        if (staffFilter !== 'ALL' && person.id !== staffFilter) return false;
+        if (q) {
+          const match =
+            person.name.toLowerCase().includes(q) ||
+            person.clinic.toLowerCase().includes(q) ||
+            person.position.toLowerCase().includes(q) ||
+            formatPositionLabel(person.position).toLowerCase().includes(q);
+          if (!match) return false;
+        }
+        return true;
+      })
+      .sort(compareStaffByPositionAndStartDate);
 
     const rows = filteredRoster
       .map((person) => {
@@ -843,6 +830,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     monthFilter,
     leaves,
     activeStaff,
+    staffList,
     clinicFilter,
     staffFilter,
     summarySearchQuery,
@@ -1122,16 +1110,51 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  จำนวนวันลา (คำนวณอัตโนมัติ)
+                  จำนวนวันลา (นับเฉพาะวันราชการ - คำนวณอัตโนมัติ)
                 </label>
                 <input
                   type="number"
-                  min="0.5"
+                  min="0"
                   step="0.5"
                   value={leaveDays}
-                  onChange={(e) => setLeaveDays(Number(e.target.value) || 1)}
+                  onChange={(e) => setLeaveDays(Math.max(0, Number(e.target.value) || 0))}
                   className="w-full text-sm font-bold text-center rounded-lg border-gray-300 bg-amber-50/50 py-1.5 px-3 border text-amber-900"
                 />
+                <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/80 p-2.5 text-[11px] space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-1 text-slate-700">
+                    <span>
+                      รวมปฏิทิน <strong>{leaveDayStats.totalCalendarDays}</strong> วัน →{' '}
+                      <strong className="text-emerald-800">
+                        วันราชการ {leaveDayStats.workDays} วัน
+                      </strong>
+                    </span>
+                    {leaveDayStats.weekendCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded bg-slate-200/80 text-slate-700 font-medium">
+                        ตัดเสาร์-อาทิตย์ {leaveDayStats.weekendCount} วัน
+                      </span>
+                    )}
+                  </div>
+                  {leaveDayStats.holidaysInRange.length > 0 && (
+                    <div className="text-rose-800 space-y-0.5 pt-1 border-t border-slate-200/80">
+                      <div className="font-semibold">
+                        ตัดวันหยุดนักขัตฤกษ์ / วันหยุด รพ. ({leaveDayStats.holidaysInRange.length} วัน):
+                      </div>
+                      <ul className="list-disc list-inside space-y-0.5 text-[10px]">
+                        {leaveDayStats.holidaysInRange.map((h) => (
+                          <li key={h.date}>
+                            {formatThaiShortDate(h.date)} — {h.name}
+                            {h.isCustom ? ' (วันหยุดพิเศษ รพ.)' : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {leaveDayStats.workDays === 0 && (
+                    <div className="text-amber-800 font-medium pt-0.5">
+                      * ช่วงวันที่เลือกตรงกับวันหยุดทั้งหมด (สามารถแก้ไขเป็น 0.5 หรือระบุจำนวนวันเองได้)
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -2482,7 +2505,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   <input
                     type="date"
                     value={editingLeave.startDate}
-                    onChange={(e) => setEditingLeave({ ...editingLeave, startDate: e.target.value })}
+                    onChange={(e) => {
+                      const nextStart = e.target.value;
+                      const nextEnd = editingLeave.endDate >= nextStart ? editingLeave.endDate : nextStart;
+                      const autoWorkDays = countGovernmentWorkdaysInRange(nextStart, nextEnd, customHolidays);
+                      setEditingLeave({
+                        ...editingLeave,
+                        startDate: nextStart,
+                        endDate: nextEnd,
+                        days: autoWorkDays,
+                      });
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                   />
                 </div>
@@ -2491,7 +2524,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   <input
                     type="date"
                     value={editingLeave.endDate}
-                    onChange={(e) => setEditingLeave({ ...editingLeave, endDate: e.target.value })}
+                    onChange={(e) => {
+                      const nextEnd = e.target.value >= editingLeave.startDate ? e.target.value : editingLeave.startDate;
+                      const autoWorkDays = countGovernmentWorkdaysInRange(editingLeave.startDate, nextEnd, customHolidays);
+                      setEditingLeave({
+                        ...editingLeave,
+                        endDate: nextEnd,
+                        days: autoWorkDays,
+                      });
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
                   />
                 </div>
