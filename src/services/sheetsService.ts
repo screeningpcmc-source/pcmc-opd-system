@@ -260,6 +260,7 @@ export const loadLocalDatabase = (): AppDatabase => {
             ? parsed.settings.primaryAdminOwner.trim()
             : INITIAL_SETTINGS.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER,
         additionalAdminPins: normalizeAdditionalAdminPins(parsed.settings?.additionalAdminPins),
+        gasUrl: typeof parsed.settings?.gasUrl === 'string' ? parsed.settings.gasUrl.trim() : '',
         autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
 
@@ -448,6 +449,7 @@ export const createGoogleSpreadsheet = async (
     ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
     ['Primary_Admin_Owner', settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
     ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
+    ['Gas_Web_App_URL', settings.gasUrl || ''],
   ];
 
   const batchUpdateValues = {
@@ -898,6 +900,9 @@ export const syncAllWithGoogleSheet = async (
     additionalAdminPins: settingsDirty
       ? normalizeAdditionalAdminPins(db.settings.additionalAdminPins)
       : parsedRemoteAdminPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
+    gasUrl: settingsDirty
+      ? db.settings.gasUrl || ''
+      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -1068,7 +1073,7 @@ export const syncAllWithGoogleSheet = async (
   }
 
   writeData.push({
-    range: 'Settings!A1:B13',
+    range: 'Settings!A1:B14',
     values: [
       ['Key', 'Value'],
       ['NHPPD', finalSettings.nhppd.toString()],
@@ -1083,6 +1088,7 @@ export const syncAllWithGoogleSheet = async (
       ['Custom_Holidays', JSON.stringify(finalSettings.customHolidays || [])],
       ['Primary_Admin_Owner', finalSettings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
       ['Additional_Admin_Pins', JSON.stringify(finalSettings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
+      ['Gas_Web_App_URL', finalSettings.gasUrl || ''],
     ],
   });
 
@@ -1376,6 +1382,376 @@ export const appendAuditLogToSheet = async (
     return res.ok;
   } catch (err) {
     console.error('Failed to append audit log to sheet:', err);
+    return false;
+  }
+};
+
+/**
+ * Grants anyone-with-link READ-ONLY permission on the spreadsheet when Admin shares the link,
+ * allowing shared OPD staff to view staff master & schedules automatically without login.
+ */
+export const ensureSheetAnyoneReaderPermission = async (
+  accessToken: string,
+  spreadsheetId: string
+): Promise<boolean> => {
+  if (!accessToken || !spreadsheetId) return false;
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(spreadsheetId)}/permissions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          role: 'reader',
+          type: 'anyone',
+        }),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+};
+
+function formatGvizCell(cell: any): string {
+  if (!cell || cell.v === null || cell.v === undefined) return '';
+  if (typeof cell.v === 'string') {
+    const dateMatch = cell.v.match(/^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)/);
+    if (dateMatch) {
+      const y = Number(dateMatch[1]);
+      const m = Number(dateMatch[2]) + 1;
+      const d = Number(dateMatch[3]);
+      if (dateMatch[4] !== undefined && y < 1900) {
+        return String(cell.f || cell.v);
+      }
+      return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+    return cell.v;
+  }
+  if (typeof cell.f === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cell.f.trim())) {
+    return cell.f.trim();
+  }
+  return String(cell.v);
+}
+
+async function fetchGvizSheetRows(spreadsheetId: string, sheetName: string): Promise<string[][] | null> {
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(
+      spreadsheetId
+    )}/gviz/tq?tqx=out:json&headers=1&sheet=${encodeURIComponent(sheetName)}`;
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text || text.trim().startsWith('<') || !text.includes('setResponse(')) {
+      return null;
+    }
+    const startIdx = text.indexOf('{');
+    const endIdx = text.lastIndexOf('}');
+    if (startIdx < 0 || endIdx <= startIdx) return null;
+    const parsed = JSON.parse(text.slice(startIdx, endIdx + 1));
+    if (parsed.status === 'error' || !parsed.table) return null;
+    const rows: any[] = Array.isArray(parsed.table.rows) ? parsed.table.rows : [];
+    return rows.map((row) =>
+      (Array.isArray(row.c) ? row.c : []).map((cell: any) => formatGvizCell(cell))
+    );
+  } catch {
+    return null;
+  }
+}
+
+function mergeRemoteDataRows(
+  params: {
+    staffRows: string[][];
+    workloadRows: string[][];
+    leaveRows: string[][];
+    otRows: string[][];
+    settingsRows: string[][];
+    auditRows: string[][];
+  },
+  db: AppDatabase
+): AppDatabase {
+  const sheetStaff: StaffMember[] = params.staffRows
+    .filter((r) => (r[1] || '').trim().length > 0)
+    .map((r, idx) => {
+      const rawPos = (r[2] || 'RN').trim();
+      const pos = (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition;
+      const rawStatus = (r[4] || 'Active').trim();
+      const status: StaffStatus =
+        rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
+      return {
+        staffId: (r[0] || `STF-GS-${idx + 1}`).trim(),
+        name: (r[1] || '').trim(),
+        position: pos,
+        homeClinic: (r[3] || '').trim(),
+        status,
+        startDate: (r[5] || '').trim() || undefined,
+        endDate: (r[6] || '').trim() || undefined,
+      };
+    });
+
+  const finalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
+
+  const sheetWorkloads: DailyWorkload[] = params.workloadRows
+    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r, idx) => {
+      const adultPt = Number(r[4] || 0);
+      const childPt = Number(r[5] || 0);
+      const totalPt = Math.max(Number(r[3] || 0), adultPt + childPt);
+      return {
+        id: `REC-GS-${Date.now()}-${idx}`,
+        date: String(r[0] || '').trim(),
+        shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+        clinic: String(r[2] || '').trim(),
+        totalPt,
+        adultPt,
+        childPt,
+        admit: Number(r[6] || 0),
+        hn: Number(r[7] || 0),
+        rn: Number(r[8] || 0),
+        pn: Number(r[9] || 0),
+        na: Number(r[10] || 0),
+        clerk: Number(r[11] || 0),
+        serviceWorker: Number(r[12] || 0),
+        note: String(r[13] || '').trim(),
+        reporter: String(r[14] || '').trim(),
+      };
+    });
+
+  const mergedWorkloadsMap = new Map<string, DailyWorkload>();
+  [...db.workloads, ...sheetWorkloads].forEach((w) => {
+    const k = workloadKey(w);
+    if (!mergedWorkloadsMap.has(k)) {
+      mergedWorkloadsMap.set(k, { ...w, totalPt: getEffectiveTotalPt(w) });
+    }
+  });
+  const mergedWorkloads = Array.from(mergedWorkloadsMap.values()).sort((a, b) =>
+    b.date.localeCompare(a.date)
+  );
+
+  const sheetLeaves: LeaveRecord[] = params.leaveRows
+    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r, idx) => {
+      const rawPos = (r[3] || 'RN').trim();
+      return {
+        id: `LV-GS-${Date.now()}-${idx}`,
+        startDate: String(r[0] || '').trim(),
+        endDate: String(r[1] || r[0] || '').trim(),
+        staffName: String(r[2] || '').trim(),
+        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        clinic: String(r[4] || '').trim(),
+        leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
+        days: Number(r[6] || 1),
+        note: String(r[7] || '').trim(),
+      };
+    });
+
+  const mergedLeavesMap = new Map<string, LeaveRecord>();
+  [...db.leaves, ...sheetLeaves].forEach((l) => {
+    const k = leaveKey(l);
+    if (!mergedLeavesMap.has(k)) mergedLeavesMap.set(k, l);
+  });
+  const mergedLeaves = Array.from(mergedLeavesMap.values()).sort((a, b) =>
+    b.startDate.localeCompare(a.startDate)
+  );
+
+  const sheetOt: OTAttendance[] = params.otRows
+    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r, idx) => {
+      const rawPos = (r[3] || 'RN').trim();
+      return {
+        id: `OT-GS-${Date.now()}-${idx}`,
+        date: String(r[0] || '').trim(),
+        shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
+        staffName: String(r[2] || '').trim(),
+        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        homeClinic: String(r[4] || '').trim(),
+        workClinic: String(r[5] || '').trim(),
+      };
+    });
+
+  const mergedOtMap = new Map<string, OTAttendance>();
+  [...db.ot, ...sheetOt].forEach((o) => {
+    const k = otKey(o);
+    if (!mergedOtMap.has(k)) mergedOtMap.set(k, o);
+  });
+  const mergedOt = Array.from(mergedOtMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+
+  const sheetAuditLogs: AuditLogEntry[] = params.auditRows
+    .filter((r) => (r[0] || '').trim() && (r[1] || '').trim())
+    .map((r, idx) => ({
+      id: `AUD-GS-${Date.now()}-${idx}`,
+      timestamp: String(r[0] || '').trim(),
+      action: String(r[1] || 'แก้ไขวันลา').trim() as AuditLogEntry['action'],
+      targetName: String(r[2] || '').trim(),
+      summary: String(r[3] || '').trim(),
+      reason: String(r[4] || '').trim(),
+      editedBy: String(r[5] || '').trim() || undefined,
+    }));
+
+  const mergedAuditMap = new Map<string, AuditLogEntry>();
+  [...(db.auditLogs || []), ...sheetAuditLogs].forEach((a) => {
+    const k = auditLogKey(a);
+    if (!mergedAuditMap.has(k)) mergedAuditMap.set(k, a);
+  });
+  const mergedAuditLogs = Array.from(mergedAuditMap.values()).sort((a, b) =>
+    b.timestamp.localeCompare(a.timestamp)
+  );
+
+  const settingsMap: Record<string, string> = {};
+  params.settingsRows.forEach((r) => {
+    if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
+  });
+
+  const parsedHolidays = (() => {
+    try {
+      const raw = settingsMap['Custom_Holidays'];
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (Array.isArray(p)) return p;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  })();
+
+  const parsedPins = (() => {
+    try {
+      const raw = settingsMap['Additional_Admin_Pins'];
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (Array.isArray(p)) return normalizeAdditionalAdminPins(p);
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  })();
+
+  const finalSettings: SystemSettings = {
+    ...db.settings,
+    nhppd: Number(settingsMap['NHPPD']) || db.settings.nhppd || 0.4,
+    screeningNhppd: Number(settingsMap['Screening_NHPPD']) || db.settings.screeningNhppd || 0.1,
+    stdHr: Number(settingsMap['Std_Hr']) || db.settings.stdHr || 7,
+    annualHr: Number(settingsMap['Annual_Hr']) || db.settings.annualHr || 2080,
+    workDays: Number(settingsMap['Work_Days']) || db.settings.workDays || 245,
+    inTimeClinics: settingsMap['In_Time_Clinics']
+      ? settingsMap['In_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+      : db.settings.inTimeClinics,
+    outTimeClinics: settingsMap['Out_Time_Clinics']
+      ? settingsMap['Out_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+      : db.settings.outTimeClinics,
+    leaveTypes: settingsMap['Leave_Types']
+      ? settingsMap['Leave_Types'].split(',').map((s) => s.trim()).filter(Boolean)
+      : db.settings.leaveTypes,
+    customHolidays: parsedHolidays || db.settings.customHolidays || [],
+    primaryAdminOwner:
+      settingsMap['Primary_Admin_Owner'] ||
+      db.settings.primaryAdminOwner ||
+      DEFAULT_PRIMARY_ADMIN_OWNER,
+    additionalAdminPins: parsedPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
+    gasUrl: db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
+  };
+
+  return {
+    staff: finalStaff,
+    workloads: mergedWorkloads,
+    leaves: mergedLeaves,
+    ot: mergedOt,
+    auditLogs: mergedAuditLogs,
+    settings: finalSettings,
+  };
+}
+
+/**
+ * Reads all tabs from a shared Google Sheet without OAuth (via GViz public JSON feed).
+ * Works whenever the Sheet allows "Anyone with the link" to view.
+ */
+export const readPublicGoogleSheet = async (
+  spreadsheetId: string,
+  db: AppDatabase
+): Promise<{ accessible: boolean; mergedDb: AppDatabase }> => {
+  const [staffRows, workloadRows, leaveRows, otRows, settingsRows, auditRows] = await Promise.all([
+    fetchGvizSheetRows(spreadsheetId, 'Staff_Master'),
+    fetchGvizSheetRows(spreadsheetId, 'Daily_Workload'),
+    fetchGvizSheetRows(spreadsheetId, 'Leave_Records'),
+    fetchGvizSheetRows(spreadsheetId, 'OT_Attendance'),
+    fetchGvizSheetRows(spreadsheetId, 'Settings'),
+    fetchGvizSheetRows(spreadsheetId, 'Audit_Logs'),
+  ]);
+
+  if (!staffRows && !settingsRows && !workloadRows && !leaveRows && !otRows) {
+    return { accessible: false, mergedDb: db };
+  }
+
+  const mergedDb = mergeRemoteDataRows(
+    {
+      staffRows: staffRows || [],
+      workloadRows: workloadRows || [],
+      leaveRows: leaveRows || [],
+      otRows: otRows || [],
+      settingsRows: settingsRows || [],
+      auditRows: auditRows || [],
+    },
+    db
+  );
+
+  return { accessible: true, mergedDb };
+};
+
+/**
+ * Reads all tabs via an Apps Script Web App URL (zero Google login needed).
+ */
+export const readViaAppsScript = async (
+  gasUrl: string,
+  db: AppDatabase
+): Promise<{ accessible: boolean; mergedDb: AppDatabase }> => {
+  try {
+    const sep = gasUrl.includes('?') ? '&' : '?';
+    const res = await fetch(`${gasUrl}${sep}action=readAll`, { method: 'GET' });
+    if (!res.ok) return { accessible: false, mergedDb: db };
+    const data = await res.json();
+    if (!data || data.success === false) return { accessible: false, mergedDb: db };
+
+    const mergedDb = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      db
+    );
+    return { accessible: true, mergedDb };
+  } catch {
+    return { accessible: false, mergedDb: db };
+  }
+};
+
+/**
+ * Appends new data-entry records ONLY (no edit/delete) via Apps Script Web App URL.
+ */
+export const appendViaAppsScript = async (
+  gasUrl: string,
+  action: 'appendWorkload' | 'appendLeave' | 'appendOT',
+  payload: unknown
+): Promise<boolean> => {
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action, payload }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.success);
+  } catch (err) {
+    console.error(`Failed to ${action} via Apps Script:`, err);
     return false;
   }
 };

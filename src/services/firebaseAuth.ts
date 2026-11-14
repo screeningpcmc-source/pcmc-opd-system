@@ -40,12 +40,6 @@ if (isFirebaseConfigured) {
   });
 }
 
-const provider = new GoogleAuthProvider();
-provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-provider.addScope('https://www.googleapis.com/auth/drive.file');
-provider.addScope('https://www.googleapis.com/auth/forms.body');
-provider.setCustomParameters({ prompt: 'select_account' });
-
 let cachedAccessToken: string | null = null;
 
 function saveAccessTokenToStorage(token: string) {
@@ -113,7 +107,7 @@ export const initAuth = (
   });
 };
 
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
+export const googleSignIn = async (loginHint?: string): Promise<{ user: User; accessToken: string } | null> => {
   if (!auth) {
     throw new Error(
       'ยังไม่ได้ตั้งค่า Firebase Credentials (VITE_FIREBASE_*) กรุณากำหนดใน GitHub Secrets แล้วสั่ง Re-run Deploy หรือตั้งค่าใน .env.local'
@@ -122,7 +116,16 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 
   try {
     await setPersistence(auth, browserLocalPersistence);
-    const result = await signInWithPopup(auth, provider);
+    const signInProvider = new GoogleAuthProvider();
+    signInProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
+    signInProvider.addScope('https://www.googleapis.com/auth/drive.file');
+    signInProvider.addScope('https://www.googleapis.com/auth/forms.body');
+    if (loginHint) {
+      signInProvider.setCustomParameters({ login_hint: loginHint });
+    } else {
+      signInProvider.setCustomParameters({ prompt: 'select_account' });
+    }
+    const result = await signInWithPopup(auth, signInProvider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
       throw new Error('ไม่ได้รับ Access Token จาก Google Auth');

@@ -11,7 +11,8 @@ var SHEET_NAMES = {
   WORKLOAD: 'Daily_Workload',
   LEAVE: 'Leave_Records',
   OT: 'OT_Attendance',
-  SETTINGS: 'Settings'
+  SETTINGS: 'Settings',
+  AUDIT: 'Audit_Logs'
 };
 
 var DEFAULT_PIN_SHA256 = '7ec7bbd3677bee60f1e0c58b2967299b9985afad73acfde38966d76f30cc4f88';
@@ -64,14 +65,210 @@ var DEFAULT_OUT_TIME_CLINICS = [
 ];
 
 /**
- * 1. ฟังก์ชันแสดงผลหน้าเว็บ Single-Page Web App
+ * 1. ฟังก์ชันแสดงผลหน้าเว็บ Single-Page Web App หรือตอบกลับ JSON API (สำหรับซิงค์ลิงก์แชร์)
  */
 function doGet(e) {
+  if (e && e.parameter && e.parameter.action === 'readAll') {
+    return jsonResponse_(buildPublicReadAllPayload_());
+  }
   var template = HtmlService.createTemplateFromFile('Index');
   return template.evaluate()
     .setTitle('ระบบบริหารจัดการภาระงานและ Productivity OPD รพ.ชลประทาน')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, shrink-to-fit=no')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * 1.1 Webhook สำหรับรับเฉพาะการ "นำข้อมูลเข้า" (Append Only) จากบุคลากร OPD ที่เปิดลิงก์แชร์
+ * ไม่อนุญาตให้แก้ไขหรือลบข้อมูลผ่าน Endpoint สาธารณะ (สงวนสิทธิ์เฉพาะ Admin PIN)
+ */
+function doPost(e) {
+  try {
+    var bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '{}';
+    var req = JSON.parse(bodyText);
+    var action = String(req.action || '').trim();
+    var payload = req.payload || {};
+
+    if (action === 'appendWorkload') {
+      return jsonResponse_(appendWorkloadFromApi_(payload));
+    }
+    if (action === 'appendLeave') {
+      return jsonResponse_(appendLeaveFromApi_(payload));
+    }
+    if (action === 'appendOT') {
+      return jsonResponse_(appendOTFromApi_(payload));
+    }
+
+    return jsonResponse_({
+      success: false,
+      error: 'การแก้ไขหรือลบข้อมูลสงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น'
+    });
+  } catch (err) {
+    return jsonResponse_({ success: false, error: err.toString() });
+  }
+}
+
+function jsonResponse_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function formatCellValue_(val) {
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, 'Asia/Bangkok', 'yyyy-MM-dd');
+  }
+  return val === null || val === undefined ? '' : String(val);
+}
+
+function getSheetRowsNormalized_(sheetName, minCols) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() <= 1) return { headers: [], rows: [] };
+  var lastCol = Math.max(minCols, sheet.getLastColumn());
+  var allValues = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
+  var headers = allValues[0].map(function(h) { return String(h || '').trim(); });
+  var rows = allValues.slice(1).map(function(r) {
+    return r.map(formatCellValue_);
+  });
+  return { headers: headers, rows: rows };
+}
+
+function buildPublicReadAllPayload_() {
+  try {
+    var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
+    var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 15);
+    var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 8);
+    var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 6);
+    var settingsData = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
+    var auditData = getSheetRowsNormalized_(SHEET_NAMES.AUDIT, 6);
+
+    var workloadHasId = workloadData.headers[0] === 'Record_ID';
+    var leaveHasId = leaveData.headers[0] === 'Leave_ID';
+    var otHasId = otData.headers[0] === 'OT_ID';
+
+    return {
+      success: true,
+      staffRows: staffData.rows.map(function(r) { return r.slice(0, 7); }),
+      workloadRows: workloadData.rows.map(function(r) {
+        return workloadHasId ? r.slice(1, 16) : r.slice(0, 15);
+      }),
+      leaveRows: leaveData.rows.map(function(r) {
+        return leaveHasId ? r.slice(1, 9) : r.slice(0, 8);
+      }),
+      otRows: otData.rows.map(function(r) {
+        return otHasId ? r.slice(1, 7) : r.slice(0, 6);
+      }),
+      settingsRows: settingsData.rows
+        .filter(function(r) { return r[0] && r[0] !== 'Admin_Pin'; })
+        .map(function(r) { return r.slice(0, 2); }),
+      auditRows: auditData.rows.map(function(r) { return r.slice(0, 6); })
+    };
+  } catch (err) {
+    return { success: false, error: err.toString() };
+  }
+}
+
+function ensureSheetWithHeaders_(sheetName, defaultHeaders) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, defaultHeaders.length).setValues([defaultHeaders]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function appendWorkloadFromApi_(entry) {
+  if (!entry || !entry.date || !entry.clinic) {
+    return { success: false, error: 'ข้อมูลภาระงานไม่ครบถ้วน' };
+  }
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, [
+    'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
+    'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var adultPt = Number(entry.adultPt || 0);
+  var childPt = Number(entry.childPt || 0);
+  var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
+  var baseRow = [
+    String(entry.date || ''),
+    String(entry.shift || ''),
+    String(entry.clinic || ''),
+    totalPt,
+    adultPt,
+    childPt,
+    Number(entry.admit || 0),
+    Number(entry.hn || 0),
+    Number(entry.rn || 0),
+    Number(entry.pn || 0),
+    Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
+    Number(entry.clerk || 0),
+    Number(entry.serviceWorker || 0),
+    String(entry.note || ''),
+    String(entry.reporter || '')
+  ];
+  if (firstHeader === 'Record_ID') {
+    var recId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    sheet.appendRow([recId].concat(baseRow));
+  } else {
+    sheet.appendRow(baseRow);
+  }
+  return { success: true };
+}
+
+function appendLeaveFromApi_(leave) {
+  if (!leave || !leave.startDate || !leave.staffName) {
+    return { success: false, error: 'ข้อมูลวันลาไม่ครบถ้วน' };
+  }
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var baseRow = [
+    String(leave.startDate || ''),
+    String(leave.endDate || leave.startDate || ''),
+    String(leave.staffName || ''),
+    String(leave.position || 'RN'),
+    String(leave.clinic || ''),
+    String(leave.leaveType || 'ลาป่วย'),
+    Number(leave.days || 1),
+    String(leave.note || '')
+  ];
+  if (firstHeader === 'Leave_ID') {
+    var lvId = leave.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    sheet.appendRow([lvId].concat(baseRow));
+  } else {
+    sheet.appendRow(baseRow);
+  }
+  return { success: true };
+}
+
+function appendOTFromApi_(ot) {
+  if (!ot || !ot.date || !ot.staffName) {
+    return { success: false, error: 'ข้อมูลเวรนอกเวลาไม่ครบถ้วน' };
+  }
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+  ]);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var baseRow = [
+    String(ot.date || ''),
+    String(ot.shift || ''),
+    String(ot.staffName || ''),
+    String(ot.position || 'RN'),
+    String(ot.homeClinic || ''),
+    String(ot.workClinic || '')
+  ];
+  if (firstHeader === 'OT_ID') {
+    var otId = ot.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    sheet.appendRow([otId].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']));
+  } else {
+    sheet.appendRow(baseRow);
+  }
+  return { success: true };
 }
 
 function include(filename) {

@@ -168,6 +168,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [workDays, setWorkDays] = useState<number>(settings.workDays);
   const [adminEmailsStr, setAdminEmailsStr] = useState<string>(settings.adminEmails.join(', '));
   const [customSheetUrl, setCustomSheetUrl] = useState<string>(settings.spreadsheetUrl || '');
+  const [customGasUrl, setCustomGasUrl] = useState<string>(settings.gasUrl || '');
   const [settingsSaved, setSettingsSaved] = useState<boolean>(false);
 
   useEffect(() => {
@@ -185,6 +186,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         : buildDefaultAdditionalAdminPins()
     );
     setCustomSheetUrl(settings.spreadsheetUrl || '');
+    setCustomGasUrl(settings.gasUrl || '');
   }, [settings]);
 
   useEffect(() => {
@@ -353,36 +355,43 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     });
   };
 
-  // Save custom spreadsheet link/ID
+  // Save custom spreadsheet link/ID (+ optional Apps Script Web App URL)
   const handleSaveSheetLink = () => {
     const raw = customSheetUrl.trim();
-    if (!raw) {
+    const trimmedGas = customGasUrl.trim();
+    if (!raw && !trimmedGas) {
       onSaveSettings({
         ...settings,
         spreadsheetId: undefined,
         spreadsheetUrl: undefined,
+        gasUrl: undefined,
       });
       return;
     }
     const idMatch = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-    const extractedId = idMatch ? idMatch[1] : raw;
-    const normalizedUrl = raw.startsWith('http')
-      ? raw
-      : `https://docs.google.com/spreadsheets/d/${extractedId}/edit`;
+    const extractedId = raw ? (idMatch ? idMatch[1] : raw) : settings.spreadsheetId;
+    const normalizedUrl = raw
+      ? raw.startsWith('http')
+        ? raw
+        : `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
+      : settings.spreadsheetUrl;
 
     onSaveSettings({
       ...settings,
       spreadsheetId: extractedId,
       spreadsheetUrl: normalizedUrl,
+      gasUrl: trimmedGas || undefined,
     });
   };
 
   const handleUnlinkSheet = () => {
     setCustomSheetUrl('');
+    setCustomGasUrl('');
     onSaveSettings({
       ...settings,
       spreadsheetId: undefined,
       spreadsheetUrl: undefined,
+      gasUrl: undefined,
     });
   };
 
@@ -395,10 +404,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const shareableOpdUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
     const base = `${window.location.origin}${window.location.pathname}`;
-    return settings.spreadsheetId
-      ? `${base}?sheetId=${encodeURIComponent(settings.spreadsheetId)}`
-      : base;
-  }, [settings.spreadsheetId]);
+    const qp = new URLSearchParams();
+    if (settings.spreadsheetId) qp.set('sheetId', settings.spreadsheetId);
+    if (settings.gasUrl?.trim()) qp.set('gasUrl', settings.gasUrl.trim());
+    const qs = qp.toString();
+    return qs ? `${base}?${qs}` : base;
+  }, [settings.spreadsheetId, settings.gasUrl]);
 
   // Leave Type Management Handlers (Admin Add / Remove)
   const handleAddLeaveType = (e: React.FormEvent) => {
@@ -513,6 +524,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       inTimeClinics,
       outTimeClinics,
       leaveTypes,
+      gasUrl: customGasUrl.trim() || settings.gasUrl || undefined,
     };
 
     onSaveSettings(updated);
@@ -837,7 +849,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               >
                 จำค่าลิงก์ชีท
               </button>
-              {(settings.spreadsheetId || settings.spreadsheetUrl) && (
+              {(settings.spreadsheetId || settings.spreadsheetUrl || settings.gasUrl) && (
                 <button
                   type="button"
                   onClick={handleUnlinkSheet}
@@ -848,6 +860,19 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   <span>ยกเลิกเชื่อมโยง</span>
                 </button>
               )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+              <div className="flex items-center gap-1.5 text-[11px] text-cyan-200 font-semibold shrink-0">
+                <span>Web App URL ซิงค์อัตโนมัติ (ไม่บังคับ):</span>
+              </div>
+              <input
+                type="url"
+                value={customGasUrl}
+                onChange={(e) => setCustomGasUrl(e.target.value)}
+                placeholder="https://script.google.com/macros/s/.../exec (ช่วยให้ OPD บันทึกข้อมูลเข้าชีทได้ทันทีโดยไม่ต้องล็อกอิน)"
+                className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
+              />
             </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-emerald-100/85">

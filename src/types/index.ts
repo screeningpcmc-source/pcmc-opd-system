@@ -112,6 +112,7 @@ export interface SystemSettings {
   additionalAdminPins?: AdminPinEntry[];
   spreadsheetId?: string;
   spreadsheetUrl?: string;
+  gasUrl?: string;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
   leaveTypes?: string[];
