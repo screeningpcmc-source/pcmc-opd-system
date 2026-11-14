@@ -104,7 +104,13 @@ export function getHolidaysForYear(
     }
   }
 
-  // 2. Register lunar holidays for the year (plus previous year's Dec 31 if it rolled into Jan)
+  // Check if previous year's Dec 31 fell on Sat/Sun and its substitute spills into January of this year
+  const prevDec31 = new Date(year - 1, 11, 31);
+  if (prevDec31.getDay() === 0 || prevDec31.getDay() === 6) {
+    pendingSubstitutes.push({ baseDate: prevDec31, name: 'วันหยุดชดเชยวันสิ้นปี' });
+  }
+
+  // 2. Register lunar holidays for the year
   const lunarList = THAI_LUNAR_HOLIDAYS_BY_YEAR[year] || [];
   for (const item of lunarList) {
     const d = parseIsoLocal(item.date);
@@ -124,7 +130,9 @@ export function getHolidaysForYear(
       const dow = candidate.getDay();
       const iso = toIsoDate(candidate);
       if (dow !== 0 && dow !== 6 && !map.has(iso)) {
-        map.set(iso, { name: sub.name, isCustom: false });
+        if (candidate.getFullYear() === year) {
+          map.set(iso, { name: sub.name, isCustom: false });
+        }
         break;
       }
       candidate = addDays(candidate, 1);

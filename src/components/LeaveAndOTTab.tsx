@@ -89,7 +89,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   leaves,
   otRecords,
   auditLogs = [],
-  workloads = [],
+  workloads: _workloads = [],
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
   leaveTypes = [...LEAVE_TYPES],
@@ -441,18 +441,6 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const now = new Date();
     const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-    const clinicOperationalDaysMap = new Map<string, Set<string>>();
-    workloads.forEach((w) => {
-      if (w.shift === 'ในเวลา 08:00-16:00') {
-        const [y, m] = w.date.split('-');
-        const key = `${y}-${m}-${w.clinic}`;
-        if (!clinicOperationalDaysMap.has(key)) {
-          clinicOperationalDaysMap.set(key, new Set());
-        }
-        clinicOperationalDaysMap.get(key)!.add(w.date);
-      }
-    });
-
     return summaryEligibleStaff.map((staff) => {
       const monthDetails: Record<
         string,
@@ -483,19 +471,25 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         const otCount = staffOts.length;
         const otClinics = Array.from(new Set(staffOts.map((o) => o.workClinic)));
 
-        const staffLeaves = leaves.filter(
-          (l) =>
-            l.staffName === staff.name &&
-            (l.startDate.startsWith(ymPrefix) || l.endDate.startsWith(ymPrefix))
-        );
-        const leaveDays = staffLeaves.reduce((sum, l) => sum + (l.days || 1), 0);
+        const staffLeaves = leaves.filter((l) => {
+          const lStart = l.startDate || '';
+          const lEnd = l.endDate || lStart;
+          return l.staffName === staff.name && lStart <= monthEnd && lEnd >= monthStart;
+        });
+        const leaveDays = staffLeaves.reduce((sum, l) => {
+          const lStart = l.startDate || '';
+          const lEnd = l.endDate || lStart;
+          if (lStart >= monthStart && lEnd <= monthEnd) {
+            return sum + (Number(l.days) || 1);
+          }
+          const overlapStart = lStart > monthStart ? lStart : monthStart;
+          const overlapEnd = lEnd < monthEnd ? lEnd : monthEnd;
+          if (overlapStart > overlapEnd) return sum;
+          return sum + countGovernmentWorkdaysInRange(overlapStart, overlapEnd, customHolidays);
+        }, 0);
         const leaveTypes = Array.from(
           new Set(staffLeaves.map((l) => `${l.leaveType} (${l.days} วัน)`))
         );
-
-        const clinicKey = `${year}-${m.key}-${staff.homeClinic}`;
-        const recordedDatesSet = clinicOperationalDaysMap.get(clinicKey);
-        const recordedCount = recordedDatesSet ? recordedDatesSet.size : 0;
 
         let inTimeDays = 0;
         const isNotYetStarted = Boolean(staff.startDate && staff.startDate > monthEnd);
@@ -508,19 +502,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           const effectiveEnd =
             staff.endDate && staff.endDate < monthEnd ? staff.endDate : monthEnd;
 
-          if (recordedCount > 0 && recordedDatesSet) {
-            let activeRecordedDays = 0;
-            recordedDatesSet.forEach((d) => {
-              if (d >= effectiveStart && d <= effectiveEnd) {
-                activeRecordedDays++;
-              }
-            });
-            inTimeDays = Math.max(0, activeRecordedDays - leaveDays);
-          } else if (ymPrefix <= currentYm) {
-            const isFullMonth = effectiveStart === monthStart && effectiveEnd === monthEnd;
-            const baseWorkDays = isFullMonth
-              ? 20
-              : Math.min(20, countGovernmentWorkdaysInRange(effectiveStart, effectiveEnd, customHolidays));
+          if (ymPrefix <= currentYm && effectiveStart <= effectiveEnd) {
+            const baseWorkDays = countGovernmentWorkdaysInRange(
+              effectiveStart,
+              effectiveEnd,
+              customHolidays
+            );
             inTimeDays = Math.max(0, baseWorkDays - leaveDays);
           }
         }
@@ -552,7 +539,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         grandTotal,
       };
     });
-  }, [summaryEligibleStaff, otRecords, leaves, workloads, selectedFiscalYear, fiscalMonths, customHolidays]);
+  }, [summaryEligibleStaff, otRecords, leaves, selectedFiscalYear, fiscalMonths, customHolidays]);
 
   const filteredSummaryData = useMemo(() => {
     return fiscalSummaryData
@@ -2134,7 +2121,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 {summaryKpis.totalInTime}{' '}
                 <span className="text-xs font-normal text-blue-600">วัน</span>
               </div>
-              <span className="text-[10px] text-blue-500">ตามบันทึกภาระงานคลินิก</span>
+              <span className="text-[10px] text-blue-500">วันราชการ (จ.-ศ. หักวันหยุด) - วันลา</span>
             </div>
 
             <div className="bg-white rounded-2xl p-3.5 border border-purple-200 shadow-2xs">
@@ -2160,31 +2147,45 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           {summaryReportMode !== 'LEAVE_REPORT' && (
             <div className={printTarget === 'LEAVE_REPORT' ? 'no-print' : ''}>
               {monthFilter === 'ALL' ? (
-            <div className="overflow-x-auto border border-gray-200 rounded-xl">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px]">
+            <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
+              <table className="w-full text-left text-xs print:text-[8px] print-fit-table">
+                <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px] print:text-[8px]">
                   <tr>
-                    <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ - นามสกุล</th>
-                    <th className="py-2.5 px-2 text-center whitespace-nowrap">ตำแหน่ง</th>
-                    <th className="py-2.5 px-2 whitespace-nowrap">หน่วยงานสังกัด</th>
-                    {fiscalMonths.map((m) => (
-                      <th
-                        key={m.key}
-                        className="py-2.5 px-2 text-center bg-slate-200/50 whitespace-nowrap"
-                      >
-                        {m.name}
-                      </th>
-                    ))}
-                    <th className="py-2.5 px-2 text-center bg-blue-50 text-blue-900 whitespace-nowrap">
+                    <th className="py-2.5 px-3 whitespace-nowrap print:w-[82px] print:px-1 print:py-1">ชื่อ - นามสกุล</th>
+                    <th className="py-2.5 px-2 text-center whitespace-nowrap print:w-[58px] print:px-0.5 print:py-1">ตำแหน่ง</th>
+                    <th className="py-2.5 px-2 whitespace-nowrap print:w-[54px] print:px-0.5 print:py-1">หน่วยงานสังกัด</th>
+                    {fiscalMonths.map((m) => {
+                      const ceEnd = selectedFiscalYear - 543;
+                      const mYear = m.yearOffset === -1 ? ceEnd - 1 : ceEnd;
+                      const mLast = new Date(mYear, Number(m.key), 0).getDate();
+                      const mGovDays = countGovernmentWorkdaysInRange(
+                        `${mYear}-${m.key}-01`,
+                        `${mYear}-${m.key}-${String(mLast).padStart(2, '0')}`,
+                        customHolidays
+                      );
+                      return (
+                        <th
+                          key={m.key}
+                          className="py-2.5 px-2 text-center bg-slate-200/50 whitespace-nowrap print:px-0.5 print:py-1"
+                          title={`${m.fullName} ${mYear + 543}: วันราชการ ${mGovDays} วัน (จ.-ศ. หักวันหยุด)`}
+                        >
+                          <div>{m.name}</div>
+                          <div className="text-[9px] font-medium text-slate-500 print:text-[7px]">
+                            ({mGovDays}ว)
+                          </div>
+                        </th>
+                      );
+                    })}
+                    <th className="py-2.5 px-2 text-center bg-blue-50 text-blue-900 whitespace-nowrap print:w-[28px] print:px-0.5 print:py-1">
                       ในเวลา
                     </th>
-                    <th className="py-2.5 px-2 text-center bg-purple-50 text-purple-900 whitespace-nowrap">
+                    <th className="py-2.5 px-2 text-center bg-purple-50 text-purple-900 whitespace-nowrap print:w-[28px] print:px-0.5 print:py-1">
                       เวร OT
                     </th>
-                    <th className="py-2.5 px-2 text-center bg-amber-50 text-amber-900 whitespace-nowrap">
+                    <th className="py-2.5 px-2 text-center bg-amber-50 text-amber-900 whitespace-nowrap print:w-[26px] print:px-0.5 print:py-1">
                       วันลา
                     </th>
-                    <th className="py-2.5 px-3 text-center bg-teal-700 text-white font-extrabold whitespace-nowrap">
+                    <th className="py-2.5 px-3 text-center bg-teal-700 text-white font-extrabold whitespace-nowrap print:w-[32px] print:px-0.5 print:py-1">
                       รวมทั้งสิ้น
                     </th>
                   </tr>
@@ -2209,12 +2210,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               : 'bg-slate-50/50 hover:bg-slate-100/60'
                           }
                         >
-                          <td className="py-2 px-3 font-semibold text-gray-900 whitespace-nowrap">
+                          <td className="py-2 px-3 font-semibold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">
                             {staff.name}
                           </td>
-                          <td className="py-2 px-2 text-center">
+                          <td className="py-2 px-2 text-center print:px-0.5 print:py-1">
                             <span
-                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap print:whitespace-normal print:px-0.5 print:text-[7.5px] ${
                                 staff.position === 'HN'
                                   ? 'bg-purple-100 text-purple-800'
                                   : staff.position === 'RN'
@@ -2229,7 +2230,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               {formatPositionLabel(staff.position)}
                             </span>
                           </td>
-                          <td className="py-2 px-2 text-gray-600 truncate max-w-[130px]">
+                          <td className="py-2 px-2 text-gray-600 truncate max-w-[130px] print:max-w-none print:whitespace-normal print:px-0.5 print:py-1">
                             {staff.homeClinic}
                           </td>
 
@@ -2248,7 +2249,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             return (
                               <td
                                 key={m.key}
-                                className={`py-2 px-1.5 text-center text-[11px] ${
+                                className={`py-2 px-1.5 text-center text-[11px] print:text-[7.5px] print:px-0.5 print:py-1 ${
                                   val > 0 ? 'font-bold text-teal-950' : 'text-gray-300'
                                 }`}
                                 title={`ในเวลา: ${inTime} วัน, OT: ${ot} เวร, ลา: ${detail?.leaves || 0} วัน`}
@@ -2257,7 +2258,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                   shiftFilter === 'ALL' ? (
                                     <span className="inline-flex flex-col items-center">
                                       <span>{val}</span>
-                                      <span className="text-[9px] font-normal text-gray-400">
+                                      <span className="text-[9px] print:text-[6.5px] font-normal text-gray-400">
                                         {inTime}/{ot}
                                       </span>
                                     </span>
@@ -2271,16 +2272,16 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             );
                           })}
 
-                          <td className="py-2 px-2 text-center font-bold text-blue-900 bg-blue-50/50">
+                          <td className="py-2 px-2 text-center font-bold text-blue-900 bg-blue-50/50 print:px-0.5 print:py-1">
                             {totalInTime}
                           </td>
-                          <td className="py-2 px-2 text-center font-bold text-purple-900 bg-purple-50/50">
+                          <td className="py-2 px-2 text-center font-bold text-purple-900 bg-purple-50/50 print:px-0.5 print:py-1">
                             {totalOT}
                           </td>
-                          <td className="py-2 px-2 text-center text-amber-800 bg-amber-50/50">
+                          <td className="py-2 px-2 text-center text-amber-800 bg-amber-50/50 print:px-0.5 print:py-1">
                             {totalLeaves > 0 ? totalLeaves : '-'}
                           </td>
-                          <td className="py-2 px-3 text-center font-black text-sm text-teal-950 bg-teal-50">
+                          <td className="py-2 px-3 text-center font-black text-sm print:text-[8.5px] text-teal-950 bg-teal-50 print:px-0.5 print:py-1">
                             {shiftFilter === 'IN_TIME'
                               ? totalInTime
                               : shiftFilter === 'OT'
@@ -2296,8 +2297,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           ) : (
             /* VIEW B: Monthly Detailed Table */
-            <div className="overflow-x-auto border border-gray-200 rounded-xl">
-              <table className="w-full text-left text-xs">
+            <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
+              <table className="w-full text-left text-xs print:text-[9px] print-fit-table">
                 <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px]">
                   <tr>
                     <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ - นามสกุล</th>
@@ -2472,39 +2473,47 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <div
                 ref={leaveReportRef}
-                className="bg-white border border-gray-300 rounded-xl p-4 sm:p-6 space-y-4 print:border-none print:p-2"
+                className="bg-white border border-gray-300 rounded-xl p-4 sm:p-6 space-y-4 print:border-none print:p-0 print:space-y-2 print:w-full"
               >
-                <div className="text-center space-y-1 border-b border-gray-300 pb-3">
-                  <div className="text-sm sm:text-base font-extrabold text-gray-900">
+                <div className="text-center space-y-1 border-b border-gray-300 pb-3 print:pb-2">
+                  <div className="text-sm sm:text-base font-extrabold text-gray-900 print:text-sm">
                     ชื่อหน่วยงาน : หน่วยการพยาบาลผู้ป่วยนอก
                   </div>
-                  <div className="text-xs text-gray-600 font-medium">
+                  <div className="text-xs text-gray-600 font-medium print:text-[10px]">
                     รายงานสรุปวันลาบุคลากร • {leaveReportPeriodLabel}
                     {clinicFilter !== 'ALL' ? ` • คลินิก: ${clinicFilter}` : ''}
                   </div>
                 </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-collapse border border-gray-400">
+                <div className="overflow-x-auto print-fit-container">
+                  <table className="w-full text-xs border-collapse border border-gray-400 print:text-[8.5px] print-fit-table">
                     <thead className="bg-slate-100 text-gray-900 font-bold">
                       <tr>
-                        <th className="border border-gray-400 py-2 px-2 text-center w-12">ลำดับ</th>
-                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap">ชื่อ</th>
-                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap">สกุล</th>
-                        <th className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap">ตำแหน่ง</th>
+                        <th className="border border-gray-400 py-2 px-2 text-center w-12 print:w-[26px] print:px-0.5 print:py-1">
+                          ลำดับ
+                        </th>
+                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap print:w-[68px] print:whitespace-normal print:px-1 print:py-1">
+                          ชื่อ
+                        </th>
+                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap print:w-[74px] print:whitespace-normal print:px-1 print:py-1">
+                          สกุล
+                        </th>
+                        <th className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap print:w-[76px] print:whitespace-normal print:px-1 print:py-1">
+                          ตำแหน่ง
+                        </th>
                         {leaveReportColumns.allCols.map((col) => (
                           <th
                             key={col.type}
-                            className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap min-w-[58px]"
+                            className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap min-w-[58px] print:min-w-0 print:whitespace-normal print:px-0.5 print:py-1 print:leading-tight"
                             title={col.type}
                           >
                             {col.shortLabel}
                           </th>
                         ))}
-                        <th className="border border-gray-400 py-2 px-2 text-center bg-amber-50 whitespace-nowrap">
+                        <th className="border border-gray-400 py-2 px-2 text-center bg-amber-50 whitespace-nowrap print:w-[34px] print:whitespace-normal print:px-0.5 print:py-1 print:leading-tight">
                           รวมวันลา
                         </th>
-                        <th className="border border-gray-400 py-2 px-3 text-left min-w-[260px]">
+                        <th className="border border-gray-400 py-2 px-3 text-left min-w-[260px] print:min-w-0 print:w-[140px] print:px-1 print:py-1 print:leading-tight">
                           เหตุผลการลาและวันที่ลา
                         </th>
                       </tr>
@@ -2525,16 +2534,16 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             key={row.id}
                             className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}
                           >
-                            <td className="border border-gray-400 py-1.5 px-2 text-center text-gray-700 font-medium">
+                            <td className="border border-gray-400 py-1.5 px-2 text-center text-gray-700 font-medium print:px-0.5 print:py-1">
                               {idx + 1}
                             </td>
-                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 font-semibold whitespace-nowrap">
+                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 font-semibold whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
                               {row.firstName}
                             </td>
-                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 whitespace-nowrap">
+                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
                               {row.lastName}
                             </td>
-                            <td className="border border-gray-400 py-1.5 px-2 text-center font-semibold text-gray-800 whitespace-nowrap">
+                            <td className="border border-gray-400 py-1.5 px-2 text-center font-semibold text-gray-800 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
                               {formatPositionLabel(row.position)}
                             </td>
                             {leaveReportColumns.allCols.map((col) => {
@@ -2542,7 +2551,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               return (
                                 <td
                                   key={col.type}
-                                  className={`border border-gray-400 py-1.5 px-2 text-center ${
+                                  className={`border border-gray-400 py-1.5 px-2 text-center print:px-0.5 print:py-1 ${
                                     val > 0 ? 'font-bold text-amber-900 bg-amber-50/40' : 'text-gray-400'
                                   }`}
                                 >
@@ -2550,12 +2559,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 </td>
                               );
                             })}
-                            <td className="border border-gray-400 py-1.5 px-2 text-center font-extrabold text-amber-950 bg-amber-50/60">
+                            <td className="border border-gray-400 py-1.5 px-2 text-center font-extrabold text-amber-950 bg-amber-50/60 print:px-0.5 print:py-1">
                               {row.totalLeaveDays > 0 ? row.totalLeaveDays : ''}
                             </td>
-                            <td className="border border-gray-400 py-1.5 px-3 text-[11px] text-gray-800">
+                            <td className="border border-gray-400 py-1.5 px-3 text-[11px] text-gray-800 print:px-1 print:py-1 print:text-[8px] print:leading-tight">
                               {row.details.length > 0 ? (
-                                <ul className="space-y-0.5 list-disc list-inside">
+                                <ul className="space-y-0.5 list-disc list-inside print:list-outside print:pl-2.5">
                                   {row.details.map((d, dIdx) => (
                                     <li key={dIdx}>{d}</li>
                                   ))}
@@ -2571,20 +2580,20 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     {leaveReportData.rows.length > 0 && (
                       <tfoot className="bg-slate-100 font-bold text-gray-900">
                         <tr>
-                          <td colSpan={4} className="border border-gray-400 py-2 px-3 text-right">
+                          <td colSpan={4} className="border border-gray-400 py-2 px-3 text-right print:px-1 print:py-1">
                             รวมทั้งหมด ({leaveReportData.rows.length} คน)
                           </td>
                           {leaveReportColumns.allCols.map((col) => (
-                            <td key={col.type} className="border border-gray-400 py-2 px-2 text-center">
+                            <td key={col.type} className="border border-gray-400 py-2 px-2 text-center print:px-0.5 print:py-1">
                               {leaveReportData.totalsByType[col.type] > 0
                                 ? leaveReportData.totalsByType[col.type]
                                 : '-'}
                             </td>
                           ))}
-                          <td className="border border-gray-400 py-2 px-2 text-center bg-amber-100 text-amber-950 font-extrabold">
+                          <td className="border border-gray-400 py-2 px-2 text-center bg-amber-100 text-amber-950 font-extrabold print:px-0.5 print:py-1">
                             {leaveReportData.grandTotalDays}
                           </td>
-                          <td className="border border-gray-400 py-2 px-3 text-[11px] text-gray-600 font-normal">
+                          <td className="border border-gray-400 py-2 px-3 text-[11px] text-gray-600 font-normal print:px-1 print:py-1 print:text-[8px]">
                             หน่วยนับ: วันทำการ/วันลา
                           </td>
                         </tr>
@@ -2593,7 +2602,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   </table>
                 </div>
 
-                <div className="pt-4 grid grid-cols-1 sm:grid-cols-2 gap-6 text-center text-xs text-gray-700">
+                <div className="pt-4 grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-6 text-center text-xs print:text-[10px] text-gray-700 print:break-inside-avoid">
                   <div>
                     <p className="mb-8">ผู้จัดทำรายงาน</p>
                     <p>ลงชื่อ......................................................</p>

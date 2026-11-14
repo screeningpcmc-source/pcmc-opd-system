@@ -346,25 +346,25 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
 
         {/* Detailed Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border border-gray-300 print:text-[10px]">
+        <div className="overflow-x-auto print-fit-container">
+          <table className="w-full text-left text-xs border border-gray-300 print:text-[8.5px] print-fit-table">
             <thead className="bg-slate-100 text-slate-800 font-bold border-b border-gray-300">
               <tr>
-                <th className="py-2.5 px-2 text-center w-8">ที่</th>
-                <th className="py-2.5 px-3">ห้องตรวจ / แผนก</th>
-                <th className="py-2.5 px-2">กะเวลา</th>
-                <th className="py-2.5 px-2 text-right bg-blue-50 text-blue-950">ผู้ป่วยรวม</th>
-                <th className="py-2.5 px-2 text-right">ผู้ใหญ่</th>
-                <th className="py-2.5 px-2 text-right">เด็ก</th>
-                <th className="py-2.5 px-2 text-right bg-red-50 text-red-950">Admit</th>
-                <th className="py-2.5 px-1.5 text-center">HN</th>
-                <th className="py-2.5 px-1.5 text-center bg-blue-50/70 font-bold text-blue-900">RN</th>
-                <th className="py-2.5 px-1.5 text-center bg-teal-50/70 text-teal-900">PN</th>
-                <th className="py-2.5 px-1.5 text-center bg-emerald-50/70 text-emerald-900">NA</th>
-                <th className="py-2.5 px-1.5 text-center">ผู้ปฏิบัติงานทั่วไป</th>
-                <th className="py-2.5 px-1.5 text-center">พนักงานบริการ</th>
-                <th className="py-2.5 px-3">ผู้บันทึกรายงาน</th>
-                <th className="py-2.5 px-3">หมายเหตุ</th>
+                <th className="py-2.5 px-2 text-center w-8 print:w-[22px] print:px-0.5 print:py-1">ที่</th>
+                <th className="py-2.5 px-3 print:px-1 print:py-1">ห้องตรวจ / แผนก</th>
+                <th className="py-2.5 px-2 print:w-[68px] print:px-1 print:py-1">กะเวลา</th>
+                <th className="py-2.5 px-2 text-right bg-blue-50 text-blue-950 print:w-[34px] print:px-0.5 print:py-1">ผู้ป่วยรวม</th>
+                <th className="py-2.5 px-2 text-right print:w-[30px] print:px-0.5 print:py-1">ผู้ใหญ่</th>
+                <th className="py-2.5 px-2 text-right print:w-[26px] print:px-0.5 print:py-1">เด็ก</th>
+                <th className="py-2.5 px-2 text-right bg-red-50 text-red-950 print:w-[30px] print:px-0.5 print:py-1">Admit</th>
+                <th className="py-2.5 px-1.5 text-center print:w-[22px] print:px-0.5 print:py-1">HN</th>
+                <th className="py-2.5 px-1.5 text-center bg-blue-50/70 font-bold text-blue-900 print:w-[22px] print:px-0.5 print:py-1">RN</th>
+                <th className="py-2.5 px-1.5 text-center bg-teal-50/70 text-teal-900 print:w-[22px] print:px-0.5 print:py-1">PN</th>
+                <th className="py-2.5 px-1.5 text-center bg-emerald-50/70 text-emerald-900 print:w-[22px] print:px-0.5 print:py-1">NA</th>
+                <th className="py-2.5 px-1.5 text-center print:w-[34px] print:px-0.5 print:py-1">ผู้ปฏิบัติงานทั่วไป</th>
+                <th className="py-2.5 px-1.5 text-center print:w-[32px] print:px-0.5 print:py-1">พนักงานบริการ</th>
+                <th className="py-2.5 px-3 print:w-[68px] print:px-1 print:py-1">ผู้บันทึกรายงาน</th>
+                <th className="py-2.5 px-3 print:px-1 print:py-1">หมายเหตุ</th>
                 {isAdmin && <th className="py-2.5 px-2 text-center no-print bg-slate-100">จัดการ</th>}
               </tr>
             </thead>
@@ -378,22 +378,22 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
               ) : (
                 filteredWorkloads.map((w, index) => (
                   <tr key={w.id} className="hover:bg-slate-50/80">
-                    <td className="py-2 px-2 text-center text-gray-500">{index + 1}</td>
-                    <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap">{w.clinic}</td>
-                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px]">{w.shift}</td>
-                    <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30">{getEffectiveTotalPt(w)}</td>
-                    <td className="py-2 px-2 text-right text-gray-600">{w.adultPt}</td>
-                    <td className="py-2 px-2 text-right text-gray-600">{w.childPt}</td>
-                    <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30">{w.admit}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-700">{w.hn}</td>
-                    <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40">{w.rn}</td>
-                    <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40">{w.pn}</td>
-                    <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-600">{w.clerk}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-600">{w.serviceWorker}</td>
-                    <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px]">{w.reporter}</td>
-                    <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px]" title={w.note}>
-                      <div className="truncate">{w.note || '-'}</div>
+                    <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
+                    <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
+                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
+                    <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
+                    <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
+                    <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
+                    <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
+                    <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
+                    <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
+                    <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
+                    <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
+                    <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
+                    <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
+                    <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
+                    <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
+                      <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || '-'}</div>
                       {(w.lastEditReason || w.lastEditedAt) && (
                         <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
                           แก้ไข: {w.lastEditReason || '-'}
