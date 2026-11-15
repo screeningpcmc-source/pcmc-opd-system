@@ -49,7 +49,19 @@ import {
   clearWorkloadsDirty,
   clearLeavesDirty,
   clearOtDirty,
+  enqueuePendingOutboxWorkloads,
+  markWorkloadOutboxSynced,
+  getPendingOutboxWorkloads,
+  enqueuePendingOutboxLeaves,
+  markLeaveOutboxSynced,
+  getPendingOutboxLeaves,
+  enqueuePendingOutboxOt,
+  markOtOutboxSynced,
+  getPendingOutboxOt,
+  enqueuePendingOutboxAuditLogs,
+  clearAllPendingOutbox,
   pushAdminTableViaAppsScript,
+  pushTargetedAdminRowMutationViaAppsScript,
   pushAdminTableViaOAuth,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
@@ -108,14 +120,73 @@ export default function App() {
   const lastSyncedKeyRef = useRef<string>('');
   const mutationSeqRef = useRef<number>(0);
   const pendingSyncAfterFlightRef = useRef<boolean>(false);
+  const tabInstanceIdRef = useRef<string>(`tab-${Math.random().toString(36).slice(2)}-${Date.now()}`);
+  const syncChannelRef = useRef<BroadcastChannel | null>(null);
+  const suppressNextBroadcastRef = useRef<boolean>(false);
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  // Auto-save local database whenever db changes
+  // Auto-save local database whenever db changes & notify other open tabs in same browser
   useEffect(() => {
     saveLocalDatabase(db);
+    if (suppressNextBroadcastRef.current) {
+      suppressNextBroadcastRef.current = false;
+      return;
+    }
+    try {
+      syncChannelRef.current?.postMessage({
+        type: 'DB_UPDATED',
+        senderId: tabInstanceIdRef.current,
+        ts: Date.now(),
+      });
+    } catch {
+      // ignore BroadcastChannel errors on unsupported browsers
+    }
   }, [db]);
+
+  // Same-browser cross-tab real-time sync (BroadcastChannel + storage fallback)
+  useEffect(() => {
+    const syncFromSiblingTab = () => {
+      if (isSyncInFlightRef.current || adminWriteInFlightRef.current) return;
+      const freshLocal = loadLocalDatabase();
+      suppressNextBroadcastRef.current = true;
+      dbRef.current = freshLocal;
+      setDb(freshLocal);
+    };
+
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel('pcmc_opd_sync_v1');
+        syncChannelRef.current = channel;
+        channel.onmessage = (event) => {
+          const msg = event?.data;
+          if (msg?.type === 'DB_UPDATED' && msg.senderId !== tabInstanceIdRef.current) {
+            syncFromSiblingTab();
+          }
+        };
+      }
+    } catch {
+      // ignore if BroadcastChannel unavailable
+    }
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'pcmc_opd_system_db_v1' && e.newValue) {
+        syncFromSiblingTab();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      try {
+        syncChannelRef.current?.close();
+      } catch {
+        // ignore
+      }
+      syncChannelRef.current = null;
+    };
+  }, []);
 
   // Clear any legacy admin unlock state on load and handle ?sheetId= / ?gasUrl= from shared URL
   useEffect(() => {
@@ -439,18 +510,20 @@ export default function App() {
     }
   }, [user, db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
 
-  // Auto-Sync: periodic every 3 minutes + on window focus/visibility
+  // Auto-Sync: live multi-client polling every 15s (while tab is visible) + instant focus/visibility refresh
   useEffect(() => {
     const sheetId = (db.settings.spreadsheetId || '').trim();
     const gasUrl = (db.settings.gasUrl || '').trim();
     if ((!sheetId && !gasUrl) || db.settings.autoSync === false) return;
 
     const intervalId = window.setInterval(() => {
-      performBackgroundSync('interval');
-    }, 3 * 60 * 1000);
+      if (document.visibilityState === 'visible') {
+        performBackgroundSync('interval');
+      }
+    }, 15 * 1000);
 
     const handleVisibilityOrFocus = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastSyncEpochRef.current > 60 * 1000) {
+      if (document.visibilityState === 'visible' && Date.now() - lastSyncEpochRef.current > 3 * 1000) {
         performBackgroundSync('focus');
       }
     };
@@ -464,6 +537,16 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
     };
   }, [db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
+
+  // Auto-Sync: refresh silently when switching tabs so reports/lists always match remote sheet
+  useEffect(() => {
+    const sheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+    const gasUrl = (dbRef.current.settings.gasUrl || '').trim();
+    if ((!sheetId && !gasUrl) || dbRef.current.settings.autoSync === false) return;
+    if (Date.now() - lastSyncEpochRef.current > 3 * 1000) {
+      performBackgroundSync('focus');
+    }
+  }, [activeTab, performBackgroundSync]);
 
   // Auto-Sync: debounced sync after local edits (workloads, leaves, OT, staff, settings)
   useEffect(() => {
@@ -765,6 +848,10 @@ export default function App() {
     }
 
     clearWorkloadTombstone(entry);
+    enqueuePendingOutboxWorkloads([entry]);
+    if (newLeaveEntries.length > 0) enqueuePendingOutboxLeaves(newLeaveEntries);
+    if (newOtEntries.length > 0) enqueuePendingOutboxOt(newOtEntries);
+
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
     const nextDb = {
@@ -784,32 +871,42 @@ export default function App() {
 
     if (targetGasUrl) {
       let allOk = await appendViaAppsScript(targetGasUrl, 'appendWorkload', entry);
+      if (allOk) markWorkloadOutboxSynced([entry]);
       for (const l of newLeaveEntries) {
         const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', l);
-        if (!ok) allOk = false;
+        if (ok) markLeaveOutboxSynced([l]);
+        else allOk = false;
       }
       for (const o of newOtEntries) {
         const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', o);
-        if (!ok) allOk = false;
+        if (ok) markOtOutboxSynced([o]);
+        else allOk = false;
       }
       if (allOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
-        showToast('บันทึกในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
+        showToast('บันทึกในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
       }
+      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        await appendDailyWorkloadToSheet(token, targetSheetId, entry);
+        const wOk = await appendDailyWorkloadToSheet(token, targetSheetId, entry);
+        if (wOk) markWorkloadOutboxSynced([entry]);
         for (const l of newLeaveEntries) {
-          await appendLeaveToSheet(token, targetSheetId, l);
+          if (await appendLeaveToSheet(token, targetSheetId, l)) {
+            markLeaveOutboxSynced([l]);
+          }
         }
         for (const o of newOtEntries) {
-          await appendOTToSheet(token, targetSheetId, o);
+          if (await appendOTToSheet(token, targetSheetId, o)) {
+            markOtOutboxSynced([o]);
+          }
         }
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       }
     }
   };
@@ -874,6 +971,10 @@ export default function App() {
     }
 
     entries.forEach(clearWorkloadTombstone);
+    enqueuePendingOutboxWorkloads(entries);
+    if (newLeaveEntries.length > 0) enqueuePendingOutboxLeaves(newLeaveEntries);
+    if (newOtEntries.length > 0) enqueuePendingOutboxOt(newOtEntries);
+
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
     const nextDb = {
@@ -898,32 +999,42 @@ export default function App() {
 
     if (targetGasUrl) {
       let allOk = await appendViaAppsScript(targetGasUrl, 'appendWorkload', entries);
+      if (allOk) markWorkloadOutboxSynced(entries);
       for (const l of newLeaveEntries) {
         const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', l);
-        if (!ok) allOk = false;
+        if (ok) markLeaveOutboxSynced([l]);
+        else allOk = false;
       }
       for (const o of newOtEntries) {
         const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', o);
-        if (!ok) allOk = false;
+        if (ok) markOtOutboxSynced([o]);
+        else allOk = false;
       }
       if (allOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
-        showToast('บันทึกในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
+        showToast('บันทึกในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
       }
+      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        await appendDailyWorkloadToSheet(token, targetSheetId, entries);
+        const wOk = await appendDailyWorkloadToSheet(token, targetSheetId, entries);
+        if (wOk) markWorkloadOutboxSynced(entries);
         for (const l of newLeaveEntries) {
-          await appendLeaveToSheet(token, targetSheetId, l);
+          if (await appendLeaveToSheet(token, targetSheetId, l)) {
+            markLeaveOutboxSynced([l]);
+          }
         }
         for (const o of newOtEntries) {
-          await appendOTToSheet(token, targetSheetId, o);
+          if (await appendOTToSheet(token, targetSheetId, o)) {
+            markOtOutboxSynced([o]);
+          }
         }
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       }
     }
   };
@@ -940,11 +1051,19 @@ export default function App() {
     }
   };
 
+  type TargetedAdminRowSpec = {
+    action: 'updateWorkload' | 'deleteWorkload' | 'updateLeave' | 'deleteLeave' | 'updateOT' | 'deleteOT';
+    target: DailyWorkload | LeaveRecord | OTAttendance;
+    updated?: DailyWorkload | LeaveRecord | OTAttendance;
+    opSeq: number;
+  };
+
   // Sequential direct Admin sync queue (always executes regardless of autoSync setting)
   const enqueueAdminSync = (
     table: 'workloads' | 'leaves' | 'ot' | 'staff' | 'settings',
     expectedDirtyVersion: number,
-    auditEntry?: AuditLogEntry
+    auditEntry?: AuditLogEntry,
+    targetedRow?: TargetedAdminRowSpec
   ) => {
     adminWriteQueueRef.current = adminWriteQueueRef.current
       .catch(() => undefined)
@@ -957,6 +1076,72 @@ export default function App() {
           const pin = unlockedAdminPinRef.current;
 
           if (targetGasUrl && pin) {
+            if (
+              targetedRow &&
+              auditEntry &&
+              (table === 'workloads' || table === 'leaves' || table === 'ot')
+            ) {
+              const targetRes = await pushTargetedAdminRowMutationViaAppsScript({
+                gasUrl: targetGasUrl,
+                adminPin: pin,
+                action: targetedRow.action,
+                table,
+                target: targetedRow.target,
+                updated: targetedRow.updated,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+
+              if (targetRes.syncedDb && mutationSeqRef.current === targetedRow.opSeq) {
+                dbRef.current = targetRes.syncedDb;
+                setDb(targetRes.syncedDb);
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+              }
+
+              if (targetRes.ok) {
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                return;
+              }
+
+              if (targetRes.notFound) {
+                showToast(
+                  targetRes.error ||
+                    'รายการนี้ถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
+                  'info'
+                );
+                return;
+              }
+
+              const token = await getAccessToken();
+              if (token && targetSheetId) {
+                const oauthRes = await pushAdminTableViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  table,
+                  db: latestDb,
+                  auditEntry,
+                  expectedDirtyVersion,
+                });
+                if (oauthRes.ok) {
+                  lastSyncEpochRef.current = Date.now();
+                  setLastSyncedAt(formatSyncTime());
+                  return;
+                }
+              }
+
+              if (auditEntry) {
+                await recordAuditToSheet(auditEntry);
+              }
+              showToast(
+                `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${targetRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+                'error'
+              );
+              return;
+            }
+
             const gasRes = await pushAdminTableViaAppsScript({
               gasUrl: targetGasUrl,
               adminPin: pin,
@@ -1061,9 +1246,18 @@ export default function App() {
       reason: cleanReason,
       editedBy,
     };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
 
     const nextWorkloads = baseDb.workloads.map(w => w.id === stamped.id ? stamped : w);
+    const prevWasInOutbox = prevItem
+      ? getPendingOutboxWorkloads().some(
+          (w) => w.id === prevItem.id || getWorkloadKey(w) === getWorkloadKey(prevItem)
+        )
+      : false;
     if (prevItem) {
+      if (prevWasInOutbox) {
+        markWorkloadOutboxSynced([prevItem]);
+      }
       const oldKey = getWorkloadKey(prevItem);
       const newKey = getWorkloadKey(stamped);
       if (oldKey !== newKey && !nextWorkloads.some(w => getWorkloadKey(w) === oldKey)) {
@@ -1073,6 +1267,7 @@ export default function App() {
     clearWorkloadTombstone(stamped);
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markWorkloadsDirty();
     const nextDb = {
       ...baseDb,
@@ -1082,7 +1277,14 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} พร้อมบันทึกเหตุผลแล้ว`, 'success');
-    enqueueAdminSync('workloads', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'workloads',
+      dirtyVer,
+      auditEntry,
+      prevItem && !prevWasInOutbox
+        ? { action: 'updateWorkload', target: prevItem, updated: stamped, opSeq }
+        : undefined
+    );
   };
 
   // Handler: Delete Daily Workload (Admin, mandatory reason + timestamp)
@@ -1109,9 +1311,11 @@ export default function App() {
       reason: cleanReason,
       editedBy,
     };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
 
     const nextWorkloads = baseDb.workloads.filter(w => w.id !== id);
     if (target) {
+      markWorkloadOutboxSynced([target]);
       const targetKey = getWorkloadKey(target);
       if (!nextWorkloads.some(w => getWorkloadKey(w) === targetKey)) {
         recordDeletedWorkloadTombstone(target);
@@ -1119,6 +1323,7 @@ export default function App() {
     }
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markWorkloadsDirty();
     const nextDb = {
       ...baseDb,
@@ -1128,12 +1333,18 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast('ลบรายการภาระงานพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
-    enqueueAdminSync('workloads', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'workloads',
+      dirtyVer,
+      auditEntry,
+      target ? { action: 'deleteWorkload', target, opSeq } : undefined
+    );
   };
 
   // Handler: Save Leave (Data Entry: allowed via GAS or OAuth)
   const handleSaveLeave = async (leave: LeaveRecord) => {
     clearLeaveTombstone(leave);
+    enqueuePendingOutboxLeaves([leave]);
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
     const nextDb = {
@@ -1150,17 +1361,21 @@ export default function App() {
     if (targetGasUrl) {
       const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', leave);
       if (ok) {
+        markLeaveOutboxSynced([leave]);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
-        showToast('บันทึกวันลาในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่สำเร็จ', 'error');
+        showToast('บันทึกวันลาในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
       }
+      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        await appendLeaveToSheet(token, targetSheetId, leave);
+        const ok = await appendLeaveToSheet(token, targetSheetId, leave);
+        if (ok) markLeaveOutboxSynced([leave]);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       }
     }
   };
@@ -1200,8 +1415,18 @@ export default function App() {
       editedBy,
     };
 
+    enqueuePendingOutboxAuditLogs([auditEntry]);
+
     const nextLeaves = baseDb.leaves.map(l => l.id === stamped.id ? stamped : l);
+    const prevWasInOutbox = prevItem
+      ? getPendingOutboxLeaves().some(
+          (l) => l.id === prevItem.id || getLeaveKey(l) === getLeaveKey(prevItem)
+        )
+      : false;
     if (prevItem) {
+      if (prevWasInOutbox) {
+        markLeaveOutboxSynced([prevItem]);
+      }
       const oldKey = getLeaveKey(prevItem);
       const newKey = getLeaveKey(stamped);
       if (oldKey !== newKey && !nextLeaves.some(l => getLeaveKey(l) === oldKey)) {
@@ -1211,6 +1436,7 @@ export default function App() {
     clearLeaveTombstone(stamped);
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markLeavesDirty();
     const nextDb = {
       ...baseDb,
@@ -1220,7 +1446,14 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตประวัติการลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
-    enqueueAdminSync('leaves', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'leaves',
+      dirtyVer,
+      auditEntry,
+      prevItem && !prevWasInOutbox
+        ? { action: 'updateLeave', target: prevItem, updated: stamped, opSeq }
+        : undefined
+    );
   };
 
   // Handler: Delete Leave (Admin, mandatory reason + timestamp)
@@ -1247,9 +1480,11 @@ export default function App() {
       reason: cleanReason,
       editedBy,
     };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
 
     const nextLeaves = baseDb.leaves.filter(l => l.id !== id);
     if (target) {
+      markLeaveOutboxSynced([target]);
       const targetKey = getLeaveKey(target);
       if (!nextLeaves.some(l => getLeaveKey(l) === targetKey)) {
         recordDeletedLeaveTombstone(target);
@@ -1257,6 +1492,7 @@ export default function App() {
     }
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markLeavesDirty();
     const nextDb = {
       ...baseDb,
@@ -1266,12 +1502,19 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast('ลบประวัติการลาพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
-    enqueueAdminSync('leaves', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'leaves',
+      dirtyVer,
+      auditEntry,
+      target ? { action: 'deleteLeave', target, opSeq } : undefined
+    );
   };
 
   // Handler: Save Batch OT (Data Entry: allowed via GAS or OAuth)
   const handleSaveBatchOT = async (records: OTAttendance[]) => {
+    if (!records || records.length === 0) return;
     records.forEach(clearOtTombstone);
+    enqueuePendingOutboxOt(records);
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
     const nextDb = {
@@ -1286,25 +1529,26 @@ export default function App() {
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
     if (targetGasUrl) {
-      let allOk = true;
-      for (const r of records) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', r);
-        if (!ok) allOk = false;
-      }
-      if (allOk) {
+      const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', records);
+      if (ok) {
+        markOtOutboxSynced(records);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
-        showToast('บันทึกเวร OT ในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
+        showToast('บันทึกเวร OT ในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
       }
+      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
         for (const r of records) {
-          await appendOTToSheet(token, targetSheetId, r);
+          if (await appendOTToSheet(token, targetSheetId, r)) {
+            markOtOutboxSynced([r]);
+          }
         }
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       }
     }
   };
@@ -1342,9 +1586,18 @@ export default function App() {
       reason: cleanReason,
       editedBy,
     };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
 
     const nextOt = baseDb.ot.map(o => o.id === stamped.id ? stamped : o);
+    const prevWasInOutbox = prevItem
+      ? getPendingOutboxOt().some(
+          (o) => o.id === prevItem.id || getOtKey(o) === getOtKey(prevItem)
+        )
+      : false;
     if (prevItem) {
+      if (prevWasInOutbox) {
+        markOtOutboxSynced([prevItem]);
+      }
       const oldKey = getOtKey(prevItem);
       const newKey = getOtKey(stamped);
       if (oldKey !== newKey && !nextOt.some(o => getOtKey(o) === oldKey)) {
@@ -1354,6 +1607,7 @@ export default function App() {
     clearOtTombstone(stamped);
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markOtDirty();
     const nextDb = {
       ...baseDb,
@@ -1363,7 +1617,14 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตเวรนอกเวลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
-    enqueueAdminSync('ot', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'ot',
+      dirtyVer,
+      auditEntry,
+      prevItem && !prevWasInOutbox
+        ? { action: 'updateOT', target: prevItem, updated: stamped, opSeq }
+        : undefined
+    );
   };
 
   // Handler: Delete OT (Admin, mandatory reason + timestamp)
@@ -1390,9 +1651,11 @@ export default function App() {
       reason: cleanReason,
       editedBy,
     };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
 
     const nextOt = baseDb.ot.filter(o => o.id !== id);
     if (target) {
+      markOtOutboxSynced([target]);
       const targetKey = getOtKey(target);
       if (!nextOt.some(o => getOtKey(o) === targetKey)) {
         recordDeletedOtTombstone(target);
@@ -1400,6 +1663,7 @@ export default function App() {
     }
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markOtDirty();
     const nextDb = {
       ...baseDb,
@@ -1409,7 +1673,12 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast('ลบรายการเวรนอกเวลาพร้อมบันทึกเหตุผลแล้ว', 'info');
-    enqueueAdminSync('ot', dirtyVer, auditEntry);
+    enqueueAdminSync(
+      'ot',
+      dirtyVer,
+      auditEntry,
+      target ? { action: 'deleteOT', target, opSeq } : undefined
+    );
   };
 
   // Handler: Add Staff Member
@@ -1547,6 +1816,7 @@ export default function App() {
     mutationSeqRef.current += 1;
     localStorage.removeItem('pcmc_opd_system_db_v1');
     clearAllTombstones();
+    clearAllPendingOutbox();
     clearWorkloadsDirty();
     clearLeavesDirty();
     clearOtDirty();

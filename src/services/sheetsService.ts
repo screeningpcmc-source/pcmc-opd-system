@@ -46,6 +46,7 @@ const WORKLOADS_DIRTY_KEY = 'pcmc_workloads_dirty_v1';
 const LEAVES_DIRTY_KEY = 'pcmc_leaves_dirty_v1';
 const OT_DIRTY_KEY = 'pcmc_ot_dirty_v1';
 const TOMBSTONES_STORAGE_KEY = 'pcmc_deleted_tombstones_v1';
+const PENDING_OUTBOX_KEY = 'pcmc_pending_outbox_v1';
 const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
@@ -269,6 +270,229 @@ export const clearAllTombstones = (): void => {
   memTombstones = { workloads: {}, leaves: {}, ot: {} };
   persistTombstones();
 };
+
+interface PendingOutboxState {
+  workloads: DailyWorkload[];
+  leaves: LeaveRecord[];
+  ot: OTAttendance[];
+  auditLogs: AuditLogEntry[];
+}
+
+const emptyPendingOutbox = (): PendingOutboxState => ({
+  workloads: [],
+  leaves: [],
+  ot: [],
+  auditLogs: [],
+});
+
+let memPendingOutbox: PendingOutboxState = (() => {
+  try {
+    const raw = localStorage.getItem(PENDING_OUTBOX_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        workloads: Array.isArray(parsed?.workloads) ? parsed.workloads : [],
+        leaves: Array.isArray(parsed?.leaves) ? parsed.leaves : [],
+        ot: Array.isArray(parsed?.ot) ? parsed.ot : [],
+        auditLogs: Array.isArray(parsed?.auditLogs) ? parsed.auditLogs : [],
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return emptyPendingOutbox();
+})();
+
+function persistPendingOutbox(): void {
+  try {
+    localStorage.setItem(PENDING_OUTBOX_KEY, JSON.stringify(memPendingOutbox));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function readPendingOutboxFresh(): PendingOutboxState {
+  try {
+    const raw = localStorage.getItem(PENDING_OUTBOX_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      memPendingOutbox = {
+        workloads: Array.isArray(parsed?.workloads) ? parsed.workloads : [],
+        leaves: Array.isArray(parsed?.leaves) ? parsed.leaves : [],
+        ot: Array.isArray(parsed?.ot) ? parsed.ot : [],
+        auditLogs: Array.isArray(parsed?.auditLogs) ? parsed.auditLogs : [],
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return memPendingOutbox;
+}
+
+export const getPendingOutboxWorkloads = (): DailyWorkload[] => [
+  ...readPendingOutboxFresh().workloads,
+];
+
+export const getPendingOutboxLeaves = (): LeaveRecord[] => [
+  ...readPendingOutboxFresh().leaves,
+];
+
+export const getPendingOutboxOt = (): OTAttendance[] => [
+  ...readPendingOutboxFresh().ot,
+];
+
+export const getPendingOutboxAuditLogs = (): AuditLogEntry[] => [
+  ...readPendingOutboxFresh().auditLogs,
+];
+
+export const enqueuePendingOutboxWorkloads = (items: DailyWorkload[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const seenIds = new Set(box.workloads.map((w) => w.id));
+  items.forEach((w) => {
+    if (w && !seenIds.has(w.id)) {
+      seenIds.add(w.id);
+      box.workloads.push(w);
+    }
+  });
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const markWorkloadOutboxSynced = (items: DailyWorkload[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const removeIds = new Set(items.map((w) => w.id).filter(Boolean));
+  const removeKeys = new Set(items.map(workloadKey));
+  box.workloads = box.workloads.filter(
+    (w) => !removeIds.has(w.id) && !removeKeys.has(workloadKey(w))
+  );
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const enqueuePendingOutboxLeaves = (items: LeaveRecord[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const seenIds = new Set(box.leaves.map((l) => l.id));
+  items.forEach((l) => {
+    if (l && !seenIds.has(l.id)) {
+      seenIds.add(l.id);
+      box.leaves.push(l);
+    }
+  });
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const markLeaveOutboxSynced = (items: LeaveRecord[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const removeIds = new Set(items.map((l) => l.id).filter(Boolean));
+  const removeKeys = new Set(items.map(leaveKey));
+  box.leaves = box.leaves.filter(
+    (l) => !removeIds.has(l.id) && !removeKeys.has(leaveKey(l))
+  );
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const enqueuePendingOutboxOt = (items: OTAttendance[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const seenIds = new Set(box.ot.map((o) => o.id));
+  items.forEach((o) => {
+    if (o && !seenIds.has(o.id)) {
+      seenIds.add(o.id);
+      box.ot.push(o);
+    }
+  });
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const markOtOutboxSynced = (items: OTAttendance[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const removeIds = new Set(items.map((o) => o.id).filter(Boolean));
+  const removeKeys = new Set(items.map(otKey));
+  box.ot = box.ot.filter((o) => !removeIds.has(o.id) && !removeKeys.has(otKey(o)));
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const enqueuePendingOutboxAuditLogs = (items: AuditLogEntry[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const seenIds = new Set(box.auditLogs.map((a) => a.id));
+  items.forEach((a) => {
+    if (a && !seenIds.has(a.id)) {
+      seenIds.add(a.id);
+      box.auditLogs.push(a);
+    }
+  });
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const markAuditOutboxSynced = (items: AuditLogEntry[]): void => {
+  if (!items || items.length === 0) return;
+  const box = readPendingOutboxFresh();
+  const removeIds = new Set(items.map((a) => a.id).filter(Boolean));
+  const removeKeys = new Set(items.map(auditLogKey));
+  box.auditLogs = box.auditLogs.filter(
+    (a) => !removeIds.has(a.id) && !removeKeys.has(auditLogKey(a))
+  );
+  memPendingOutbox = box;
+  persistPendingOutbox();
+};
+
+export const clearAllPendingOutbox = (): void => {
+  memPendingOutbox = emptyPendingOutbox();
+  persistPendingOutbox();
+};
+
+function pruneOutboxSyncedAgainstRemote(params: {
+  remoteWKeys?: Set<string>;
+  remoteLKeys?: Set<string>;
+  remoteOKeys?: Set<string>;
+  remoteAuditKeys?: Set<string>;
+}): void {
+  const box = readPendingOutboxFresh();
+  let changed = false;
+  if (params.remoteWKeys && box.workloads.length > 0) {
+    const next = box.workloads.filter((w) => !params.remoteWKeys!.has(workloadKey(w)));
+    if (next.length !== box.workloads.length) {
+      box.workloads = next;
+      changed = true;
+    }
+  }
+  if (params.remoteLKeys && box.leaves.length > 0) {
+    const next = box.leaves.filter((l) => !params.remoteLKeys!.has(leaveKey(l)));
+    if (next.length !== box.leaves.length) {
+      box.leaves = next;
+      changed = true;
+    }
+  }
+  if (params.remoteOKeys && box.ot.length > 0) {
+    const next = box.ot.filter((o) => !params.remoteOKeys!.has(otKey(o)));
+    if (next.length !== box.ot.length) {
+      box.ot = next;
+      changed = true;
+    }
+  }
+  if (params.remoteAuditKeys && box.auditLogs.length > 0) {
+    const next = box.auditLogs.filter((a) => !params.remoteAuditKeys!.has(auditLogKey(a)));
+    if (next.length !== box.auditLogs.length) {
+      box.auditLogs = next;
+      changed = true;
+    }
+  }
+  if (changed) {
+    memPendingOutbox = box;
+    persistPendingOutbox();
+  }
+}
 
 function normalizeAdditionalAdminPins(raw: unknown): AdminPinEntry[] {
   const defaults = buildDefaultAdditionalAdminPins();
@@ -872,29 +1096,51 @@ export const syncAllWithGoogleSheet = async (
   const shouldOverwriteWorkloads = isWorkloadsDirty();
   const sheetWKeys = new Set(sheetWorkloads.map(workloadKey));
   const localWKeys = new Set(db.workloads.map(workloadKey));
+  pruneOutboxSyncedAgainstRemote({ remoteWKeys: sheetWKeys });
 
   const workloadsToPush = shouldOverwriteWorkloads
     ? []
-    : db.workloads.filter((w) => !sheetWKeys.has(workloadKey(w)));
+    : getPendingOutboxWorkloads().filter((w) => !sheetWKeys.has(workloadKey(w)));
   const workloadsPulled = shouldOverwriteWorkloads
     ? []
     : sheetWorkloads.filter((w) => !localWKeys.has(workloadKey(w)));
 
-  const mergedWorkloadsMap = new Map<string, DailyWorkload>();
-  (shouldOverwriteWorkloads ? db.workloads : [...db.workloads, ...sheetWorkloads]).forEach((w) => {
+  const existingWorkloadQueue = new Map<string, DailyWorkload[]>();
+  db.workloads.forEach((w) => {
     const k = workloadKey(w);
-    if (!mergedWorkloadsMap.has(k)) {
-      mergedWorkloadsMap.set(
-        k,
-        normalizeWorkloadRecord({ ...w, totalPt: getEffectiveTotalPt(w) }, db.settings.premiumSubClinics)
-      );
-    }
+    const arr = existingWorkloadQueue.get(k);
+    if (arr) arr.push(w);
+    else existingWorkloadQueue.set(k, [w]);
   });
-  const mergedWorkloads = Array.from(mergedWorkloadsMap.values()).sort((a, b) =>
-    b.date.localeCompare(a.date)
-  );
 
-  // 3. Parse Leave_Records from sheet & merge with local
+  const mergedWorkloads = (
+    shouldOverwriteWorkloads
+      ? db.workloads
+      : [
+          ...workloadsToPush,
+          ...sheetWorkloads.map((sw) => {
+            const matches = existingWorkloadQueue.get(workloadKey(sw));
+            const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+            if (!prev) return sw;
+            return {
+              ...sw,
+              id: prev.id,
+              lastEditedAt: prev.lastEditedAt,
+              lastEditReason: prev.lastEditReason,
+              lastEditedBy: prev.lastEditedBy,
+            };
+          }),
+        ]
+  )
+    .map((w) =>
+      normalizeWorkloadRecord(
+        { ...w, totalPt: getEffectiveTotalPt(w) },
+        db.settings.premiumSubClinics
+      )
+    )
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // 3. Parse Leave_Records from sheet & merge cleanly (Sheet + Pending Outbox)
   const sheetLeaves: LeaveRecord[] = leaveRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
@@ -915,19 +1161,40 @@ export const syncAllWithGoogleSheet = async (
 
   const shouldOverwriteLeaves = isLeavesDirty();
   const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
+  pruneOutboxSyncedAgainstRemote({ remoteLKeys: sheetLKeys });
   const leavesToPush = shouldOverwriteLeaves
     ? []
-    : db.leaves.filter((l) => !sheetLKeys.has(leaveKey(l)));
-  const mergedLeavesMap = new Map<string, LeaveRecord>();
-  (shouldOverwriteLeaves ? db.leaves : [...db.leaves, ...sheetLeaves]).forEach((l) => {
-    const k = leaveKey(l);
-    if (!mergedLeavesMap.has(k)) mergedLeavesMap.set(k, l);
-  });
-  const mergedLeaves = Array.from(mergedLeavesMap.values()).sort((a, b) =>
-    b.startDate.localeCompare(a.startDate)
-  );
+    : getPendingOutboxLeaves().filter((l) => !sheetLKeys.has(leaveKey(l)));
 
-  // 4. Parse OT_Attendance from sheet & merge with local
+  const existingLeaveQueue = new Map<string, LeaveRecord[]>();
+  db.leaves.forEach((l) => {
+    const k = leaveKey(l);
+    const arr = existingLeaveQueue.get(k);
+    if (arr) arr.push(l);
+    else existingLeaveQueue.set(k, [l]);
+  });
+
+  const mergedLeaves = (
+    shouldOverwriteLeaves
+      ? db.leaves
+      : [
+          ...leavesToPush,
+          ...sheetLeaves.map((sl) => {
+            const matches = existingLeaveQueue.get(leaveKey(sl));
+            const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+            if (!prev) return sl;
+            return {
+              ...sl,
+              id: prev.id,
+              lastEditedAt: prev.lastEditedAt,
+              lastEditReason: prev.lastEditReason,
+              lastEditedBy: prev.lastEditedBy,
+            };
+          }),
+        ]
+  ).sort((a, b) => b.startDate.localeCompare(a.startDate));
+
+  // 4. Parse OT_Attendance from sheet & merge cleanly (Sheet + Pending Outbox)
   const sheetOt: OTAttendance[] = otRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
@@ -946,17 +1213,40 @@ export const syncAllWithGoogleSheet = async (
 
   const shouldOverwriteOt = isOtDirty();
   const sheetOKeys = new Set(sheetOt.map(otKey));
+  pruneOutboxSyncedAgainstRemote({ remoteOKeys: sheetOKeys });
   const otToPush = shouldOverwriteOt
     ? []
-    : db.ot.filter((o) => !sheetOKeys.has(otKey(o)));
-  const mergedOtMap = new Map<string, OTAttendance>();
-  (shouldOverwriteOt ? db.ot : [...db.ot, ...sheetOt]).forEach((o) => {
-    const k = otKey(o);
-    if (!mergedOtMap.has(k)) mergedOtMap.set(k, o);
-  });
-  const mergedOt = Array.from(mergedOtMap.values()).sort((a, b) => b.date.localeCompare(a.date));
+    : getPendingOutboxOt().filter((o) => !sheetOKeys.has(otKey(o)));
 
-  // 4.5 Parse Audit_Logs from sheet & merge with local
+  const existingOtQueue = new Map<string, OTAttendance[]>();
+  db.ot.forEach((o) => {
+    const k = otKey(o);
+    const arr = existingOtQueue.get(k);
+    if (arr) arr.push(o);
+    else existingOtQueue.set(k, [o]);
+  });
+
+  const mergedOt = (
+    shouldOverwriteOt
+      ? db.ot
+      : [
+          ...otToPush,
+          ...sheetOt.map((so) => {
+            const matches = existingOtQueue.get(otKey(so));
+            const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+            if (!prev) return so;
+            return {
+              ...so,
+              id: prev.id,
+              lastEditedAt: prev.lastEditedAt,
+              lastEditReason: prev.lastEditReason,
+              lastEditedBy: prev.lastEditedBy,
+            };
+          }),
+        ]
+  ).sort((a, b) => b.date.localeCompare(a.date));
+
+  // 4.5 Parse Audit_Logs from sheet & merge with pending outbox audits
   const sheetAuditLogs: AuditLogEntry[] = auditRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[1] || '').trim())
@@ -971,15 +1261,22 @@ export const syncAllWithGoogleSheet = async (
     }));
 
   const sheetAuditKeys = new Set(sheetAuditLogs.map(auditLogKey));
-  const auditLogsToPush = (db.auditLogs || []).filter((a) => !sheetAuditKeys.has(auditLogKey(a)));
-  const mergedAuditMap = new Map<string, AuditLogEntry>();
-  [...(db.auditLogs || []), ...sheetAuditLogs].forEach((a) => {
-    const k = auditLogKey(a);
-    if (!mergedAuditMap.has(k)) mergedAuditMap.set(k, a);
-  });
-  const mergedAuditLogs = Array.from(mergedAuditMap.values()).sort((a, b) =>
-    b.timestamp.localeCompare(a.timestamp)
+  pruneOutboxSyncedAgainstRemote({ remoteAuditKeys: sheetAuditKeys });
+  const auditLogsToPush = getPendingOutboxAuditLogs().filter(
+    (a) => !sheetAuditKeys.has(auditLogKey(a))
   );
+  const existingAuditMap = new Map<string, AuditLogEntry>();
+  (db.auditLogs || []).forEach((a) => {
+    const k = auditLogKey(a);
+    if (!existingAuditMap.has(k)) existingAuditMap.set(k, a);
+  });
+  const mergedAuditLogs = [
+    ...auditLogsToPush,
+    ...sheetAuditLogs.map((sa) => {
+      const prev = existingAuditMap.get(auditLogKey(sa));
+      return prev ? { ...sa, id: prev.id } : sa;
+    }),
+  ].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   // 5. Parse or Push Settings
   const settingsMap: Record<string, string> = {};
@@ -1400,6 +1697,10 @@ export const syncAllWithGoogleSheet = async (
   clearWorkloadsDirty();
   clearLeavesDirty();
   clearOtDirty();
+  if (workloadsToPush.length > 0) markWorkloadOutboxSynced(workloadsToPush);
+  if (leavesToPush.length > 0) markLeaveOutboxSynced(leavesToPush);
+  if (otToPush.length > 0) markOtOutboxSynced(otToPush);
+  if (auditLogsToPush.length > 0) markAuditOutboxSynced(auditLogsToPush);
   if (shouldOverwriteWorkloads) clearAllWorkloadTombstones();
   if (shouldOverwriteLeaves) clearAllLeaveTombstones();
   if (shouldOverwriteOt) clearAllOtTombstones();
@@ -1627,8 +1928,8 @@ async function fetchGvizSheetRows(spreadsheetId: string, sheetName: string): Pro
   try {
     const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(
       spreadsheetId
-    )}/gviz/tq?tqx=out:json&headers=1&sheet=${encodeURIComponent(sheetName)}`;
-    const res = await fetch(url, { method: 'GET' });
+    )}/gviz/tq?tqx=out:json&headers=1&sheet=${encodeURIComponent(sheetName)}&_ts=${Date.now()}`;
+    const res = await fetch(url, { method: 'GET', cache: 'no-store' });
     if (!res.ok) return null;
     const text = await res.text();
     if (!text || text.trim().startsWith('<') || !text.includes('setResponse(')) {
@@ -1648,18 +1949,26 @@ async function fetchGvizSheetRows(spreadsheetId: string, sheetName: string): Pro
   }
 }
 
+interface MergeRemoteExtraOptions {
+  justPushedWorkloads?: DailyWorkload[];
+  justPushedLeaves?: LeaveRecord[];
+  justPushedOt?: OTAttendance[];
+  justPushedAudits?: AuditLogEntry[];
+}
+
 function mergeRemoteDataRows(
   params: {
-    staffRows: string[][];
-    workloadRows: string[][];
-    leaveRows: string[][];
-    otRows: string[][];
-    settingsRows: string[][];
-    auditRows: string[][];
+    staffRows: string[][] | null;
+    workloadRows: string[][] | null;
+    leaveRows: string[][] | null;
+    otRows: string[][] | null;
+    settingsRows: string[][] | null;
+    auditRows: string[][] | null;
   },
-  db: AppDatabase
+  db: AppDatabase,
+  extra?: MergeRemoteExtraOptions
 ): AppDatabase {
-  const sheetStaff: StaffMember[] = params.staffRows
+  const sheetStaff: StaffMember[] = (params.staffRows || [])
     .filter((r) => (r[1] || '').trim().length > 0)
     .map((r, idx) => {
       const rawPos = (r[2] || 'RN').trim();
@@ -1680,139 +1989,254 @@ function mergeRemoteDataRows(
 
   const finalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
 
-  const deletedWKeys = getDeletedWorkloadKeySet();
-  const sheetWorkloads: DailyWorkload[] = params.workloadRows
-    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r, idx) => {
-      const adultPt = Number(r[4] || 0);
-      const childPt = Number(r[5] || 0);
-      const totalPt = Math.max(Number(r[3] || 0), adultPt + childPt);
-      const rawRecordType = String(r[17] || '').trim();
-      const recordType: WorkloadRecordType | undefined =
-        rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
-          ? rawRecordType
-          : undefined;
-      return normalizeWorkloadRecord(
-        {
-          id: `REC-GS-${Date.now()}-${idx}`,
-          date: String(r[0] || '').trim(),
-          shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
-          clinic: String(r[2] || '').trim(),
-          totalPt,
-          adultPt,
-          childPt,
-          admit: Number(r[6] || 0),
-          hn: Number(r[7] || 0),
-          rn: Number(r[8] || 0),
-          pn: Number(r[9] || 0),
-          na: Number(r[10] || 0),
-          clerk: Number(r[11] || 0),
-          serviceWorker: Number(r[12] || 0),
-          note: String(r[13] || '').trim(),
-          reporter: String(r[14] || '').trim(),
-          clinicGroup: String(r[15] || '').trim() || undefined,
-          poolId: String(r[16] || '').trim() || undefined,
-          recordType,
-        },
-        db.settings.premiumSubClinics
-      );
-    })
-    .filter((w) => !deletedWKeys.has(workloadKey(w)));
-
-  const shouldOverwriteWorkloads = isWorkloadsDirty();
-  const mergedWorkloadsMap = new Map<string, DailyWorkload>();
-  (shouldOverwriteWorkloads ? db.workloads : [...db.workloads, ...sheetWorkloads]).forEach((w) => {
-    const k = workloadKey(w);
-    if (!mergedWorkloadsMap.has(k)) {
-      mergedWorkloadsMap.set(
-        k,
-        normalizeWorkloadRecord({ ...w, totalPt: getEffectiveTotalPt(w) }, db.settings.premiumSubClinics)
-      );
-    }
-  });
-  const mergedWorkloads = Array.from(mergedWorkloadsMap.values()).sort((a, b) =>
-    b.date.localeCompare(a.date)
-  );
-
-  const deletedLKeys = getDeletedLeaveKeySet();
-  const sheetLeaves: LeaveRecord[] = params.leaveRows
-    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r, idx) => {
-      const rawPos = (r[3] || 'RN').trim();
-      return {
-        id: `LV-GS-${Date.now()}-${idx}`,
-        startDate: String(r[0] || '').trim(),
-        endDate: String(r[1] || r[0] || '').trim(),
-        staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
-        clinic: String(r[4] || '').trim(),
-        leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
-        days: Number(r[6] || 1),
-        note: String(r[7] || '').trim(),
-      };
-    })
-    .filter((l) => !deletedLKeys.has(leaveKey(l)));
-
-  const shouldOverwriteLeaves = isLeavesDirty();
-  const mergedLeavesMap = new Map<string, LeaveRecord>();
-  (shouldOverwriteLeaves ? db.leaves : [...db.leaves, ...sheetLeaves]).forEach((l) => {
-    const k = leaveKey(l);
-    if (!mergedLeavesMap.has(k)) mergedLeavesMap.set(k, l);
-  });
-  const mergedLeaves = Array.from(mergedLeavesMap.values()).sort((a, b) =>
-    b.startDate.localeCompare(a.startDate)
-  );
-
-  const deletedOKeys = getDeletedOtKeySet();
-  const sheetOt: OTAttendance[] = params.otRows
-    .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r, idx) => {
-      const rawPos = (r[3] || 'RN').trim();
-      return {
-        id: `OT-GS-${Date.now()}-${idx}`,
-        date: String(r[0] || '').trim(),
-        shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
-        staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
-        homeClinic: String(r[4] || '').trim(),
-        workClinic: String(r[5] || '').trim(),
-      };
-    })
-    .filter((o) => !deletedOKeys.has(otKey(o)));
-
-  const shouldOverwriteOt = isOtDirty();
-  const mergedOtMap = new Map<string, OTAttendance>();
-  (shouldOverwriteOt ? db.ot : [...db.ot, ...sheetOt]).forEach((o) => {
-    const k = otKey(o);
-    if (!mergedOtMap.has(k)) mergedOtMap.set(k, o);
-  });
-  const mergedOt = Array.from(mergedOtMap.values()).sort((a, b) => b.date.localeCompare(a.date));
-
-  const sheetAuditLogs: AuditLogEntry[] = params.auditRows
-    .filter((r) => (r[0] || '').trim() && (r[1] || '').trim())
-    .map((r, idx) => ({
-      id: `AUD-GS-${Date.now()}-${idx}`,
-      timestamp: String(r[0] || '').trim(),
-      action: String(r[1] || 'แก้ไขวันลา').trim() as AuditLogEntry['action'],
-      targetName: String(r[2] || '').trim(),
-      summary: String(r[3] || '').trim(),
-      reason: String(r[4] || '').trim(),
-      editedBy: String(r[5] || '').trim() || undefined,
-    }));
-
-  const mergedAuditMap = new Map<string, AuditLogEntry>();
-  [...(db.auditLogs || []), ...sheetAuditLogs].forEach((a) => {
-    const k = auditLogKey(a);
-    if (!mergedAuditMap.has(k)) mergedAuditMap.set(k, a);
-  });
-  const mergedAuditLogs = Array.from(mergedAuditMap.values()).sort((a, b) =>
-    b.timestamp.localeCompare(a.timestamp)
-  );
-
   const settingsMap: Record<string, string> = {};
-  params.settingsRows.forEach((r) => {
+  (params.settingsRows || []).forEach((r) => {
     if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
   });
+  const remotePremiumClinics = settingsMap['Premium_Sub_Clinics']
+    ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+    : db.settings.premiumSubClinics;
+
+  const deletedWKeys = getDeletedWorkloadKeySet();
+  let mergedWorkloads: DailyWorkload[];
+  if (isWorkloadsDirty() || params.workloadRows === null) {
+    mergedWorkloads = [...db.workloads];
+  } else {
+    const existingWorkloadQueue = new Map<string, DailyWorkload[]>();
+    db.workloads.forEach((w) => {
+      const k = workloadKey(w);
+      const arr = existingWorkloadQueue.get(k);
+      if (arr) arr.push(w);
+      else existingWorkloadQueue.set(k, [w]);
+    });
+
+    const sheetWorkloads: DailyWorkload[] = params.workloadRows
+      .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+      .map((r, idx) => {
+        const adultPt = Number(r[4] || 0);
+        const childPt = Number(r[5] || 0);
+        const totalPt = Math.max(Number(r[3] || 0), adultPt + childPt);
+        const rawRecordType = String(r[17] || '').trim();
+        const recordType: WorkloadRecordType | undefined =
+          rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
+            ? rawRecordType
+            : undefined;
+        const normalized = normalizeWorkloadRecord(
+          {
+            id: `REC-GS-${Date.now()}-${idx}`,
+            date: String(r[0] || '').trim(),
+            shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+            clinic: String(r[2] || '').trim(),
+            totalPt,
+            adultPt,
+            childPt,
+            admit: Number(r[6] || 0),
+            hn: Number(r[7] || 0),
+            rn: Number(r[8] || 0),
+            pn: Number(r[9] || 0),
+            na: Number(r[10] || 0),
+            clerk: Number(r[11] || 0),
+            serviceWorker: Number(r[12] || 0),
+            note: String(r[13] || '').trim(),
+            reporter: String(r[14] || '').trim(),
+            clinicGroup: String(r[15] || '').trim() || undefined,
+            poolId: String(r[16] || '').trim() || undefined,
+            recordType,
+          },
+          remotePremiumClinics
+        );
+        const matches = existingWorkloadQueue.get(workloadKey(normalized));
+        const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+        if (!prev) return normalized;
+        return {
+          ...normalized,
+          id: prev.id,
+          lastEditedAt: prev.lastEditedAt,
+          lastEditReason: prev.lastEditReason,
+          lastEditedBy: prev.lastEditedBy,
+        };
+      })
+      .filter((w) => !deletedWKeys.has(workloadKey(w)));
+
+    const sheetWKeys = new Set(sheetWorkloads.map(workloadKey));
+    pruneOutboxSyncedAgainstRemote({ remoteWKeys: sheetWKeys });
+
+    const outboxAndJustPushedW: DailyWorkload[] = [];
+    const seenPendingW = new Set<string>();
+    [...getPendingOutboxWorkloads(), ...(extra?.justPushedWorkloads || [])].forEach((w) => {
+      const normalized = normalizeWorkloadRecord(
+        { ...w, totalPt: getEffectiveTotalPt(w) },
+        remotePremiumClinics
+      );
+      const k = workloadKey(normalized);
+      if (!deletedWKeys.has(k) && !sheetWKeys.has(k) && !seenPendingW.has(w.id || k)) {
+        seenPendingW.add(w.id || k);
+        outboxAndJustPushedW.push(normalized);
+      }
+    });
+
+    mergedWorkloads = [...outboxAndJustPushedW, ...sheetWorkloads].sort((a, b) =>
+      b.date.localeCompare(a.date)
+    );
+  }
+
+  const deletedLKeys = getDeletedLeaveKeySet();
+  let mergedLeaves: LeaveRecord[];
+  if (isLeavesDirty() || params.leaveRows === null) {
+    mergedLeaves = [...db.leaves];
+  } else {
+    const existingLeaveQueue = new Map<string, LeaveRecord[]>();
+    db.leaves.forEach((l) => {
+      const k = leaveKey(l);
+      const arr = existingLeaveQueue.get(k);
+      if (arr) arr.push(l);
+      else existingLeaveQueue.set(k, [l]);
+    });
+
+    const sheetLeaves: LeaveRecord[] = params.leaveRows
+      .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+      .map((r, idx) => {
+        const rawPos = (r[3] || 'RN').trim();
+        const item: LeaveRecord = {
+          id: `LV-GS-${Date.now()}-${idx}`,
+          startDate: String(r[0] || '').trim(),
+          endDate: String(r[1] || r[0] || '').trim(),
+          staffName: String(r[2] || '').trim(),
+          position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+          clinic: String(r[4] || '').trim(),
+          leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
+          days: Number(r[6] || 1),
+          note: String(r[7] || '').trim(),
+        };
+        const matches = existingLeaveQueue.get(leaveKey(item));
+        const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+        if (!prev) return item;
+        return {
+          ...item,
+          id: prev.id,
+          lastEditedAt: prev.lastEditedAt,
+          lastEditReason: prev.lastEditReason,
+          lastEditedBy: prev.lastEditedBy,
+        };
+      })
+      .filter((l) => !deletedLKeys.has(leaveKey(l)));
+
+    const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
+    pruneOutboxSyncedAgainstRemote({ remoteLKeys: sheetLKeys });
+
+    const outboxAndJustPushedL: LeaveRecord[] = [];
+    const seenPendingL = new Set<string>();
+    [...getPendingOutboxLeaves(), ...(extra?.justPushedLeaves || [])].forEach((l) => {
+      const k = leaveKey(l);
+      if (!deletedLKeys.has(k) && !sheetLKeys.has(k) && !seenPendingL.has(l.id || k)) {
+        seenPendingL.add(l.id || k);
+        outboxAndJustPushedL.push(l);
+      }
+    });
+
+    mergedLeaves = [...outboxAndJustPushedL, ...sheetLeaves].sort((a, b) =>
+      b.startDate.localeCompare(a.startDate)
+    );
+  }
+
+  const deletedOKeys = getDeletedOtKeySet();
+  let mergedOt: OTAttendance[];
+  if (isOtDirty() || params.otRows === null) {
+    mergedOt = [...db.ot];
+  } else {
+    const existingOtQueue = new Map<string, OTAttendance[]>();
+    db.ot.forEach((o) => {
+      const k = otKey(o);
+      const arr = existingOtQueue.get(k);
+      if (arr) arr.push(o);
+      else existingOtQueue.set(k, [o]);
+    });
+
+    const sheetOt: OTAttendance[] = params.otRows
+      .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
+      .map((r, idx) => {
+        const rawPos = (r[3] || 'RN').trim();
+        const item: OTAttendance = {
+          id: `OT-GS-${Date.now()}-${idx}`,
+          date: String(r[0] || '').trim(),
+          shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
+          staffName: String(r[2] || '').trim(),
+          position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+          homeClinic: String(r[4] || '').trim(),
+          workClinic: String(r[5] || '').trim(),
+        };
+        const matches = existingOtQueue.get(otKey(item));
+        const prev = matches && matches.length > 0 ? matches.shift() : undefined;
+        if (!prev) return item;
+        return {
+          ...item,
+          id: prev.id,
+          lastEditedAt: prev.lastEditedAt,
+          lastEditReason: prev.lastEditReason,
+          lastEditedBy: prev.lastEditedBy,
+        };
+      })
+      .filter((o) => !deletedOKeys.has(otKey(o)));
+
+    const sheetOKeys = new Set(sheetOt.map(otKey));
+    pruneOutboxSyncedAgainstRemote({ remoteOKeys: sheetOKeys });
+
+    const outboxAndJustPushedO: OTAttendance[] = [];
+    const seenPendingO = new Set<string>();
+    [...getPendingOutboxOt(), ...(extra?.justPushedOt || [])].forEach((o) => {
+      const k = otKey(o);
+      if (!deletedOKeys.has(k) && !sheetOKeys.has(k) && !seenPendingO.has(o.id || k)) {
+        seenPendingO.add(o.id || k);
+        outboxAndJustPushedO.push(o);
+      }
+    });
+
+    mergedOt = [...outboxAndJustPushedO, ...sheetOt].sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  let mergedAuditLogs: AuditLogEntry[];
+  if (params.auditRows === null) {
+    mergedAuditLogs = [...(db.auditLogs || [])];
+  } else {
+    const existingAuditMap = new Map<string, AuditLogEntry>();
+    (db.auditLogs || []).forEach((a) => {
+      const k = auditLogKey(a);
+      if (!existingAuditMap.has(k)) existingAuditMap.set(k, a);
+    });
+
+    const sheetAuditLogs: AuditLogEntry[] = params.auditRows
+      .filter((r) => (r[0] || '').trim() && (r[1] || '').trim())
+      .map((r, idx) => {
+        const entry: AuditLogEntry = {
+          id: `AUD-GS-${Date.now()}-${idx}`,
+          timestamp: String(r[0] || '').trim(),
+          action: String(r[1] || 'แก้ไขวันลา').trim() as AuditLogEntry['action'],
+          targetName: String(r[2] || '').trim(),
+          summary: String(r[3] || '').trim(),
+          reason: String(r[4] || '').trim(),
+          editedBy: String(r[5] || '').trim() || undefined,
+        };
+        const prev = existingAuditMap.get(auditLogKey(entry));
+        return prev ? { ...entry, id: prev.id } : entry;
+      });
+
+    const sheetAuditKeys = new Set(sheetAuditLogs.map(auditLogKey));
+    pruneOutboxSyncedAgainstRemote({ remoteAuditKeys: sheetAuditKeys });
+
+    const outboxAndJustPushedA: AuditLogEntry[] = [];
+    const seenPendingA = new Set<string>();
+    [...getPendingOutboxAuditLogs(), ...(extra?.justPushedAudits || [])].forEach((a) => {
+      const k = auditLogKey(a);
+      if (!sheetAuditKeys.has(k) && !seenPendingA.has(k)) {
+        seenPendingA.add(k);
+        outboxAndJustPushedA.push(a);
+      }
+    });
+
+    mergedAuditLogs = [...outboxAndJustPushedA, ...sheetAuditLogs].sort((a, b) =>
+      b.timestamp.localeCompare(a.timestamp)
+    );
+  }
 
   const settingsDirty = isSettingsDirty();
   const parsedHolidays = (() => {
@@ -1931,12 +2355,12 @@ export const readPublicGoogleSheet = async (
 
   const mergedDb = mergeRemoteDataRows(
     {
-      staffRows: staffRows || [],
-      workloadRows: workloadRows || [],
-      leaveRows: leaveRows || [],
-      otRows: otRows || [],
-      settingsRows: settingsRows || [],
-      auditRows: auditRows || [],
+      staffRows,
+      workloadRows,
+      leaveRows,
+      otRows,
+      settingsRows,
+      auditRows,
     },
     db
   );
@@ -2032,8 +2456,8 @@ export const hasPendingAdminDirtyFlags = (): boolean =>
 
 /**
  * 2-Way Apps Script sync for general OPD staff (zero Google Sign-In, zero Admin PIN):
- * - Reads all remote tabs
- * - Pushes any local Workload/Leave/OT records not yet present in the remote sheet
+ * - Treats Google Sheets as authoritative single source of truth across all clients
+ * - Pushes ONLY unsent local records queued in PendingOutbox (never re-uploads deleted/edited rows)
  */
 export const syncPublicViaAppsScript = async (
   gasUrl: string,
@@ -2053,103 +2477,66 @@ export const syncPublicViaAppsScript = async (
     const deletedLKeys = getDeletedLeaveKeySet();
     const deletedOKeys = getDeletedOtKeySet();
 
-    const remoteWorkloads: DailyWorkload[] = Array.isArray(data.workloadRows)
-      ? data.workloadRows
-          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
-          .map((r: string[], idx: number) => {
-            const adultPt = Number(r[4] || 0);
-            const childPt = Number(r[5] || 0);
-            const rawRecordType = String(r[17] || '').trim();
-            const recordType: WorkloadRecordType | undefined =
-              rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
-                ? rawRecordType
-                : undefined;
-            return normalizeWorkloadRecord(
-              {
-                id: `REC-GS-${idx}`,
-                date: String(r[0] || '').trim(),
-                shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
-                clinic: String(r[2] || '').trim(),
-                totalPt: Math.max(Number(r[3] || 0), adultPt + childPt),
-                adultPt,
-                childPt,
-                admit: Number(r[6] || 0),
-                hn: Number(r[7] || 0),
-                rn: Number(r[8] || 0),
-                pn: Number(r[9] || 0),
-                na: Number(r[10] || 0),
-                clerk: Number(r[11] || 0),
-                serviceWorker: Number(r[12] || 0),
-                note: String(r[13] || '').trim(),
-                reporter: String(r[14] || '').trim(),
-                clinicGroup: String(r[15] || '').trim() || undefined,
-                poolId: String(r[16] || '').trim() || undefined,
-                recordType,
-              },
-              db.settings.premiumSubClinics
-            );
-          })
-          .filter((w: DailyWorkload) => !deletedWKeys.has(workloadKey(w)))
-      : [];
+    const remoteWorkloads = parseRemoteWorkloadsOnly(
+      data.workloadRows,
+      db.settings.premiumSubClinics
+    ).filter((w: DailyWorkload) => !deletedWKeys.has(workloadKey(w)));
 
-    const remoteLeaves: LeaveRecord[] = Array.isArray(data.leaveRows)
-      ? data.leaveRows
-          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
-          .map((r: string[], idx: number) => ({
-            id: `LV-GS-${idx}`,
-            startDate: String(r[0] || '').trim(),
-            endDate: String(r[1] || r[0] || '').trim(),
-            staffName: String(r[2] || '').trim(),
-            position: ((r[3] || 'RN').trim() === 'PCA' ? 'NA' : (r[3] || 'RN').trim()) as StaffPosition,
-            clinic: String(r[4] || '').trim(),
-            leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
-            days: Number(r[6] || 1),
-            note: String(r[7] || '').trim(),
-          }))
-          .filter((l: LeaveRecord) => !deletedLKeys.has(leaveKey(l)))
-      : [];
+    const remoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
+      (l: LeaveRecord) => !deletedLKeys.has(leaveKey(l))
+    );
 
-    const remoteOt: OTAttendance[] = Array.isArray(data.otRows)
-      ? data.otRows
-          .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
-          .map((r: string[], idx: number) => ({
-            id: `OT-GS-${idx}`,
-            date: String(r[0] || '').trim(),
-            shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
-            staffName: String(r[2] || '').trim(),
-            position: ((r[3] || 'RN').trim() === 'PCA' ? 'NA' : (r[3] || 'RN').trim()) as StaffPosition,
-            homeClinic: String(r[4] || '').trim(),
-            workClinic: String(r[5] || '').trim(),
-          }))
-          .filter((o: OTAttendance) => !deletedOKeys.has(otKey(o)))
-      : [];
+    const remoteOt = parseRemoteOtOnly(data.otRows).filter(
+      (o: OTAttendance) => !deletedOKeys.has(otKey(o))
+    );
 
     const remoteWKeys = new Set(remoteWorkloads.map(workloadKey));
     const remoteLKeys = new Set(remoteLeaves.map(leaveKey));
     const remoteOKeys = new Set(remoteOt.map(otKey));
 
+    // Prune any outbox records that already arrived in Google Sheets
+    pruneOutboxSyncedAgainstRemote({ remoteWKeys, remoteLKeys, remoteOKeys });
+
     const workloadsToPush = !isWorkloadsDirty()
-      ? db.workloads.filter((w) => !remoteWKeys.has(workloadKey(w)))
+      ? getPendingOutboxWorkloads().filter(
+          (w) => !deletedWKeys.has(workloadKey(w)) && !remoteWKeys.has(workloadKey(w))
+        )
       : [];
     const leavesToPush = !isLeavesDirty()
-      ? db.leaves.filter((l) => !remoteLKeys.has(leaveKey(l)))
+      ? getPendingOutboxLeaves().filter(
+          (l) => !deletedLKeys.has(leaveKey(l)) && !remoteLKeys.has(leaveKey(l))
+        )
       : [];
-    const otToPush = !isOtDirty() ? db.ot.filter((o) => !remoteOKeys.has(otKey(o))) : [];
+    const otToPush = !isOtDirty()
+      ? getPendingOutboxOt().filter(
+          (o) => !deletedOKeys.has(otKey(o)) && !remoteOKeys.has(otKey(o))
+        )
+      : [];
 
     let pushedCount = 0;
+    let justPushedWorkloads: DailyWorkload[] = [];
+    let justPushedLeaves: LeaveRecord[] = [];
+    let justPushedOt: OTAttendance[] = [];
+
     if (workloadsToPush.length > 0) {
       if (await appendViaAppsScript(gasUrl, 'appendWorkload', workloadsToPush)) {
         pushedCount += workloadsToPush.length;
+        justPushedWorkloads = workloadsToPush;
+        markWorkloadOutboxSynced(workloadsToPush);
       }
     }
     if (leavesToPush.length > 0) {
       if (await appendViaAppsScript(gasUrl, 'appendLeave', leavesToPush)) {
         pushedCount += leavesToPush.length;
+        justPushedLeaves = leavesToPush;
+        markLeaveOutboxSynced(leavesToPush);
       }
     }
     if (otToPush.length > 0) {
       if (await appendViaAppsScript(gasUrl, 'appendOT', otToPush)) {
         pushedCount += otToPush.length;
+        justPushedOt = otToPush;
+        markOtOutboxSynced(otToPush);
       }
     }
 
@@ -2162,7 +2549,12 @@ export const syncPublicViaAppsScript = async (
         settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
         auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
       },
-      db
+      db,
+      {
+        justPushedWorkloads,
+        justPushedLeaves,
+        justPushedOt,
+      }
     );
     const resolvedSheetId =
       mergedDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
@@ -2525,6 +2917,272 @@ export const pushAdminTableViaOAuth = async (params: {
 };
 
 /**
+ * Atomic targeted single-row Admin Edit/Delete via Apps Script Web App URL.
+ * Serialized under LockService on Code.gs so concurrent clinic saves from other devices are never lost.
+ * Falls back cleanly to a fresh Read-Modify-Write over syncAdminAll if deployed Code.gs is an older version.
+ */
+export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  action: 'updateWorkload' | 'deleteWorkload' | 'updateLeave' | 'deleteLeave' | 'updateOT' | 'deleteOT';
+  table: 'workloads' | 'leaves' | 'ot';
+  target: DailyWorkload | LeaveRecord | OTAttendance;
+  updated?: DailyWorkload | LeaveRecord | OTAttendance;
+  db: AppDatabase;
+  auditEntry: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{
+  ok: boolean;
+  notFound?: boolean;
+  error?: string;
+  syncedDb?: AppDatabase;
+}> => {
+  const { gasUrl, adminPin, action, table, target, updated, db, auditEntry, expectedDirtyVersion } =
+    params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+
+  const buildSyncedDbFromPayload = (
+    data: any,
+    sourceDb: AppDatabase,
+    pendingAudits?: AuditLogEntry[]
+  ): AppDatabase => {
+    const merged = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      sourceDb,
+      pendingAudits ? { justPushedAudits: pendingAudits } : undefined
+    );
+    const resolvedSheetId =
+      merged.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    return {
+      ...merged,
+      settings: {
+        ...merged.settings,
+        spreadsheetId: resolvedSheetId || undefined,
+        spreadsheetUrl:
+          merged.settings.spreadsheetUrl ||
+          (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+        gasUrl: merged.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+      },
+    };
+  };
+
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action,
+        adminPin,
+        payload: {
+          target,
+          updated,
+          auditEntry,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+
+    const data = await res.json();
+
+    // Case 1: New Code.gs responded to targeted endpoint
+    if (data && data.targeted === true) {
+      if (data.notFound) {
+        if (table === 'workloads') {
+          clearWorkloadsDirty(expectedDirtyVersion);
+          clearWorkloadTombstone(target as DailyWorkload);
+        } else if (table === 'leaves') {
+          clearLeavesDirty(expectedDirtyVersion);
+          clearLeaveTombstone(target as LeaveRecord);
+        } else {
+          clearOtDirty(expectedDirtyVersion);
+          clearOtTombstone(target as OTAttendance);
+        }
+        const syncedDb = buildSyncedDbFromPayload(data, db);
+        return {
+          ok: false,
+          notFound: true,
+          error: String(data.error || 'ไม่พบรายการเดิมใน Google Sheets'),
+          syncedDb,
+        };
+      }
+
+      if (data.success === false) {
+        return { ok: false, error: String(data.error || 'Apps Script ปฏิเสธการบันทึก') };
+      }
+
+      if (table === 'workloads') {
+        clearWorkloadsDirty(expectedDirtyVersion);
+        if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+      } else if (table === 'leaves') {
+        clearLeavesDirty(expectedDirtyVersion);
+        if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
+      } else {
+        clearOtDirty(expectedDirtyVersion);
+        if (getOtDirtyVersion() === 0) clearAllOtTombstones();
+      }
+      markAuditOutboxSynced([auditEntry]);
+
+      const syncedDb = buildSyncedDbFromPayload(data, db, [auditEntry]);
+      return { ok: true, syncedDb };
+    }
+
+    // Case 2: PIN rejected or explicit failure unrelated to missing targeted route
+    const errText = String(data?.error || '');
+    const isUnsupportedActionFallback =
+      data && data.success === false && errText.includes('สงวนสิทธิ์');
+    if (data && data.success === false && !isUnsupportedActionFallback) {
+      return { ok: false, error: errText || 'Apps Script ปฏิเสธการบันทึก' };
+    }
+
+    // Case 3: Older Code.gs deployed — perform safe Read-Modify-Write on freshest remote rows
+    const sep = gasUrl.includes('?') ? '&' : '?';
+    const freshRes = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!freshRes.ok) {
+      return { ok: false, error: `HTTP ${freshRes.status}` };
+    }
+    const freshData = await freshRes.json();
+    if (!freshData || freshData.success === false) {
+      return { ok: false, error: String(freshData?.error || 'อ่านข้อมูลล่าสุดจากชีทไม่สำเร็จ') };
+    }
+
+    let nextTableRows: unknown[] = [];
+    if (table === 'workloads') {
+      const remoteList = parseRemoteWorkloadsOnly(
+        freshData.workloadRows,
+        db.settings.premiumSubClinics
+      );
+      const targetFullKey = workloadKey(target as DailyWorkload);
+      const matchIdx = remoteList.findIndex((w) => workloadKey(w) === targetFullKey);
+      if (action === 'updateWorkload' && updated) {
+        if (matchIdx >= 0) {
+          remoteList[matchIdx] = updated as DailyWorkload;
+        } else {
+          remoteList.unshift(updated as DailyWorkload);
+        }
+      } else if (matchIdx >= 0) {
+        remoteList.splice(matchIdx, 1);
+      }
+      nextTableRows = remoteList;
+    } else if (table === 'leaves') {
+      const remoteList = parseRemoteLeavesOnly(freshData.leaveRows);
+      const targetFullKey = leaveKey(target as LeaveRecord);
+      const matchIdx = remoteList.findIndex((l) => leaveKey(l) === targetFullKey);
+      if (action === 'updateLeave' && updated) {
+        if (matchIdx >= 0) {
+          remoteList[matchIdx] = updated as LeaveRecord;
+        } else {
+          remoteList.unshift(updated as LeaveRecord);
+        }
+      } else if (matchIdx >= 0) {
+        remoteList.splice(matchIdx, 1);
+      }
+      nextTableRows = remoteList;
+    } else {
+      const remoteList = parseRemoteOtOnly(freshData.otRows);
+      const targetFullKey = otKey(target as OTAttendance);
+      const matchIdx = remoteList.findIndex((o) => otKey(o) === targetFullKey);
+      if (action === 'updateOT' && updated) {
+        if (matchIdx >= 0) {
+          remoteList[matchIdx] = updated as OTAttendance;
+        } else {
+          remoteList.unshift(updated as OTAttendance);
+        }
+      } else if (matchIdx >= 0) {
+        remoteList.splice(matchIdx, 1);
+      }
+      nextTableRows = remoteList;
+    }
+
+    const rmwRes = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'syncAdminAll',
+        adminPin,
+        payload: {
+          dirty: {
+            staff: false,
+            settings: false,
+            workloads: table === 'workloads',
+            leaves: table === 'leaves',
+            ot: table === 'ot',
+          },
+          [table]: nextTableRows,
+          auditLogs: [auditEntry],
+        },
+      }),
+    });
+
+    if (!rmwRes.ok) {
+      return { ok: false, error: `HTTP ${rmwRes.status}` };
+    }
+    const rmwData = await rmwRes.json();
+    if (!rmwData || rmwData.success === false) {
+      return { ok: false, error: String(rmwData?.error || 'Apps Script ปฏิเสธการบันทึก') };
+    }
+
+    if (table === 'workloads' && Array.isArray(rmwData.workloadRows)) {
+      const remoteParsed = parseRemoteWorkloadsOnly(
+        rmwData.workloadRows,
+        db.settings.premiumSubClinics
+      );
+      const deletedSet = getDeletedWorkloadKeySet();
+      if (remoteParsed.some((r) => deletedSet.has(workloadKey(r)))) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่ารายการเดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearWorkloadsDirty(expectedDirtyVersion);
+      if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+    } else if (table === 'leaves' && Array.isArray(rmwData.leaveRows)) {
+      const remoteParsed = parseRemoteLeavesOnly(rmwData.leaveRows);
+      const deletedSet = getDeletedLeaveKeySet();
+      if (remoteParsed.some((r) => deletedSet.has(leaveKey(r)))) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่าวันลาเดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearLeavesDirty(expectedDirtyVersion);
+      if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
+    } else if (table === 'ot' && Array.isArray(rmwData.otRows)) {
+      const remoteParsed = parseRemoteOtOnly(rmwData.otRows);
+      const deletedSet = getDeletedOtKeySet();
+      if (remoteParsed.some((r) => deletedSet.has(otKey(r)))) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่ารายการ OT เดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearOtDirty(expectedDirtyVersion);
+      if (getOtDirtyVersion() === 0) clearAllOtTombstones();
+    }
+    markAuditOutboxSynced([auditEntry]);
+
+    const syncedDb = buildSyncedDbFromPayload(rmwData, db, [auditEntry]);
+    return { ok: true, syncedDb };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+/**
  * Full 2-Way Apps Script sync for Admin PIN-unlocked session (zero Google Sign-In).
  */
 export const syncAdminViaAppsScript = async (
@@ -2558,13 +3216,14 @@ export const syncAdminViaAppsScript = async (
     leaves: dirtyVersions.leaves > 0,
     ot: dirtyVersions.ot > 0,
   };
+  const pendingAudits = getPendingOutboxAuditLogs();
   const anyDirty =
     dirty.staff ||
     dirty.settings ||
     dirty.workloads ||
     dirty.leaves ||
     dirty.ot ||
-    (workingDb.auditLogs && workingDb.auditLogs.length > 0);
+    pendingAudits.length > 0;
 
   if (!adminPin || !anyDirty) {
     return {
@@ -2588,7 +3247,7 @@ export const syncAdminViaAppsScript = async (
           workloads: workingDb.workloads,
           leaves: workingDb.leaves,
           ot: workingDb.ot,
-          auditLogs: workingDb.auditLogs || [],
+          auditLogs: pendingAudits,
           settings: workingDb.settings,
         },
       }),
@@ -2647,6 +3306,9 @@ export const syncAdminViaAppsScript = async (
       clearOtDirty(dirtyVersions.ot);
       if (getOtDirtyVersion() === 0) clearAllOtTombstones();
     }
+    if (pendingAudits.length > 0) {
+      markAuditOutboxSynced(pendingAudits);
+    }
 
     const refreshed = mergeRemoteDataRows(
       {
@@ -2657,11 +3319,10 @@ export const syncAdminViaAppsScript = async (
         settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
         auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
       },
-      workingDb
+      workingDb,
+      { justPushedAudits: pendingAudits }
     );
 
-    // Preserve authoritative local arrays for tables that were just overwritten by Admin
-    // so local metadata (IDs, edit reasons/timestamps) stays exact and remote echoes cannot duplicate
     const authoritativeDb: AppDatabase = {
       ...refreshed,
       staff: dirty.staff ? workingDb.staff : refreshed.staff,

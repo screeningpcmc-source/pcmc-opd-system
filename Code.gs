@@ -251,12 +251,16 @@ function doGet(e) {
  * และรองรับการซิงค์ฐานข้อมูลผู้ดูแลระบบ (Staff / Settings / แก้ไข / ลบ / Audit) เมื่อยืนยันรหัส Admin PIN
  */
 function doPost(e) {
+  var lock = null;
   try {
     var bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '{}';
     var req = JSON.parse(bodyText);
     var action = String(req.action || '').trim();
     var payload = req.payload;
     var adminPin = String(req.adminPin || (payload && payload.adminPin) || '').trim();
+
+    lock = LockService.getScriptLock();
+    lock.waitLock(15000);
 
     if (action === 'appendWorkload') {
       var workloadInput = (req.records !== undefined) ? req.records : payload;
@@ -269,7 +273,13 @@ function doPost(e) {
       return jsonResponse_(appendOTFromApi_(payload));
     }
 
-    if (action === 'syncAdminAll' || action === 'syncStaff' || action === 'syncSettings' || action === 'appendAudit') {
+    var adminActions = [
+      'syncAdminAll', 'syncStaff', 'syncSettings', 'appendAudit',
+      'updateWorkload', 'deleteWorkload',
+      'updateLeave', 'deleteLeave',
+      'updateOT', 'deleteOT'
+    ];
+    if (adminActions.indexOf(action) !== -1) {
       if (!verifyAdminPinInGas_(adminPin)) {
         return jsonResponse_({
           success: false,
@@ -278,6 +288,24 @@ function doPost(e) {
       }
       if (action === 'syncAdminAll') {
         return jsonResponse_(syncAdminAllFromApi_(payload || {}));
+      }
+      if (action === 'updateWorkload') {
+        return jsonResponse_(updateWorkloadRowFromApi_(payload || {}));
+      }
+      if (action === 'deleteWorkload') {
+        return jsonResponse_(deleteWorkloadRowFromApi_(payload || {}));
+      }
+      if (action === 'updateLeave') {
+        return jsonResponse_(updateLeaveRowFromApi_(payload || {}));
+      }
+      if (action === 'deleteLeave') {
+        return jsonResponse_(deleteLeaveRowFromApi_(payload || {}));
+      }
+      if (action === 'updateOT') {
+        return jsonResponse_(updateOtRowFromApi_(payload || {}));
+      }
+      if (action === 'deleteOT') {
+        return jsonResponse_(deleteOtRowFromApi_(payload || {}));
       }
       if (action === 'syncStaff') {
         writeStaffRowsToSheet_(Array.isArray(payload) ? payload : (payload && payload.staff) || []);
@@ -299,6 +327,12 @@ function doPost(e) {
     });
   } catch (err) {
     return jsonResponse_({ success: false, error: err.toString() });
+  } finally {
+    try {
+      if (lock) lock.releaseLock();
+    } catch (lockErr) {
+      // ignore lock release error
+    }
   }
 }
 
@@ -535,6 +569,7 @@ function appendWorkloadFromApi_(payload) {
     return { success: false, error: 'ข้อมูลภาระงานไม่ครบถ้วน' };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  SpreadsheetApp.flush();
   return { success: true, appended: rowsToAppend.length };
 }
 
@@ -570,6 +605,7 @@ function appendLeaveFromApi_(payload) {
     return { success: false, error: 'ข้อมูลวันลาไม่ครบถ้วน' };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  SpreadsheetApp.flush();
   return { success: true, appended: rowsToAppend.length };
 }
 
@@ -603,6 +639,7 @@ function appendOTFromApi_(payload) {
     return { success: false, error: 'ข้อมูลเวรนอกเวลาไม่ครบถ้วน' };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  SpreadsheetApp.flush();
   return { success: true, appended: rowsToAppend.length };
 }
 
@@ -838,7 +875,399 @@ function appendAuditRowsToSheet_(auditList) {
 
   if (toAppend.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, 6).setValues(toAppend);
+    SpreadsheetApp.flush();
   }
+}
+
+function deleteSheetBodyRowAt_(sheet, rowIdx) {
+  var lastRow = sheet.getLastRow();
+  if (rowIdx < 2 || rowIdx > lastRow) return;
+  if (sheet.getMaxRows() - sheet.getFrozenRows() > 1) {
+    sheet.deleteRow(rowIdx);
+    SpreadsheetApp.flush();
+    return;
+  }
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  sheet.getRange(rowIdx, 1, 1, lastCol).clearContent();
+  if (rowIdx < lastRow) {
+    var belowVals = sheet.getRange(rowIdx + 1, 1, lastRow - rowIdx, lastCol).getValues();
+    sheet.getRange(rowIdx, 1, belowVals.length, lastCol).setValues(belowVals);
+    sheet.getRange(lastRow, 1, 1, lastCol).clearContent();
+  }
+  SpreadsheetApp.flush();
+}
+
+function buildWorkloadFullKeyGas_(r, offset) {
+  var adult = Number(r[offset + 4] || 0);
+  var child = Number(r[offset + 5] || 0);
+  var total = Math.max(Number(r[offset + 3] || 0), adult + child);
+  return [
+    String(r[offset] || '').trim(),
+    String(r[offset + 1] || '').trim(),
+    String(r[offset + 2] || '').trim(),
+    total,
+    adult,
+    child,
+    Number(r[offset + 6] || 0),
+    Number(r[offset + 7] || 0),
+    Number(r[offset + 8] || 0),
+    Number(r[offset + 9] || 0),
+    Number(r[offset + 10] || 0),
+    Number(r[offset + 11] || 0),
+    Number(r[offset + 12] || 0),
+    String(r[offset + 13] || '').trim(),
+    String(r[offset + 14] || '').trim(),
+    String(r[offset + 15] || '').trim(),
+    String(r[offset + 17] || 'STANDARD').trim() || 'STANDARD'
+  ].join('|');
+}
+
+function buildWorkloadObjFullKeyGas_(w) {
+  var adult = Number(w.adultPt || 0);
+  var child = Number(w.childPt || 0);
+  var total = Math.max(Number(w.totalPt || 0), adult + child);
+  return [
+    String(w.date || '').trim(),
+    String(w.shift || '').trim(),
+    String(w.clinic || '').trim(),
+    total,
+    adult,
+    child,
+    Number(w.admit || 0),
+    Number(w.hn || 0),
+    Number(w.rn || 0),
+    Number(w.pn || 0),
+    Number(w.na !== undefined ? w.na : (w.pca || 0)),
+    Number(w.clerk || 0),
+    Number(w.serviceWorker || 0),
+    String(w.note || '').trim(),
+    String(w.reporter || '').trim(),
+    String(w.clinicGroup || '').trim(),
+    String(w.recordType || 'STANDARD').trim() || 'STANDARD'
+  ].join('|');
+}
+
+function buildWorkloadCoreKeyGas_(date, shift, clinic, totalPt, reporter) {
+  return [
+    String(date || '').trim(),
+    String(shift || '').trim(),
+    String(clinic || '').trim(),
+    Number(totalPt || 0),
+    String(reporter || '').trim()
+  ].join('|');
+}
+
+function findWorkloadSheetRowIndex_(sheet, targetObj) {
+  if (!targetObj || sheet.getLastRow() <= 1) return -1;
+  var lastCol = Math.max(19, sheet.getLastColumn());
+  var allValues = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
+  var firstHeader = String(allValues[0][0] || '').trim();
+  var hasId = firstHeader === 'Record_ID';
+  var offset = hasId ? 1 : 0;
+
+  var targetFull = buildWorkloadObjFullKeyGas_(targetObj);
+  var targetTotal = Math.max(Number(targetObj.totalPt || 0), Number(targetObj.adultPt || 0) + Number(targetObj.childPt || 0));
+  var targetCore = buildWorkloadCoreKeyGas_(targetObj.date, targetObj.shift, targetObj.clinic, targetTotal, targetObj.reporter);
+
+  if (hasId && targetObj.id) {
+    for (var i = 1; i < allValues.length; i++) {
+      if (String(allValues[i][0] || '').trim() === String(targetObj.id).trim()) {
+        return i + 1;
+      }
+    }
+  }
+
+  for (var j = 1; j < allValues.length; j++) {
+    var norm = allValues[j].map(formatCellValue_);
+    if (buildWorkloadFullKeyGas_(norm, offset) === targetFull) {
+      return j + 1;
+    }
+  }
+
+  for (var k = 1; k < allValues.length; k++) {
+    var normK = allValues[k].map(formatCellValue_);
+    var rowAdult = Number(normK[offset + 4] || 0);
+    var rowChild = Number(normK[offset + 5] || 0);
+    var rowTotal = Math.max(Number(normK[offset + 3] || 0), rowAdult + rowChild);
+    var rowCore = buildWorkloadCoreKeyGas_(normK[offset], normK[offset + 1], normK[offset + 2], rowTotal, normK[offset + 14]);
+    if (rowCore === targetCore) {
+      return k + 1;
+    }
+  }
+  return -1;
+}
+
+function workloadObjToRowArray_(entry, hasId, existingId) {
+  var adultPt = Number(entry.adultPt || 0);
+  var childPt = Number(entry.childPt || 0);
+  var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
+  var baseRow = [
+    String(entry.date || ''),
+    String(entry.shift || ''),
+    String(entry.clinic || ''),
+    totalPt,
+    adultPt,
+    childPt,
+    Number(entry.admit || 0),
+    Number(entry.hn || 0),
+    Number(entry.rn || 0),
+    Number(entry.pn || 0),
+    Number(entry.na !== undefined ? entry.na : (entry.pca || 0)),
+    Number(entry.clerk || 0),
+    Number(entry.serviceWorker || 0),
+    String(entry.note || ''),
+    String(entry.reporter || ''),
+    String(entry.clinicGroup || ''),
+    String(entry.poolId || ''),
+    String(entry.recordType || 'STANDARD')
+  ];
+  return hasId ? [String(existingId || entry.id || ('REC-' + Date.now()))].concat(baseRow) : baseRow;
+}
+
+function updateWorkloadRowFromApi_(payload) {
+  var target = payload.target;
+  var updated = payload.updated;
+  var auditEntry = payload.auditEntry;
+  if (!updated) return { success: false, error: 'ไม่มีข้อมูลภาระงานที่จะแก้ไข' };
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
+  ensureWorkloadColumns_(sheet);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = firstHeader === 'Record_ID';
+  var rowIdx = findWorkloadSheetRowIndex_(sheet, target || updated);
+
+  if (rowIdx === -1) {
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการเดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
+  var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
+  var rowValues = workloadObjToRowArray_(updated, hasId, existingId);
+  sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
+function deleteWorkloadRowFromApi_(payload) {
+  var target = payload.target;
+  var auditEntry = payload.auditEntry;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
+  var rowIdx = findWorkloadSheetRowIndex_(sheet, target);
+
+  if (rowIdx !== -1) {
+    deleteSheetBodyRowAt_(sheet, rowIdx);
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.deleted = rowIdx !== -1;
+  return res;
+}
+
+function buildLeaveKeyGas_(startDate, endDate, staffName, clinic, leaveType, days, note) {
+  return [
+    String(startDate || '').trim(),
+    String(endDate || startDate || '').trim(),
+    String(staffName || '').trim(),
+    String(clinic || '').trim(),
+    String(leaveType || '').trim(),
+    Number(days || 1),
+    String(note || '').trim()
+  ].join('|');
+}
+
+function findLeaveSheetRowIndex_(sheet, targetObj) {
+  if (!targetObj || sheet.getLastRow() <= 1) return -1;
+  var lastCol = Math.max(9, sheet.getLastColumn());
+  var allValues = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
+  var hasId = String(allValues[0][0] || '').trim() === 'Leave_ID';
+  var offset = hasId ? 1 : 0;
+
+  var targetKey = buildLeaveKeyGas_(
+    targetObj.startDate, targetObj.endDate, targetObj.staffName,
+    targetObj.clinic, targetObj.leaveType, targetObj.days, targetObj.note
+  );
+
+  if (hasId && targetObj.id) {
+    for (var i = 1; i < allValues.length; i++) {
+      if (String(allValues[i][0] || '').trim() === String(targetObj.id).trim()) return i + 1;
+    }
+  }
+  for (var j = 1; j < allValues.length; j++) {
+    var r = allValues[j].map(formatCellValue_);
+    var k = buildLeaveKeyGas_(r[offset], r[offset + 1], r[offset + 2], r[offset + 4], r[offset + 5], r[offset + 6], r[offset + 7]);
+    if (k === targetKey) return j + 1;
+  }
+  return -1;
+}
+
+function updateLeaveRowFromApi_(payload) {
+  var target = payload.target;
+  var updated = payload.updated;
+  var auditEntry = payload.auditEntry;
+  if (!updated) return { success: false, error: 'ไม่มีข้อมูลวันลาที่จะแก้ไข' };
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var hasId = String(sheet.getRange(1, 1).getValue() || '').trim() === 'Leave_ID';
+  var rowIdx = findLeaveSheetRowIndex_(sheet, target || updated);
+
+  if (rowIdx === -1) {
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการวันลาเดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
+  var baseRow = [
+    String(updated.startDate || ''),
+    String(updated.endDate || updated.startDate || ''),
+    String(updated.staffName || ''),
+    String(updated.position || 'RN'),
+    String(updated.clinic || ''),
+    String(updated.leaveType || 'ลาป่วย'),
+    Number(updated.days || 1),
+    String(updated.note || '')
+  ];
+  var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
+  var rowValues = hasId ? [String(existingId || updated.id || ('LV-' + Date.now()))].concat(baseRow) : baseRow;
+  sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
+function deleteLeaveRowFromApi_(payload) {
+  var target = payload.target;
+  var auditEntry = payload.auditEntry;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var rowIdx = findLeaveSheetRowIndex_(sheet, target);
+  if (rowIdx !== -1) {
+    deleteSheetBodyRowAt_(sheet, rowIdx);
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.deleted = rowIdx !== -1;
+  return res;
+}
+
+function buildOtKeyGas_(date, shift, staffName, homeClinic, workClinic) {
+  return [
+    String(date || '').trim(),
+    String(shift || '').trim(),
+    String(staffName || '').trim(),
+    String(homeClinic || '').trim(),
+    String(workClinic || '').trim()
+  ].join('|');
+}
+
+function findOtSheetRowIndex_(sheet, targetObj) {
+  if (!targetObj || sheet.getLastRow() <= 1) return -1;
+  var lastCol = Math.max(7, sheet.getLastColumn());
+  var allValues = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
+  var hasId = String(allValues[0][0] || '').trim() === 'OT_ID';
+  var offset = hasId ? 1 : 0;
+
+  var targetKey = buildOtKeyGas_(targetObj.date, targetObj.shift, targetObj.staffName, targetObj.homeClinic, targetObj.workClinic);
+  if (hasId && targetObj.id) {
+    for (var i = 1; i < allValues.length; i++) {
+      if (String(allValues[i][0] || '').trim() === String(targetObj.id).trim()) return i + 1;
+    }
+  }
+  for (var j = 1; j < allValues.length; j++) {
+    var r = allValues[j].map(formatCellValue_);
+    var k = buildOtKeyGas_(r[offset], r[offset + 1], r[offset + 2], r[offset + 4], r[offset + 5]);
+    if (k === targetKey) return j + 1;
+  }
+  return -1;
+}
+
+function updateOtRowFromApi_(payload) {
+  var target = payload.target;
+  var updated = payload.updated;
+  var auditEntry = payload.auditEntry;
+  if (!updated) return { success: false, error: 'ไม่มีข้อมูลเวร OT ที่จะแก้ไข' };
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+  ]);
+  var hasId = String(sheet.getRange(1, 1).getValue() || '').trim() === 'OT_ID';
+  var rowIdx = findOtSheetRowIndex_(sheet, target || updated);
+
+  if (rowIdx === -1) {
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการเวร OT เดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
+  var baseRow = [
+    String(updated.date || ''),
+    String(updated.shift || ''),
+    String(updated.staffName || ''),
+    String(updated.position || 'RN'),
+    String(updated.homeClinic || ''),
+    String(updated.workClinic || '')
+  ];
+  var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
+  var rowValues = hasId
+    ? [String(existingId || updated.id || ('OT-' + Date.now()))].concat(baseRow).concat([updated.isExternal ? 'External' : 'OPD'])
+    : baseRow;
+  sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
+function deleteOtRowFromApi_(payload) {
+  var target = payload.target;
+  var auditEntry = payload.auditEntry;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+  ]);
+  var rowIdx = findOtSheetRowIndex_(sheet, target);
+  if (rowIdx !== -1) {
+    deleteSheetBodyRowAt_(sheet, rowIdx);
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.deleted = rowIdx !== -1;
+  return res;
 }
 
 function syncAdminAllFromApi_(payload) {
