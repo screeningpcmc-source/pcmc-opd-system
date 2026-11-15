@@ -25,6 +25,26 @@ export interface StaffMember {
   endDate?: string; // วันที่ลาออก/เกษียณ (YYYY-MM-DD)
 }
 
+export type WorkloadRecordType = 'STANDARD' | 'PREMIUM_POOL' | 'PREMIUM_SUB';
+
+export const PREMIUM_CLINIC_GROUP = 'คลินิกพิเศษ PREMIUM';
+export const PREMIUM_POOL_CLINIC_NAME = 'คลินิกพิเศษ PREMIUM (กำลังคนรวม)';
+
+export const DEFAULT_PREMIUM_SUB_CLINICS = [
+  'อายุรกรรม-Premium',
+  'ศัลยกรรม-Premium',
+  'จักษุวิทยา-Premium',
+  'โสต ศอ นาสิก-Premium',
+  'ศัลยกรรม-กระดูก-Premium',
+  'เวชศาสตร์ฟื้นฟู-Premium',
+  'กุมารเวชกรรม-Premium',
+  'สูติ-นรีเวชกรรม-Premium',
+  'คลินิกหัวใจฯ-Premium',
+  'คลินิกภูมิแพ้ฯ-Premium',
+  'จิตเวช-Premium',
+  'เวชศาสตร์ครอบครัว-Premium',
+] as const;
+
 export interface DailyWorkload {
   id: string;
   date: string; // YYYY-MM-DD
@@ -43,6 +63,9 @@ export interface DailyWorkload {
   serviceWorker: number;
   note: string;
   reporter: string;
+  clinicGroup?: string;
+  poolId?: string;
+  recordType?: WorkloadRecordType;
   timestamp?: string;
   lastEditedAt?: string;
   lastEditReason?: string;
@@ -115,6 +138,7 @@ export interface SystemSettings {
   gasUrl?: string;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  premiumSubClinics?: string[];
   leaveTypes?: string[];
   customHolidays?: CustomHoliday[];
   autoSync?: boolean;
@@ -122,6 +146,61 @@ export interface SystemSettings {
 
 export const SCREENING_CLINIC_NAME = 'หน่วยคัดกรอง';
 export const DEFAULT_SCREENING_NHPPD = 0.1;
+
+export function isPremiumWorkloadRecord(
+  w: Pick<DailyWorkload, 'clinic' | 'clinicGroup' | 'recordType'>,
+  premiumSubClinics?: string[]
+): boolean {
+  const clinic = (w.clinic || '').trim();
+  if (w.recordType === 'PREMIUM_POOL' || w.recordType === 'PREMIUM_SUB') return true;
+  if ((w.clinicGroup || '').trim() === PREMIUM_CLINIC_GROUP) return true;
+  if (clinic === PREMIUM_POOL_CLINIC_NAME || clinic === PREMIUM_CLINIC_GROUP) return true;
+  if (/-Premium$/i.test(clinic)) return true;
+  if (premiumSubClinics && premiumSubClinics.includes(clinic)) return true;
+  return false;
+}
+
+export function normalizeWorkloadRecord(
+  w: DailyWorkload,
+  premiumSubClinics?: string[]
+): DailyWorkload {
+  const clinic = (w.clinic || '').trim();
+  const subList =
+    premiumSubClinics && premiumSubClinics.length > 0
+      ? premiumSubClinics
+      : [...DEFAULT_PREMIUM_SUB_CLINICS];
+  const fallbackPoolId = (w.poolId || '').trim() || `POOL-${w.date}-${w.shift}`;
+
+  if (w.recordType === 'PREMIUM_POOL' || clinic === PREMIUM_POOL_CLINIC_NAME) {
+    return {
+      ...w,
+      clinicGroup: PREMIUM_CLINIC_GROUP,
+      poolId: fallbackPoolId,
+      recordType: 'PREMIUM_POOL',
+    };
+  }
+
+  if (
+    w.recordType === 'PREMIUM_SUB' ||
+    (w.clinicGroup || '').trim() === PREMIUM_CLINIC_GROUP ||
+    /-Premium$/i.test(clinic) ||
+    subList.includes(clinic)
+  ) {
+    return {
+      ...w,
+      clinicGroup: PREMIUM_CLINIC_GROUP,
+      poolId: fallbackPoolId,
+      recordType: 'PREMIUM_SUB',
+    };
+  }
+
+  return {
+    ...w,
+    clinicGroup: w.clinicGroup || '',
+    poolId: w.poolId || '',
+    recordType: w.recordType || 'STANDARD',
+  };
+}
 
 export function getClinicNhppd(
   clinicName: string,

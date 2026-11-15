@@ -5,6 +5,9 @@ import {
   WorkShift, 
   IN_TIME_CLINICS, 
   OUT_TIME_CLINICS, 
+  DEFAULT_PREMIUM_SUB_CLINICS,
+  PREMIUM_CLINIC_GROUP,
+  PREMIUM_POOL_CLINIC_NAME,
   LeaveType,
   LEAVE_TYPES,
   formatPositionLabel,
@@ -50,9 +53,16 @@ interface DailyWorkloadTabProps {
   staffList: StaffMember[];
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  premiumSubClinics?: string[];
   leaveTypes?: string[];
   onSaveWorkload: (
     entry: DailyWorkload, 
+    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
+    crossCoverageData?: { staffName: string; targetClinic: string } | null,
+    trainingData?: { staffName: string; topic: string; note: string }[] | null
+  ) => void;
+  onSaveBatchWorkloads?: (
+    entries: DailyWorkload[],
     leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
     crossCoverageData?: { staffName: string; targetClinic: string } | null,
     trainingData?: { staffName: string; topic: string; note: string }[] | null
@@ -69,8 +79,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   staffList,
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
+  premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   leaveTypes = [...LEAVE_TYPES],
   onSaveWorkload,
+  onSaveBatchWorkloads,
   onUpdateWorkload,
   onDeleteWorkload,
   defaultReporter = '',
@@ -129,6 +141,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [crossStaffName, setCrossStaffName] = useState<string>('');
   const [crossTargetClinic, setCrossTargetClinic] = useState<string>('');
 
+  // คลินิกพิเศษ PREMIUM sub-department inputs
+  const [premiumInputs, setPremiumInputs] = useState<
+    Record<string, { adultPt: number; childPt: number; admit: number }>
+  >({});
+
   const regularLeaveOptions = useMemo(() => {
     const filtered = leaveTypes.filter(lt => lt !== 'ไปอบรม/ประชุม');
     return filtered.length > 0 ? filtered : ['ลาป่วย', 'ลากิจ', 'ลาพักผ่อน'];
@@ -144,9 +161,84 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const isOutTime = shift !== 'ในเวลา 08:00-16:00';
   const availableClinics = isOutTime ? outTimeClinics : inTimeClinics;
   const isEchoClinic = clinic === 'Echo';
+  const isPremiumClinic = clinic === PREMIUM_CLINIC_GROUP;
+
+  const existingPremiumPool = useMemo(() => {
+    return (
+      workloads.find(
+        w =>
+          w.date === date &&
+          w.shift === shift &&
+          (w.recordType === 'PREMIUM_POOL' || w.clinic === PREMIUM_POOL_CLINIC_NAME)
+      ) || null
+    );
+  }, [workloads, date, shift]);
+
+  const existingPremiumSubClinics = useMemo(() => {
+    return new Set(
+      workloads
+        .filter(
+          w =>
+            w.date === date &&
+            w.shift === shift &&
+            (w.recordType === 'PREMIUM_SUB' ||
+              ((w.clinicGroup === PREMIUM_CLINIC_GROUP || /-Premium$/i.test(w.clinic)) &&
+                w.clinic !== PREMIUM_POOL_CLINIC_NAME))
+        )
+        .map(w => w.clinic)
+    );
+  }, [workloads, date, shift]);
+
+  const premiumSummary = useMemo(() => {
+    let activeCount = 0;
+    let adultSum = 0;
+    let childSum = 0;
+    let admitSum = 0;
+    premiumSubClinics.forEach(sub => {
+      const item = premiumInputs[sub];
+      if (!item) return;
+      const a = Number(item.adultPt) || 0;
+      const c = Number(item.childPt) || 0;
+      const adm = Number(item.admit) || 0;
+      if (a + c > 0 || adm > 0) {
+        activeCount += 1;
+        adultSum += a;
+        childSum += c;
+        admitSum += adm;
+      }
+    });
+    return {
+      activeCount,
+      adultSum,
+      childSum,
+      totalSum: adultSum + childSum,
+      admitSum,
+    };
+  }, [premiumSubClinics, premiumInputs]);
+
+  const updatePremiumSubInput = (
+    subClinic: string,
+    field: 'adultPt' | 'childPt' | 'admit',
+    value: number
+  ) => {
+    const cleanVal = Math.max(0, Number(value) || 0);
+    setPremiumInputs(prev => ({
+      ...prev,
+      [subClinic]: {
+        adultPt: prev[subClinic]?.adultPt || 0,
+        childPt: prev[subClinic]?.childPt || 0,
+        admit: prev[subClinic]?.admit || 0,
+        [field]: cleanVal,
+      },
+    }));
+  };
 
   useEffect(() => {
-    if (availableClinics.length > 0 && !availableClinics.includes(clinic)) {
+    if (
+      clinic !== PREMIUM_CLINIC_GROUP &&
+      availableClinics.length > 0 &&
+      !availableClinics.includes(clinic)
+    ) {
       setClinic(availableClinics[0]);
     }
   }, [availableClinics, clinic]);
@@ -155,7 +247,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const handleShiftChange = (newShift: WorkShift) => {
     setShift(newShift);
     const newClinics = newShift !== 'ในเวลา 08:00-16:00' ? outTimeClinics : inTimeClinics;
-    if (newClinics.length > 0 && !newClinics.includes(clinic)) {
+    if (clinic !== PREMIUM_CLINIC_GROUP && newClinics.length > 0 && !newClinics.includes(clinic)) {
       setClinic(newClinics[0]);
     }
   };
@@ -210,31 +302,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       return;
     }
 
-    const finalTotal = Math.max(Number(totalPt) || 0, (Number(adultPt) || 0) + (Number(childPt) || 0));
-    const calculatedChild = Number(childPt) || 0;
-    const calculatedAdult = isEchoClinic ? (Number(adultPt) || 0) : Math.max(0, finalTotal - calculatedChild);
-
-    const newEntry: DailyWorkload = {
-      id: `WL-${Date.now()}`,
-      date,
-      shift,
-      clinic,
-      totalPt: finalTotal,
-      adultPt: calculatedAdult,
-      childPt: calculatedChild,
-      admit: Number(admit) || 0,
-      hn: Number(hn) || 0,
-      rn: Number(rn) || 0,
-      pn: Number(pn) || 0,
-      na: Number(na) || 0,
-      pca: Number(na) || 0,
-      clerk: Number(clerk) || 0,
-      serviceWorker: Number(serviceWorker) || 0,
-      note,
-      reporter,
-      timestamp: new Date().toISOString(),
-    };
-
     let leaveData = null;
     if (hasStaffLeave && selectedLeaveStaffIds.length > 0) {
       leaveData = selectedLeaveStaffIds.map(staffId => {
@@ -266,6 +333,142 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         targetClinic: crossTargetClinic,
       };
     }
+
+    if (isPremiumClinic) {
+      const activeSubs = premiumSubClinics
+        .map(sub => {
+          const item = premiumInputs[sub];
+          const adult = Number(item?.adultPt || 0);
+          const child = Number(item?.childPt || 0);
+          const adm = Number(item?.admit || 0);
+          return { sub, adult, child, total: adult + child, admit: adm };
+        })
+        .filter(item => item.total > 0 || item.admit > 0);
+
+      if (activeSubs.length === 0) {
+        setFormError(
+          existingPremiumPool
+            ? 'พบกำลังคนรวมในกะนี้แล้ว กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตาราง'
+            : 'กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตารางคลินิกพิเศษ PREMIUM'
+        );
+        return;
+      }
+
+      const nowMs = Date.now();
+      const nowIso = new Date().toISOString();
+      const poolId = existingPremiumPool?.poolId || `POOL-${date}-${nowMs}`;
+      const recordsToSave: DailyWorkload[] = [];
+
+      if (!existingPremiumPool) {
+        recordsToSave.push({
+          id: `WL-POOL-${nowMs}`,
+          date,
+          shift,
+          clinic: PREMIUM_POOL_CLINIC_NAME,
+          totalPt: 0,
+          adultPt: 0,
+          childPt: 0,
+          admit: 0,
+          hn: Number(hn) || 0,
+          rn: Number(rn) || 0,
+          pn: Number(pn) || 0,
+          na: Number(na) || 0,
+          pca: Number(na) || 0,
+          clerk: Number(clerk) || 0,
+          serviceWorker: Number(serviceWorker) || 0,
+          note: note.trim(),
+          reporter: reporter.trim(),
+          clinicGroup: PREMIUM_CLINIC_GROUP,
+          poolId,
+          recordType: 'PREMIUM_POOL',
+          timestamp: nowIso,
+        });
+      }
+
+      activeSubs.forEach((subItem, idx) => {
+        recordsToSave.push({
+          id: `WL-SUB-${nowMs}-${idx}`,
+          date,
+          shift,
+          clinic: subItem.sub,
+          totalPt: subItem.total,
+          adultPt: subItem.adult,
+          childPt: subItem.child,
+          admit: subItem.admit,
+          hn: 0,
+          rn: 0,
+          pn: 0,
+          na: 0,
+          pca: 0,
+          clerk: 0,
+          serviceWorker: 0,
+          note: note.trim(),
+          reporter: reporter.trim(),
+          clinicGroup: PREMIUM_CLINIC_GROUP,
+          poolId,
+          recordType: 'PREMIUM_SUB',
+          timestamp: nowIso,
+        });
+      });
+
+      if (onSaveBatchWorkloads) {
+        onSaveBatchWorkloads(recordsToSave, leaveData, crossCoverageData, trainingData);
+      } else {
+        recordsToSave.forEach((rec, idx) => {
+          onSaveWorkload(
+            rec,
+            idx === 0 ? leaveData : null,
+            idx === 0 ? crossCoverageData : null,
+            idx === 0 ? trainingData : null
+          );
+        });
+      }
+
+      setPremiumInputs({});
+      setNote('');
+      setHasStaffLeave(false);
+      setSelectedLeaveStaffIds([]);
+      setLeaveSearch('');
+      setLeaveNote('');
+      setHasTraining(false);
+      setSelectedTrainingStaffIds([]);
+      setTrainingSearch('');
+      setTrainingTopic('');
+      setTrainingNote('');
+      setHasCrossCover(false);
+      setCrossStaffSearch('');
+      setCrossStaffName('');
+      setCrossTargetClinic('');
+      return;
+    }
+
+    const finalTotal = Math.max(Number(totalPt) || 0, (Number(adultPt) || 0) + (Number(childPt) || 0));
+    const calculatedChild = Number(childPt) || 0;
+    const calculatedAdult = isEchoClinic ? (Number(adultPt) || 0) : Math.max(0, finalTotal - calculatedChild);
+
+    const newEntry: DailyWorkload = {
+      id: `WL-${Date.now()}`,
+      date,
+      shift,
+      clinic,
+      totalPt: finalTotal,
+      adultPt: calculatedAdult,
+      childPt: calculatedChild,
+      admit: Number(admit) || 0,
+      hn: Number(hn) || 0,
+      rn: Number(rn) || 0,
+      pn: Number(pn) || 0,
+      na: Number(na) || 0,
+      pca: Number(na) || 0,
+      clerk: Number(clerk) || 0,
+      serviceWorker: Number(serviceWorker) || 0,
+      note,
+      reporter,
+      clinicGroup: '',
+      poolId: '',
+      recordType: 'STANDARD',
+      timestamp: new Date().toISOString(),
+    };
 
     onSaveWorkload(newEntry, leaveData, crossCoverageData, trainingData);
 
@@ -370,19 +573,278 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </label>
                 <select
                   value={clinic}
-                  onChange={(e) => setClinic(e.target.value)}
+                  onChange={(e) => {
+                    setClinic(e.target.value);
+                    setFormError('');
+                  }}
                   required
-                  className="w-full text-sm rounded-lg border-gray-300 shadow-2xs focus:border-emerald-500 focus:ring-emerald-500 py-2 px-3 border bg-white font-medium text-emerald-950"
+                  className={`w-full text-sm rounded-lg shadow-2xs py-2 px-3 border bg-white font-medium ${
+                    isPremiumClinic
+                      ? 'border-orange-400 text-orange-950 focus:border-orange-500 focus:ring-orange-500'
+                      : 'border-gray-300 text-emerald-950 focus:border-emerald-500 focus:ring-emerald-500'
+                  }`}
                 >
                   {availableClinics.map((c) => (
                     <option key={c} value={c}>
                       {c}
                     </option>
                   ))}
+                  <option value={PREMIUM_CLINIC_GROUP}>
+                    ★ {PREMIUM_CLINIC_GROUP} (กำลังคนรวมหลายแผนก)
+                  </option>
                 </select>
               </div>
             </div>
 
+            {isPremiumClinic ? (
+              <div className="space-y-4">
+                {/* Premium Header Banner */}
+                <div className="bg-gradient-to-r from-orange-50 via-amber-50 to-orange-50 border border-orange-300/80 rounded-xl p-3.5 flex items-start gap-2.5">
+                  <Sparkles className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-950 space-y-0.5">
+                    <div className="font-bold">
+                      โหมดคลินิกพิเศษ PREMIUM (Pooled Staffing Model — 1 ชุดกำลังคนรวมหลายแผนก)
+                    </div>
+                    <p className="text-[11px] text-orange-900/85">
+                      บันทึกกำลังคนปฏิบัติงานรวม 1 ชุดต่อกะ และกรอกยอดผู้ป่วยแยกเฉพาะแผนกที่มีแพทย์ออกตรวจจริง เพื่อไม่ให้นับจำนวนเจ้าหน้าที่ซ้ำซ้อน
+                    </p>
+                  </div>
+                </div>
+
+                {/* Part 1: Pooled Staffing */}
+                <div className={`border rounded-xl p-4 space-y-3 ${
+                  existingPremiumPool
+                    ? 'border-amber-300 bg-amber-50/40'
+                    : 'border-orange-200 bg-orange-50/40'
+                }`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
+                      <Users className="w-4 h-4 text-orange-600" />
+                      <span>ส่วนที่ 1: กำลังคนรวมทั้งคลินิกพิเศษ PREMIUM (1 ชุดต่อกะ)</span>
+                    </h4>
+                    <span className="text-[11px] font-semibold text-orange-900 bg-white px-2.5 py-0.5 rounded-full border border-orange-200">
+                      กำลังคนพยาบาล (RN+PN+NA):{' '}
+                      {(existingPremiumPool
+                        ? (existingPremiumPool.rn || 0) +
+                          (existingPremiumPool.pn || 0) +
+                          (existingPremiumPool.na ?? existingPremiumPool.pca ?? 0)
+                        : rn + pn + na
+                      ).toFixed(1)}{' '}
+                      แรง
+                    </span>
+                  </div>
+
+                  {existingPremiumPool && (
+                    <div className="bg-amber-100/80 border border-amber-300 rounded-lg p-2.5 flex items-start gap-2 text-xs text-amber-950">
+                      <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold">พบการบันทึกกำลังคนรวมในวันที่และกะเวลานี้แล้ว:</span>{' '}
+                        ระบบล็อกช่องกรอกกำลังคนเพื่อป้องกันการคูณซ้ำ (รายงานโดย {existingPremiumPool.reporter}) คุณสามารถกรอกเพิ่มเฉพาะยอดผู้ป่วยแผนกย่อยในส่วนที่ 2 ได้เลย
+                      </div>
+                    </div>
+                  )}
+
+                  {(() => {
+                    const dispHn = existingPremiumPool ? existingPremiumPool.hn : hn;
+                    const dispRn = existingPremiumPool ? existingPremiumPool.rn : rn;
+                    const dispPn = existingPremiumPool ? existingPremiumPool.pn : pn;
+                    const dispNa = existingPremiumPool
+                      ? (existingPremiumPool.na ?? existingPremiumPool.pca ?? 0)
+                      : na;
+                    const dispClerk = existingPremiumPool ? existingPremiumPool.clerk : clerk;
+                    const dispSw = existingPremiumPool ? existingPremiumPool.serviceWorker : serviceWorker;
+                    const isLocked = Boolean(existingPremiumPool);
+
+                    const cards = [
+                      { label: 'HN (หัวหน้าเวร)', val: dispHn, setter: setHn, border: 'border-gray-200', text: 'text-gray-700', badge: 'bg-gray-100 text-gray-900' },
+                      { label: 'RN (พยาบาลวิชาชีพ)', val: dispRn, setter: setRn, border: 'border-blue-200', text: 'text-blue-700', badge: 'bg-blue-50 text-blue-800' },
+                      { label: 'PN (ผู้ช่วยพยาบาล)', val: dispPn, setter: setPn, border: 'border-teal-200', text: 'text-teal-700', badge: 'bg-teal-50 text-teal-800' },
+                      { label: 'NA (ผู้ช่วยคนไข้)', val: dispNa, setter: setNa, border: 'border-emerald-200', text: 'text-emerald-700', badge: 'bg-emerald-50 text-emerald-800' },
+                      { label: 'ผู้ปฏิบัติงานทั่วไป', val: dispClerk, setter: setClerk, border: 'border-gray-200', text: 'text-gray-700', badge: 'bg-gray-100 text-gray-900' },
+                      { label: 'พนักงานบริการ', val: dispSw, setter: setServiceWorker, border: 'border-gray-200', text: 'text-gray-700', badge: 'bg-gray-100 text-gray-900' },
+                    ];
+
+                    return (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {cards.map((c) => (
+                          <div
+                            key={c.label}
+                            className={`p-2.5 rounded-lg border shadow-2xs ${
+                              isLocked ? 'bg-gray-100/80 border-gray-200 opacity-80' : `bg-white ${c.border}`
+                            }`}
+                          >
+                            <div className="flex justify-between items-center mb-1">
+                              <span className={`text-xs font-bold ${c.text}`}>{c.label}</span>
+                              <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${c.badge}`}>
+                                {Number(c.val || 0).toFixed(1)}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={isLocked}
+                                onClick={() => adjustStaff(c.setter, -0.5)}
+                                className="p-1 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed text-gray-700 cursor-pointer"
+                              >
+                                <Minus className="w-3.5 h-3.5" />
+                              </button>
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0"
+                                disabled={isLocked}
+                                value={c.val}
+                                onChange={(e) => c.setter(Math.max(0, Number(e.target.value) || 0))}
+                                className="w-full text-center text-xs font-bold py-1 border rounded border-gray-200 disabled:bg-gray-100"
+                              />
+                              <button
+                                type="button"
+                                disabled={isLocked}
+                                onClick={() => adjustStaff(c.setter, 0.5)}
+                                className="p-1 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed text-gray-700 cursor-pointer"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Part 2: Sub-Department Patient Counts Table */}
+                <div className="bg-white border border-orange-200/90 rounded-xl p-4 space-y-3 shadow-2xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-orange-100 pb-2.5">
+                    <div>
+                      <h4 className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
+                        <Activity className="w-4 h-4 text-orange-600" />
+                        <span>ส่วนที่ 2: ตารางกรอกยอดผู้ป่วยแยกตามแผนกแพทย์ ({premiumSubClinics.length} แผนก)</span>
+                      </h4>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        กรอกเฉพาะแผนกที่มีแพทย์ออกตรวจจริงในกะนี้ (ระบบจะบันทึกเฉพาะแผนกที่มียอดผู้ป่วย &gt; 0 หรือ Admit &gt; 0)
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-900 font-bold border border-orange-200">
+                        เปิดตรวจ: {premiumSummary.activeCount} แผนก
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-900 font-bold border border-blue-200">
+                        รวม: {premiumSummary.totalSum} ราย
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-red-50 text-red-700 font-bold border border-red-200">
+                        Admit: {premiumSummary.admitSum}
+                      </span>
+                      {premiumSummary.activeCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setPremiumInputs({})}
+                          className="px-2 py-0.5 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold cursor-pointer"
+                        >
+                          ล้างค่า
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto border border-orange-100 rounded-xl">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-orange-50/90 text-orange-950 font-bold border-b border-orange-200">
+                        <tr>
+                          <th className="py-2 px-2.5 text-center w-10">ที่</th>
+                          <th className="py-2 px-3">แผนกย่อย (คลินิกพิเศษ PREMIUM)</th>
+                          <th className="py-2 px-2 text-center w-24">ผู้ใหญ่</th>
+                          <th className="py-2 px-2 text-center w-24">เด็ก</th>
+                          <th className="py-2 px-2 text-center w-24 text-red-700">Admit</th>
+                          <th className="py-2 px-2.5 text-right w-20 bg-orange-100/60">รวม</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-orange-100/80">
+                        {premiumSubClinics.map((sub, idx) => {
+                          const rowVal = premiumInputs[sub] || { adultPt: 0, childPt: 0, admit: 0 };
+                          const rowTotal = rowVal.adultPt + rowVal.childPt;
+                          const isRowActive = rowTotal > 0 || rowVal.admit > 0;
+                          const alreadySaved = existingPremiumSubClinics.has(sub);
+                          return (
+                            <tr
+                              key={sub}
+                              className={isRowActive ? 'bg-orange-50/70' : 'hover:bg-slate-50/70'}
+                            >
+                              <td className="py-1.5 px-2.5 text-center text-gray-500 font-medium">
+                                {idx + 1}
+                              </td>
+                              <td className="py-1.5 px-3">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className={`font-semibold ${isRowActive ? 'text-orange-950' : 'text-gray-800'}`}>
+                                    {sub}
+                                  </span>
+                                  {alreadySaved && (
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                                      บันทึกแล้วในกะนี้
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-1.5 px-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="0"
+                                  value={rowVal.adultPt || ''}
+                                  onChange={(e) =>
+                                    updatePremiumSubInput(sub, 'adultPt', Number(e.target.value) || 0)
+                                  }
+                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white"
+                                />
+                              </td>
+                              <td className="py-1.5 px-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="0"
+                                  value={rowVal.childPt || ''}
+                                  onChange={(e) =>
+                                    updatePremiumSubInput(sub, 'childPt', Number(e.target.value) || 0)
+                                  }
+                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white"
+                                />
+                              </td>
+                              <td className="py-1.5 px-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="0"
+                                  value={rowVal.admit || ''}
+                                  onChange={(e) =>
+                                    updatePremiumSubInput(sub, 'admit', Number(e.target.value) || 0)
+                                  }
+                                  className="w-full text-center text-xs font-bold rounded-lg border border-red-200 bg-red-50/30 text-red-700 focus:border-red-400 py-1 px-1.5"
+                                />
+                              </td>
+                              <td className="py-1.5 px-2.5 text-right font-extrabold text-orange-950 bg-orange-50/40">
+                                {rowTotal}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot className="bg-orange-100/70 text-orange-950 font-extrabold border-t border-orange-200">
+                        <tr>
+                          <td colSpan={2} className="py-2 px-3">
+                            สรุปรวมคลินิกพิเศษ PREMIUM ({premiumSummary.activeCount} แผนกที่เปิดตรวจ)
+                          </td>
+                          <td className="py-2 px-2 text-center">{premiumSummary.adultSum.toLocaleString()}</td>
+                          <td className="py-2 px-2 text-center">{premiumSummary.childSum.toLocaleString()}</td>
+                          <td className="py-2 px-2 text-center text-red-700">{premiumSummary.admitSum.toLocaleString()}</td>
+                          <td className="py-2 px-2.5 text-right text-sm">{premiumSummary.totalSum.toLocaleString()}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Echo Notice */}
             {isEchoClinic && (
               <div className="bg-amber-50 border border-amber-200/90 rounded-xl p-3 flex items-start gap-2.5">
@@ -694,6 +1156,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               </div>
             </div>
+              </>
+            )}
 
             {/* Row 4: Redesigned Cohesive Section — Staff Leave, Training/Meeting, Cross-Coverage */}
             <div className="rounded-2xl border border-teal-200/80 bg-gradient-to-br from-emerald-50/50 via-teal-50/40 to-cyan-50/30 p-4 space-y-3.5 shadow-2xs">
@@ -1127,10 +1591,18 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             <div className="pt-2 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 px-6 py-2.5 bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg"
+                className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg ${
+                  isPremiumClinic
+                    ? 'bg-orange-600 hover:bg-orange-500 active:bg-orange-700'
+                    : 'bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800'
+                }`}
               >
                 <FileCheck2 className="w-4 h-4" />
-                <span>บันทึกภาระงานห้องตรวจนี้</span>
+                <span>
+                  {isPremiumClinic
+                    ? 'บันทึกข้อมูลคลินิกพิเศษ PREMIUM (กำลังคน + ยอดผู้ป่วย)'
+                    : 'บันทึกภาระงานห้องตรวจนี้'}
+                </span>
               </button>
             </div>
           </form>
@@ -1146,7 +1618,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 รายการที่บันทึกแล้วในวันที่ {formatThaiShortDate(date)}
               </span>
               <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded text-[11px]">
-                {todayWorkloads.length} คลินิก
+                {todayWorkloads.length} รายการ
               </span>
             </h3>
 
@@ -1156,14 +1628,38 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               </div>
             ) : (
               <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
-                {todayWorkloads.map((item) => (
+                {todayWorkloads.map((item) => {
+                  const isPoolRow =
+                    item.recordType === 'PREMIUM_POOL' || item.clinic === PREMIUM_POOL_CLINIC_NAME;
+                  const isSubRow =
+                    item.recordType === 'PREMIUM_SUB' ||
+                    (!isPoolRow && item.clinicGroup === PREMIUM_CLINIC_GROUP);
+                  return (
                   <div
                     key={item.id}
-                    className="p-3 rounded-xl border border-gray-100 hover:border-emerald-200 bg-slate-50/70 hover:bg-emerald-50/20 transition-all text-xs"
+                    className={`p-3 rounded-xl border transition-all text-xs ${
+                      isPoolRow
+                        ? 'border-orange-300 bg-orange-50/70'
+                        : isSubRow
+                        ? 'border-orange-200/80 bg-orange-50/30'
+                        : 'border-gray-100 hover:border-emerald-200 bg-slate-50/70 hover:bg-emerald-50/20'
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <div>
-                        <span className="font-bold text-gray-900 text-sm">{item.clinic}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-gray-900 text-sm">{item.clinic}</span>
+                          {isPoolRow && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-orange-600 text-white font-bold">
+                              กำลังคนรวม
+                            </span>
+                          )}
+                          {isSubRow && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-orange-100 text-orange-800 border border-orange-200 font-semibold">
+                              PREMIUM
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-gray-500">{item.shift}</div>
                       </div>
                       {isAdmin && (
@@ -1202,16 +1698,22 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     <div className="grid grid-cols-3 gap-1.5 text-center my-2">
                       <div className="bg-white p-1.5 rounded border border-gray-200">
                         <span className="block text-[10px] text-gray-500">ผู้ป่วย</span>
-                        <span className="font-bold text-emerald-800 text-sm">{getEffectiveTotalPt(item)}</span>
+                        <span className="font-bold text-emerald-800 text-sm">
+                          {isPoolRow ? '-' : getEffectiveTotalPt(item)}
+                        </span>
                       </div>
                       <div className="bg-white p-1.5 rounded border border-gray-200">
                         <span className="block text-[10px] text-gray-500">Admit</span>
-                        <span className="font-bold text-red-600 text-sm">{item.admit}</span>
+                        <span className="font-bold text-red-600 text-sm">
+                          {isPoolRow ? '-' : item.admit}
+                        </span>
                       </div>
                       <div className="bg-white p-1.5 rounded border border-gray-200">
                         <span className="block text-[10px] text-gray-500">RN+PN+NA</span>
                         <span className="font-bold text-blue-800 text-sm">
-                          {(item.rn + item.pn + (item.na ?? item.pca ?? 0)).toFixed(1)}
+                          {isSubRow
+                            ? 'ร่วม'
+                            : (item.rn + item.pn + (item.na ?? item.pca ?? 0)).toFixed(1)}
                         </span>
                       </div>
                     </div>
@@ -1229,7 +1731,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       </div>
                     )}
                   </div>
-                ))}
+                );
+                })}
               </div>
             )}
 

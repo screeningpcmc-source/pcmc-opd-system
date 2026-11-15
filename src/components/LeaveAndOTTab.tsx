@@ -1270,13 +1270,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
                       <tr>
-                        <th className="py-2.5 px-3">ชื่อ-สกุล</th>
-                        <th className="py-2.5 px-2">ตำแหน่ง</th>
-                        <th className="py-2.5 px-2">คลินิก</th>
-                        <th className="py-2.5 px-2">ประเภทลา</th>
-                        <th className="py-2.5 px-2 text-center">ระยะเวลา</th>
-                        <th className="py-2.5 px-2 text-center">วัน</th>
-                        <th className="py-2.5 px-2 text-center">จัดการ</th>
+                        <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ-สกุล</th>
+                        <th className="py-2.5 px-2 whitespace-nowrap">ตำแหน่ง</th>
+                        <th className="py-2.5 px-2 whitespace-nowrap">คลินิก</th>
+                        <th className="py-2.5 px-2 whitespace-nowrap">ประเภทลา</th>
+                        <th className="py-2.5 px-2 text-center whitespace-nowrap">ระยะเวลา</th>
+                        <th className="py-2.5 px-2 text-center whitespace-nowrap">วัน</th>
+                        <th className="py-2.5 px-2 text-center whitespace-nowrap">จัดการ</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
@@ -1284,8 +1284,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                         const isTraining = lv.leaveType === 'ไปอบรม/ประชุม';
                         return (
                           <tr key={lv.id} className="hover:bg-slate-50/80">
-                            <td className="py-2 px-3">
-                              <div className="font-semibold text-gray-900">{lv.staffName}</div>
+                            <td className="py-2 px-3 whitespace-nowrap">
+                              <div className="font-semibold text-gray-900 whitespace-nowrap">{lv.staffName}</div>
                               {lv.note && (
                                 <div className="text-[10px] text-gray-500 truncate max-w-[200px]" title={lv.note}>
                                   {lv.note}
@@ -1301,13 +1301,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 </div>
                               )}
                             </td>
-                            <td className="py-2 px-2 text-gray-600">
+                            <td className="py-2 px-2 text-gray-600 whitespace-nowrap">
                               {formatPositionLabel(lv.position)}
                             </td>
-                            <td className="py-2 px-2 text-gray-600">{lv.clinic}</td>
-                            <td className="py-2 px-2">
+                            <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{lv.clinic}</td>
+                            <td className="py-2 px-2 whitespace-nowrap">
                               <span
-                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border whitespace-nowrap ${
                                   isTraining
                                     ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
                                     : 'bg-amber-50 text-amber-800 border-amber-200'

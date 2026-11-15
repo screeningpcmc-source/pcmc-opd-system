@@ -8,6 +8,7 @@ import {
   ALL_POSITIONS, 
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS,
+  DEFAULT_PREMIUM_SUB_CLINICS,
   LEAVE_TYPES,
   POSITION_LABELS,
   formatPositionLabel,
@@ -61,6 +62,7 @@ interface AdminPanelTabProps {
   settings: SystemSettings;
   inTimeClinics: string[];
   outTimeClinics: string[];
+  premiumSubClinics?: string[];
   leaveTypes: string[];
   isAdmin: boolean;
   isAdminUnlocked?: boolean;
@@ -91,6 +93,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   settings,
   inTimeClinics,
   outTimeClinics,
+  premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   leaveTypes,
   isAdminUnlocked = false,
   adminOwnerName = '',
@@ -137,6 +140,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   // Clinic, Leave Type & Custom Holiday Management state
   const [newInClinicName, setNewInClinicName] = useState<string>('');
   const [newOutClinicName, setNewOutClinicName] = useState<string>('');
+  const [newPremiumClinicName, setNewPremiumClinicName] = useState<string>('');
   const [newLeaveTypeName, setNewLeaveTypeName] = useState<string>('');
   const [newHolidayDate, setNewHolidayDate] = useState<string>(todayStr);
   const [newHolidayName, setNewHolidayName] = useState<string>('');
@@ -354,6 +358,48 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     });
   };
 
+  const handleAddPremiumSubClinic = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newPremiumClinicName.trim();
+    if (!trimmed) return;
+    if (premiumSubClinics.includes(trimmed)) {
+      setInlineError(`แผนก "${trimmed}" มีอยู่ในคลินิกพิเศษ PREMIUM แล้ว`);
+      return;
+    }
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      inTimeClinics,
+      outTimeClinics,
+      premiumSubClinics: [...premiumSubClinics, trimmed],
+    });
+    setNewPremiumClinicName('');
+  };
+
+  const handleRemovePremiumSubClinic = (clinicName: string) => {
+    if (premiumSubClinics.length <= 1) {
+      setInlineError('ต้องมีแผนกย่อยในคลินิกพิเศษ PREMIUM อย่างน้อย 1 แผนก');
+      return;
+    }
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      inTimeClinics,
+      outTimeClinics,
+      premiumSubClinics: premiumSubClinics.filter(c => c !== clinicName),
+    });
+  };
+
+  const handleRestoreDefaultPremiumSubClinics = () => {
+    setInlineError('');
+    onSaveSettings({
+      ...settings,
+      inTimeClinics,
+      outTimeClinics,
+      premiumSubClinics: [...DEFAULT_PREMIUM_SUB_CLINICS],
+    });
+  };
+
   // Save custom spreadsheet link/ID (+ optional Apps Script Web App URL)
   const handleSaveSheetLink = () => {
     const raw = customSheetUrl.trim();
@@ -522,6 +568,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       additionalAdminPins: normalizedExtraPins,
       inTimeClinics,
       outTimeClinics,
+      premiumSubClinics,
       leaveTypes,
       gasUrl: customGasUrl.trim() || settings.gasUrl || undefined,
     };
@@ -1325,6 +1372,65 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* คลินิกพิเศษ PREMIUM Sub-Departments (Orange Theme) */}
+        <div className="bg-orange-50/60 border border-orange-200/90 rounded-xl p-4 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h4 className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-orange-600" />
+                <span>คลินิกพิเศษ PREMIUM — รายชื่อแผนกย่อย ({premiumSubClinics.length} แผนก)</span>
+              </h4>
+              <p className="text-[11px] text-orange-800/80 mt-0.5">
+                ใช้โครงสร้างกำลังคนรวม 1 ชุดต่อกะ (Pooled Staffing) ร่วมกับยอดผู้ป่วยแยกตามแผนกแพทย์ที่เปิดตรวจจริง และบันทึกลงชีท Settings
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRestoreDefaultPremiumSubClinics}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-100 bg-white rounded-lg border border-orange-200 transition-colors cursor-pointer shrink-0"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>คืนค่า 12 แผนก PREMIUM</span>
+            </button>
+          </div>
+
+          <form onSubmit={handleAddPremiumSubClinic} className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={newPremiumClinicName}
+              onChange={(e) => setNewPremiumClinicName(e.target.value)}
+              placeholder="พิมพ์ชื่อแผนกย่อยคลินิกพิเศษ PREMIUM (เช่น อายุรกรรม-Premium)..."
+              className="flex-1 text-xs rounded-lg border border-orange-300 bg-white px-3 py-1.5 outline-none focus:ring-2 focus:ring-orange-200"
+            />
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center gap-1 px-3.5 py-1.5 bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>เพิ่มแผนก PREMIUM</span>
+            </button>
+          </form>
+
+          <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto pt-1">
+            {premiumSubClinics.map((c) => (
+              <div
+                key={c}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-orange-200 rounded-lg text-xs font-medium text-orange-950 shadow-2xs"
+              >
+                <span>{c}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemovePremiumSubClinic(c)}
+                  className="text-gray-400 hover:text-red-600 transition-colors cursor-pointer"
+                  title={`ลบแผนก ${c}`}
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </div>

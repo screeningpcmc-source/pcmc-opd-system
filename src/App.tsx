@@ -18,6 +18,8 @@ import {
   LEAVE_TYPES,
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS,
+  DEFAULT_PREMIUM_SUB_CLINICS,
+  PREMIUM_CLINIC_GROUP,
   getEffectiveTotalPt
 } from './types';
 import { 
@@ -223,6 +225,9 @@ export default function App() {
   const outTimeClinics = db.settings.outTimeClinics && db.settings.outTimeClinics.length > 0
     ? db.settings.outTimeClinics
     : [...OUT_TIME_CLINICS];
+  const premiumSubClinics = db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
+    ? db.settings.premiumSubClinics
+    : [...DEFAULT_PREMIUM_SUB_CLINICS];
   const leaveTypes = db.settings.leaveTypes && db.settings.leaveTypes.length > 0
     ? db.settings.leaveTypes
     : [...LEAVE_TYPES];
@@ -693,6 +698,115 @@ export default function App() {
       const token = await getAccessToken();
       if (token) {
         await appendDailyWorkloadToSheet(token, targetSheetId, entry);
+        for (const l of newLeaveEntries) {
+          await appendLeaveToSheet(token, targetSheetId, l);
+        }
+        for (const o of newOtEntries) {
+          await appendOTToSheet(token, targetSheetId, o);
+        }
+        lastSyncEpochRef.current = Date.now();
+        setLastSyncedAt(formatSyncTime());
+      }
+    }
+  };
+
+  // Handler: Save Batch Daily Workloads (used by คลินิกพิเศษ PREMIUM Pooled Staffing Model)
+  const handleSaveBatchWorkloads = async (
+    entries: DailyWorkload[],
+    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
+    crossCoverageData?: { staffName: string; targetClinic: string } | null,
+    trainingData?: { staffName: string; topic: string; note: string }[] | null
+  ) => {
+    if (!entries || entries.length === 0) return;
+    const primaryEntry = entries[0];
+    const newLeaveEntries: LeaveRecord[] = [];
+    const newOtEntries: OTAttendance[] = [];
+
+    if (leaveData) {
+      leaveData.forEach((ld, idx) => {
+        const staff = db.staff.find(s => s.name === ld.staffName);
+        newLeaveEntries.push({
+          id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
+          startDate: primaryEntry.date,
+          endDate: primaryEntry.date,
+          staffName: ld.staffName,
+          position: staff ? staff.position : 'RN',
+          clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
+          leaveType: ld.leaveType,
+          days: 1,
+          note: ld.note,
+        });
+      });
+    }
+
+    if (trainingData) {
+      trainingData.forEach((td, idx) => {
+        const staff = db.staff.find(s => s.name === td.staffName);
+        newLeaveEntries.push({
+          id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
+          startDate: primaryEntry.date,
+          endDate: primaryEntry.date,
+          staffName: td.staffName,
+          position: staff ? staff.position : 'RN',
+          clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
+          leaveType: 'ไปอบรม/ประชุม',
+          days: 1,
+          note: [td.topic, td.note].filter(Boolean).join(' — ') || `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`,
+        });
+      });
+    }
+
+    if (crossCoverageData) {
+      const staff = db.staff.find(s => s.name === crossCoverageData.staffName);
+      newOtEntries.push({
+        id: `OT-CROSS-${Date.now()}`,
+        date: primaryEntry.date,
+        shift: primaryEntry.shift,
+        staffName: crossCoverageData.staffName,
+        position: staff ? staff.position : 'RN',
+        homeClinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
+        workClinic: crossCoverageData.targetClinic,
+      });
+    }
+
+    setDb(prev => ({
+      ...prev,
+      workloads: [...entries, ...prev.workloads],
+      leaves: [...newLeaveEntries, ...prev.leaves],
+      ot: [...newOtEntries, ...prev.ot],
+    }));
+
+    const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
+    showToast(
+      subCount > 0
+        ? `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} (${subCount} แผนกย่อย) สำเร็จ!`
+        : `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} สำเร็จ!`,
+      'success'
+    );
+
+    const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+    const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+    if (targetGasUrl) {
+      let allOk = await appendViaAppsScript(targetGasUrl, 'appendWorkload', entries);
+      for (const l of newLeaveEntries) {
+        const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', l);
+        if (!ok) allOk = false;
+      }
+      for (const o of newOtEntries) {
+        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', o);
+        if (!ok) allOk = false;
+      }
+      if (allOk) {
+        lastSyncEpochRef.current = Date.now();
+        setLastSyncedAt(formatSyncTime());
+      } else {
+        showToast('บันทึกในเครื่องแล้ว แต่ส่งเข้า Google Sheet ผ่าน Web App ไม่ครบถ้วน', 'error');
+      }
+    } else if (targetSheetId) {
+      const token = await getAccessToken();
+      if (token) {
+        await appendDailyWorkloadToSheet(token, targetSheetId, entries);
         for (const l of newLeaveEntries) {
           await appendLeaveToSheet(token, targetSheetId, l);
         }
@@ -1267,8 +1381,10 @@ export default function App() {
             staffList={db.staff}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            premiumSubClinics={premiumSubClinics}
             leaveTypes={leaveTypes}
             onSaveWorkload={handleSaveWorkload}
+            onSaveBatchWorkloads={handleSaveBatchWorkloads}
             onUpdateWorkload={handleUpdateWorkload}
             onDeleteWorkload={handleDeleteWorkload}
             defaultReporter=""
@@ -1303,6 +1419,7 @@ export default function App() {
         {activeTab === 'census' && (
           <DailyCensusTab
             workloads={db.workloads}
+            premiumSubClinics={premiumSubClinics}
             isAdmin={isAdmin}
             onUpdateWorkload={handleUpdateWorkload}
             onDeleteWorkload={handleDeleteWorkload}
@@ -1316,6 +1433,7 @@ export default function App() {
             settings={db.settings}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            premiumSubClinics={premiumSubClinics}
           />
         )}
 
@@ -1326,6 +1444,7 @@ export default function App() {
             settings={db.settings}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
+            premiumSubClinics={premiumSubClinics}
             leaveTypes={leaveTypes}
             isAdmin={isAdmin}
             isAdminUnlocked={isAdminUnlocked}

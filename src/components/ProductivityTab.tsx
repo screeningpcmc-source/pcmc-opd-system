@@ -5,10 +5,13 @@ import {
   IN_TIME_CLINICS, 
   OUT_TIME_CLINICS, 
   SHIFTS, 
-  WorkShift,
   getEffectiveTotalPt,
   getClinicNhppd,
-  SCREENING_CLINIC_NAME
+  SCREENING_CLINIC_NAME,
+  PREMIUM_CLINIC_GROUP,
+  DEFAULT_PREMIUM_SUB_CLINICS,
+  isPremiumWorkloadRecord,
+  normalizeWorkloadRecord
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { 
@@ -23,7 +26,8 @@ import {
   Info, 
   Sliders, 
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  Star
 } from 'lucide-react';
 
 interface ProductivityTabProps {
@@ -31,6 +35,7 @@ interface ProductivityTabProps {
   settings: SystemSettings;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
+  premiumSubClinics?: string[];
 }
 
 export const ProductivityTab: React.FC<ProductivityTabProps> = ({
@@ -38,6 +43,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   settings,
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
+  premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
 }) => {
   // Current month string YYYY-MM
   const currentMonthStr = new Date().toISOString().slice(0, 7);
@@ -57,12 +63,16 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return workloads.filter(w => {
       const matchMonth = w.date.startsWith(selectedMonth);
       const matchShift = selectedShift === 'ALL' || w.shift === selectedShift;
-      const matchClinic = selectedClinic === 'ALL' || w.clinic === selectedClinic;
+      const matchClinic =
+        selectedClinic === 'ALL' ||
+        (selectedClinic === PREMIUM_CLINIC_GROUP
+          ? isPremiumWorkloadRecord(w, premiumSubClinics)
+          : w.clinic === selectedClinic);
       const matchLasik = !(excludeLasik && selectedClinic === 'ALL' && w.clinic === 'ศูนย์เลสิก');
 
       return matchMonth && matchShift && matchClinic && matchLasik;
     });
-  }, [workloads, selectedMonth, selectedShift, selectedClinic, excludeLasik]);
+  }, [workloads, selectedMonth, selectedShift, selectedClinic, excludeLasik, premiumSubClinics]);
 
   // Working days count: unique dates in the filtered records
   const workingDays = useMemo(() => {
@@ -175,21 +185,48 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const status = getProductivityStatus(stats.productivity);
   const StatusIcon = status.icon || Info;
 
-  // Breakdown by Clinic
+  // Breakdown by Clinic (Collapses all PREMIUM_POOL & PREMIUM_SUB rows into 1 grouped Pooled Staffing clinic row)
   const clinicBreakdown = useMemo(() => {
-    const map = new Map<string, { totalPt: number; rn: number; pn: number; na: number; days: Set<string> }>();
+    const map = new Map<
+      string,
+      {
+        totalPt: number;
+        rn: number;
+        pn: number;
+        na: number;
+        days: Set<string>;
+        isPremiumGroup: boolean;
+        subClinicTotals: Record<string, number>;
+      }
+    >();
 
-    filteredWorkloads.forEach(w => {
-      const c = w.clinic;
+    filteredWorkloads.forEach(raw => {
+      const isPremium = isPremiumWorkloadRecord(raw, premiumSubClinics);
+      const w = isPremium ? normalizeWorkloadRecord(raw, premiumSubClinics) : raw;
+      const c = isPremium ? PREMIUM_CLINIC_GROUP : w.clinic;
+
       if (!map.has(c)) {
-        map.set(c, { totalPt: 0, rn: 0, pn: 0, na: 0, days: new Set() });
+        map.set(c, {
+          totalPt: 0,
+          rn: 0,
+          pn: 0,
+          na: 0,
+          days: new Set(),
+          isPremiumGroup: isPremium,
+          subClinicTotals: {},
+        });
       }
       const item = map.get(c)!;
-      item.totalPt += getEffectiveTotalPt(w);
+      const pt = getEffectiveTotalPt(w);
+      item.totalPt += pt;
       item.rn += w.rn || 0;
       item.pn += w.pn || 0;
       item.na += (w.na !== undefined ? w.na : (w.pca || 0));
       item.days.add(w.date);
+
+      if (isPremium && w.recordType === 'PREMIUM_SUB' && pt > 0) {
+        item.subClinicTotals[w.clinic] = (item.subClinicTotals[w.clinic] || 0) + pt;
+      }
     });
 
     const list = Array.from(map.entries()).map(([clinicName, val]) => {
@@ -202,6 +239,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       const prod = nursing > 0 ? (out / nursing) * 100 : 0;
       const skillMix = (val.rn + val.pn + val.na) > 0 ? (val.rn / (val.rn + val.pn + val.na)) * 100 : 0;
 
+      const subClinicEntries = Object.entries(val.subClinicTotals).sort((a, b) => b[1] - a[1]);
+
       return {
         clinicName,
         clinicNhppd,
@@ -210,11 +249,13 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         nursingStaffPerDay: Number(nursing.toFixed(1)),
         productivity: Number(prod.toFixed(1)),
         skillMix: Number(skillMix.toFixed(1)),
+        isPremiumGroup: val.isPremiumGroup,
+        subClinicEntries,
       };
     });
 
     return list.sort((a, b) => b.totalPt - a.totalPt);
-  }, [filteredWorkloads, settings]);
+  }, [filteredWorkloads, settings, premiumSubClinics]);
 
   return (
     <div className="space-y-6">
@@ -280,6 +321,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
               className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-emerald-950"
             >
               <option value="ALL">ภาพรวมทั้ง OPD (ทุกคลินิก)</option>
+              <option value={PREMIUM_CLINIC_GROUP}>★ คลินิกพิเศษ PREMIUM (ภาพรวม)</option>
               {allClinicsList.map(c => (
                 <option key={c} value={c}>{c}</option>
               ))}
@@ -543,18 +585,45 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                 const itemStatus = getProductivityStatus(item.productivity);
                 const isScreening = item.clinicName === SCREENING_CLINIC_NAME;
                 return (
-                  <tr key={item.clinicName} className="hover:bg-slate-50/80">
-                    <td className="py-2 px-3 font-bold text-gray-900">{item.clinicName}</td>
+                  <tr
+                    key={item.clinicName}
+                    className={item.isPremiumGroup ? 'bg-orange-50/40 hover:bg-orange-50/70' : 'hover:bg-slate-50/80'}
+                  >
+                    <td className="py-2 px-3 font-bold text-gray-900">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {item.isPremiumGroup && <Star className="w-3.5 h-3.5 text-orange-600 shrink-0" />}
+                        <span className={item.isPremiumGroup ? 'text-orange-950' : ''}>{item.clinicName}</span>
+                        {item.isPremiumGroup && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-100 text-orange-800 border border-orange-300">
+                            Pooled Staffing
+                          </span>
+                        )}
+                      </div>
+                      {item.isPremiumGroup && item.subClinicEntries.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {item.subClinicEntries.map(([subName, subPt]) => (
+                            <span
+                              key={subName}
+                              className="inline-flex items-center px-1.5 py-0.5 rounded bg-white border border-orange-200 text-[10px] font-medium text-orange-900"
+                            >
+                              {subName.replace(/-Premium$/i, '')}: <strong className="ml-0.5">{subPt.toLocaleString()}</strong>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-2 px-2 text-center">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
                         isScreening
                           ? 'bg-cyan-100 text-cyan-800 border border-cyan-300'
+                          : item.isPremiumGroup
+                          ? 'bg-orange-100 text-orange-900 border border-orange-300'
                           : 'bg-slate-100 text-slate-700'
                       }`}>
                         {item.clinicNhppd}
                       </span>
                     </td>
-                    <td className="py-2 px-2 text-right text-gray-700">{item.totalPt.toLocaleString()}</td>
+                    <td className="py-2 px-2 text-right text-gray-700 font-semibold">{item.totalPt.toLocaleString()}</td>
                     <td className="py-2 px-2 text-right font-medium text-blue-900">{item.avgPt}</td>
                     <td className="py-2 px-2 text-right text-gray-800">{item.nursingStaffPerDay}</td>
                     <td className="py-2 px-2 text-right font-medium text-purple-900">{item.skillMix}%</td>

@@ -1,5 +1,14 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { DailyWorkload, WorkShift, SHIFTS, getEffectiveTotalPt } from '../types';
+import {
+  DailyWorkload,
+  WorkShift,
+  SHIFTS,
+  getEffectiveTotalPt,
+  PREMIUM_CLINIC_GROUP,
+  DEFAULT_PREMIUM_SUB_CLINICS,
+  isPremiumWorkloadRecord,
+  normalizeWorkloadRecord,
+} from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime } from '../utils/thaiDate';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
@@ -20,19 +29,43 @@ import {
   X,
   Save,
   ImageDown,
-  AlertCircle
+  AlertCircle,
+  Star
 } from 'lucide-react';
 
 interface DailyCensusTabProps {
   workloads: DailyWorkload[];
   isAdmin?: boolean;
+  premiumSubClinics?: string[];
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
   onDeleteWorkload?: (id: string, reason: string) => void;
+}
+
+interface PremiumCensusGroup {
+  key: string;
+  date: string;
+  shift: WorkShift;
+  poolRows: DailyWorkload[];
+  subRows: DailyWorkload[];
+  primaryPoolRecord: DailyWorkload | null;
+  totalPt: number;
+  adultPt: number;
+  childPt: number;
+  admit: number;
+  hn: number;
+  rn: number;
+  pn: number;
+  na: number;
+  clerk: number;
+  serviceWorker: number;
+  reporter: string;
+  note: string;
 }
 
 export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({ 
   workloads,
   isAdmin = false,
+  premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   onUpdateWorkload,
   onDeleteWorkload
 }) => {
@@ -61,7 +94,77 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     });
   }, [workloads, date, shiftFilter]);
 
-  // Aggregate Totals
+  // Separate standard clinics vs Pooled Staffing Premium groups (Master-Detail)
+  const { regularWorkloads, premiumGroups } = useMemo(() => {
+    const regular: DailyWorkload[] = [];
+    const groupMap = new Map<string, { date: string; shift: WorkShift; poolRows: DailyWorkload[]; subRows: DailyWorkload[] }>();
+
+    filteredWorkloads.forEach((raw) => {
+      if (!isPremiumWorkloadRecord(raw, premiumSubClinics)) {
+        regular.push(raw);
+        return;
+      }
+      const w = normalizeWorkloadRecord(raw, premiumSubClinics);
+      const key = `${w.date}|${w.shift}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          date: w.date,
+          shift: w.shift,
+          poolRows: [],
+          subRows: [],
+        });
+      }
+      const grp = groupMap.get(key)!;
+      if (w.recordType === 'PREMIUM_POOL') {
+        grp.poolRows.push(w);
+      } else {
+        grp.subRows.push(w);
+      }
+    });
+
+    const groups: PremiumCensusGroup[] = Array.from(groupMap.entries()).map(([key, grp]) => {
+      const allRows = [...grp.poolRows, ...grp.subRows];
+      const staffSource = grp.poolRows.length > 0 ? grp.poolRows : grp.subRows;
+      const subOrder = new Map<string, number>();
+      premiumSubClinics.forEach((name, idx) => subOrder.set(name, idx));
+      const sortedSubs = [...grp.subRows].sort((a, b) => {
+        const ra = subOrder.has(a.clinic) ? subOrder.get(a.clinic)! : 999;
+        const rb = subOrder.has(b.clinic) ? subOrder.get(b.clinic)! : 999;
+        if (ra !== rb) return ra - rb;
+        return a.clinic.localeCompare(b.clinic, 'th');
+      });
+
+      const reporters = Array.from(new Set(allRows.map((r) => (r.reporter || '').trim()).filter(Boolean)));
+      const notes = Array.from(new Set(grp.poolRows.map((r) => (r.note || '').trim()).filter(Boolean)));
+
+      return {
+        key,
+        date: grp.date,
+        shift: grp.shift,
+        poolRows: grp.poolRows,
+        subRows: sortedSubs,
+        primaryPoolRecord: grp.poolRows[0] || null,
+        totalPt: allRows.reduce((s, r) => s + getEffectiveTotalPt(r), 0),
+        adultPt: allRows.reduce((s, r) => s + (r.adultPt || 0), 0),
+        childPt: allRows.reduce((s, r) => s + (r.childPt || 0), 0),
+        admit: allRows.reduce((s, r) => s + (r.admit || 0), 0),
+        hn: staffSource.reduce((s, r) => s + (r.hn || 0), 0),
+        rn: staffSource.reduce((s, r) => s + (r.rn || 0), 0),
+        pn: staffSource.reduce((s, r) => s + (r.pn || 0), 0),
+        na: staffSource.reduce((s, r) => s + (r.na !== undefined ? r.na : (r.pca || 0)), 0),
+        clerk: staffSource.reduce((s, r) => s + (r.clerk || 0), 0),
+        serviceWorker: staffSource.reduce((s, r) => s + (r.serviceWorker || 0), 0),
+        reporter: reporters[0] || '-',
+        note: notes.join(' / '),
+      };
+    });
+
+    return { regularWorkloads: regular, premiumGroups: groups };
+  }, [filteredWorkloads, premiumSubClinics]);
+
+  const clinicCount = regularWorkloads.length + premiumGroups.length;
+
+  // Aggregate Totals (PREMIUM_POOL has 0 patients, PREMIUM_SUB has 0 staffing -> zero double-counting)
   const totals = useMemo(() => {
     return filteredWorkloads.reduce(
       (acc, curr) => ({
@@ -108,7 +211,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
       'Admit', 'HN', 'RN', 'PN', 'NA', 'ผู้ปฏิบัติงานทั่วไป', 'พนักงานบริการ', 'ผู้รายงาน', 'หมายเหตุ'
     ];
 
-    const rows = filteredWorkloads.map((w, i) => [
+    const rows: (string | number)[][] = regularWorkloads.map((w, i) => [
       i + 1,
       `"${w.clinic}"`,
       `"${w.shift}"`,
@@ -125,6 +228,45 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
       `"${w.reporter}"`,
       `"${w.note || ''}"`
     ]);
+
+    premiumGroups.forEach((grp, idx) => {
+      rows.push([
+        regularWorkloads.length + idx + 1,
+        `"${PREMIUM_CLINIC_GROUP} (รวม ${grp.subRows.length} แผนก - กำลังคนรวม)"`,
+        `"${grp.shift}"`,
+        grp.totalPt,
+        grp.adultPt,
+        grp.childPt,
+        grp.admit,
+        grp.hn,
+        grp.rn,
+        grp.pn,
+        grp.na,
+        grp.clerk,
+        grp.serviceWorker,
+        `"${grp.reporter}"`,
+        `"${grp.note || 'Pooled Staffing'}"`
+      ]);
+      grp.subRows.forEach((sub) => {
+        rows.push([
+          '-',
+          `"  ↳ ${sub.clinic}"`,
+          `"${sub.shift}"`,
+          getEffectiveTotalPt(sub),
+          sub.adultPt,
+          sub.childPt,
+          sub.admit,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          `"${sub.reporter}"`,
+          `"${sub.note || 'ใช้กำลังคนร่วม'}"`
+        ]);
+      });
+    });
 
     // Total row
     rows.push([
@@ -159,6 +301,19 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   // Copy Summary text for LINE message
   const handleCopySummary = () => {
     const shiftLabel = shiftFilter === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftFilter;
+    let premiumSection = '';
+    if (premiumGroups.length > 0) {
+      const premiumLines = premiumGroups.map((grp) => {
+        const nursing = grp.rn + grp.pn + grp.na;
+        const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง`;
+        const subLines = grp.subRows.map(
+          (sub) => `  ↳ ${sub.clinic}: ${getEffectiveTotalPt(sub).toLocaleString()} ราย${sub.admit > 0 ? ` (Admit ${sub.admit})` : ''}`
+        );
+        return [headerLine, ...subLines].join('\n');
+      });
+      premiumSection = `\n──────────────────\n${premiumLines.join('\n')}`;
+    }
+
     const text = `📊 รายงานภาระงานผู้ป่วยนอก OPD PCMC
 🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน
 📅 ประจำวันที่: ${formattedThaiDate} (${shiftLabel})
@@ -166,9 +321,9 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 👥 ผู้ป่วยนอกรวม: ${totals.totalPt.toLocaleString()} ราย
 🛌 รับไว้รักษา (Admit): ${totals.admit.toLocaleString()} ราย
 👩‍⚕️ กำลังคนพยาบาลปฏิบัติงาน (RN+PN+NA): ${totalNursingOnDuty.toFixed(1)} แรง
-(RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})
+(RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})${premiumSection}
 ──────────────────
-บันทึกทั้งหมด ${filteredWorkloads.length} คลินิก/แผนก`;
+บันทึกทั้งหมด ${clinicCount} คลินิกหลัก`;
 
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
@@ -263,7 +418,12 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
 
         <div className="text-xs text-gray-500">
-          แสดงข้อมูล <span className="font-bold text-blue-900">{filteredWorkloads.length}</span> ห้องตรวจที่บันทึกแล้ว
+          แสดงข้อมูล <span className="font-bold text-blue-900">{clinicCount}</span> คลินิก
+          {premiumGroups.length > 0 && (
+            <span className="text-orange-700 font-semibold ml-1">
+              (รวม {PREMIUM_CLINIC_GROUP} {premiumGroups.reduce((s, g) => s + g.subRows.length, 0)} แผนกย่อย)
+            </span>
+          )}
         </div>
       </div>
 
@@ -376,74 +536,262 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredWorkloads.map((w, index) => (
-                  <tr key={w.id} className="hover:bg-slate-50/80">
-                    <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
-                    <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
-                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
-                    <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
-                    <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
-                    <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
-                    <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
-                    <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
-                    <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
-                    <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
-                    <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
-                    <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
-                    <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
-                      <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || '-'}</div>
-                      {(w.lastEditReason || w.lastEditedAt) && (
-                        <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
-                          แก้ไข: {w.lastEditReason || '-'}
-                        </div>
-                      )}
-                    </td>
-                    {isAdmin && (
-                      <td className="py-2 px-2 text-center whitespace-nowrap no-print">
-                        <div className="flex items-center justify-center gap-1">
-                          {onUpdateWorkload && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingWorkload({ ...w, totalPt: getEffectiveTotalPt(w) });
-                                setEditWorkloadReason('');
-                                setEditWorkloadReasonError('');
-                                setEditModalError('');
-                              }}
-                              className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
-                              title="แก้ไขข้อมูลภาระงาน"
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                          {onDeleteWorkload && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setDeletingWorkload(w);
-                                setDeleteWorkloadReason('');
-                                setDeleteWorkloadReasonError('');
-                              }}
-                              className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
-                              title="ลบรายการ"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
+                <>
+                  {regularWorkloads.map((w, index) => (
+                    <tr key={w.id} className="hover:bg-slate-50/80">
+                      <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
+                      <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
+                      <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
+                      <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
+                      <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
+                      <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
+                      <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
+                      <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
+                      <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
+                      <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
+                      <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
+                      <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
+                      <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
+                      <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
+                      <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
+                        <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || '-'}</div>
+                        {(w.lastEditReason || w.lastEditedAt) && (
+                          <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
+                            แก้ไข: {w.lastEditReason || '-'}
+                          </div>
+                        )}
                       </td>
-                    )}
-                  </tr>
-                ))
+                      {isAdmin && (
+                        <td className="py-2 px-2 text-center whitespace-nowrap no-print">
+                          <div className="flex items-center justify-center gap-1">
+                            {onUpdateWorkload && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingWorkload({ ...w, totalPt: getEffectiveTotalPt(w) });
+                                  setEditWorkloadReason('');
+                                  setEditWorkloadReasonError('');
+                                  setEditModalError('');
+                                }}
+                                className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
+                                title="แก้ไขข้อมูลภาระงาน"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {onDeleteWorkload && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDeletingWorkload(w);
+                                  setDeleteWorkloadReason('');
+                                  setDeleteWorkloadReasonError('');
+                                }}
+                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                title="ลบรายการ"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+
+                  {premiumGroups.map((grp, grpIdx) => {
+                    const poolRec = grp.primaryPoolRecord;
+                    return (
+                      <React.Fragment key={grp.key}>
+                        {/* Master Row: คลินิกพิเศษ PREMIUM */}
+                        <tr className="bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200">
+                          <td className="py-2 px-2 text-center font-bold text-orange-900 print:px-0.5 print:py-1">
+                            {regularWorkloads.length + grpIdx + 1}
+                          </td>
+                          <td className="py-2 px-3 font-extrabold text-orange-950 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">
+                            <div className="inline-flex items-center gap-1.5 flex-wrap">
+                              <Star className="w-3.5 h-3.5 text-orange-600 shrink-0 no-print" />
+                              <span>{PREMIUM_CLINIC_GROUP}</span>
+                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-200/80 text-orange-900 print:text-[7.5px] print:px-1">
+                                รวม {grp.subRows.length} แผนก
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-2 px-2 text-orange-900 font-semibold whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">
+                            {grp.shift}
+                          </td>
+                          <td className="py-2 px-2 text-right font-extrabold text-blue-950 bg-blue-50/50 print:px-0.5 print:py-1">
+                            {grp.totalPt}
+                          </td>
+                          <td className="py-2 px-2 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
+                            {grp.adultPt}
+                          </td>
+                          <td className="py-2 px-2 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
+                            {grp.childPt}
+                          </td>
+                          <td className="py-2 px-2 text-right font-extrabold text-red-700 bg-red-50/50 print:px-0.5 print:py-1">
+                            {grp.admit}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-bold text-orange-950 print:px-0.5 print:py-1">
+                            {grp.hn}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-extrabold text-blue-900 bg-blue-50/50 print:px-0.5 print:py-1">
+                            {grp.rn}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-bold text-teal-900 bg-teal-50/50 print:px-0.5 print:py-1">
+                            {grp.pn}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-bold text-emerald-900 bg-emerald-50/50 print:px-0.5 print:py-1">
+                            {grp.na}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
+                            {grp.clerk}
+                          </td>
+                          <td className="py-2 px-1.5 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
+                            {grp.serviceWorker}
+                          </td>
+                          <td className="py-2 px-3 text-gray-900 font-medium whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">
+                            {grp.reporter}
+                          </td>
+                          <td className="py-2 px-3 text-orange-800 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={grp.note}>
+                            <div className="truncate print:whitespace-normal print:overflow-visible">
+                              {grp.note || (poolRec ? 'กำลังคนรวมทั้งคลินิก' : '-')}
+                            </div>
+                            {poolRec && (poolRec.lastEditReason || poolRec.lastEditedAt) && (
+                              <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate">
+                                แก้ไขกำลังคน: {poolRec.lastEditReason || '-'}
+                              </div>
+                            )}
+                          </td>
+                          {isAdmin && (
+                            <td className="py-2 px-2 text-center whitespace-nowrap no-print">
+                              {poolRec ? (
+                                <div className="flex items-center justify-center gap-1">
+                                  {onUpdateWorkload && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingWorkload({ ...poolRec, totalPt: getEffectiveTotalPt(poolRec) });
+                                        setEditWorkloadReason('');
+                                        setEditWorkloadReasonError('');
+                                        setEditModalError('');
+                                      }}
+                                      className="text-orange-700 hover:text-orange-900 p-1 rounded hover:bg-orange-200/70 cursor-pointer"
+                                      title="แก้ไขกำลังคนรวมคลินิกพิเศษ PREMIUM"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {onDeleteWorkload && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeletingWorkload(poolRec);
+                                        setDeleteWorkloadReason('');
+                                        setDeleteWorkloadReasonError('');
+                                      }}
+                                      className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                      title="ลบแถวกำลังคนรวม"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-[10px] text-gray-400">-</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+
+                        {/* Detail Rows: แผนกย่อยของคลินิกพิเศษ PREMIUM */}
+                        {grp.subRows.map((sub) => (
+                          <tr key={sub.id} className="bg-orange-50/20 hover:bg-orange-50/60 text-gray-700">
+                            <td className="py-1.5 px-2 text-center text-orange-400 print:px-0.5 print:py-0.5">•</td>
+                            <td className="py-1.5 px-3 pl-6 font-semibold text-gray-800 whitespace-nowrap print:whitespace-normal print:pl-3 print:px-1 print:py-0.5">
+                              <span className="text-orange-500 mr-1.5">↳</span>
+                              {sub.clinic}
+                            </td>
+                            <td className="py-1.5 px-2 text-gray-500 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-0.5">
+                              {sub.shift}
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-bold text-blue-900 bg-blue-50/20 print:px-0.5 print:py-0.5">
+                              {getEffectiveTotalPt(sub)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right text-gray-600 print:px-0.5 print:py-0.5">
+                              {sub.adultPt}
+                            </td>
+                            <td className="py-1.5 px-2 text-right text-gray-600 print:px-0.5 print:py-0.5">
+                              {sub.childPt}
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-bold text-red-600 bg-red-50/20 print:px-0.5 print:py-0.5">
+                              {sub.admit}
+                            </td>
+                            <td
+                              colSpan={6}
+                              className="py-1.5 px-2 text-center text-[11px] italic text-orange-700/80 bg-orange-50/30 print:text-[7.5px] print:px-0.5 print:py-0.5"
+                            >
+                              ใช้กำลังคนร่วม (Pooled Staffing)
+                            </td>
+                            <td className="py-1.5 px-3 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-0.5">
+                              {sub.reporter}
+                            </td>
+                            <td className="py-1.5 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-0.5" title={sub.note}>
+                              <div className="truncate print:whitespace-normal print:overflow-visible">{sub.note || '-'}</div>
+                              {(sub.lastEditReason || sub.lastEditedAt) && (
+                                <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate">
+                                  แก้ไข: {sub.lastEditReason || '-'}
+                                </div>
+                              )}
+                            </td>
+                            {isAdmin && (
+                              <td className="py-1.5 px-2 text-center whitespace-nowrap no-print">
+                                <div className="flex items-center justify-center gap-1">
+                                  {onUpdateWorkload && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingWorkload({ ...sub, totalPt: getEffectiveTotalPt(sub) });
+                                        setEditWorkloadReason('');
+                                        setEditWorkloadReasonError('');
+                                        setEditModalError('');
+                                      }}
+                                      className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
+                                      title="แก้ไขข้อมูลผู้ป่วยแผนกย่อย"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {onDeleteWorkload && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeletingWorkload(sub);
+                                        setDeleteWorkloadReason('');
+                                        setDeleteWorkloadReasonError('');
+                                      }}
+                                      className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                      title="ลบรายการแผนกย่อย"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    );
+                  })}
+                </>
               )}
             </tbody>
             {/* Total Row */}
             <tfoot className="bg-slate-200 text-slate-900 font-extrabold border-t-2 border-gray-400">
               <tr>
                 <td colSpan={3} className="py-2.5 px-3 text-center">
-                  ยอดรวมทั้งสิ้น ({filteredWorkloads.length} แผนก)
+                  ยอดรวมทั้งสิ้น ({clinicCount} คลินิก)
                 </td>
                 <td className="py-2.5 px-2 text-right text-blue-950 font-black text-sm bg-blue-100">
                   {totals.totalPt.toLocaleString()}
@@ -510,6 +858,16 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             </div>
 
             <div className="space-y-4 text-xs">
+              {editingWorkload.recordType === 'PREMIUM_POOL' && (
+                <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2 text-[11px] text-orange-900">
+                  <strong>แถวกำลังคนรวม (PREMIUM_POOL):</strong> ใช้สำหรับเก็บกำลังคนปฏิบัติงานรวมทั้งคลินิกพิเศษ PREMIUM ในกะนี้ (ยอดผู้ป่วยควรเป็น 0 เพื่อไม่ให้นับซ้ำกับแผนกย่อย)
+                </div>
+              )}
+              {editingWorkload.recordType === 'PREMIUM_SUB' && (
+                <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2 text-[11px] text-orange-900">
+                  <strong>แถวแผนกย่อย (PREMIUM_SUB):</strong> ใช้สำหรับเก็บยอดผู้ป่วยรายแผนกของคลินิกพิเศษ PREMIUM (กำลังคนควรเป็น 0 เพราะใช้กำลังคนร่วมจากแถวหลัก)
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-semibold text-gray-700 mb-1">วันที่ (พ.ศ.)</label>

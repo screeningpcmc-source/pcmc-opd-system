@@ -12,8 +12,11 @@ import {
   LeaveType,
   IN_TIME_CLINICS,
   OUT_TIME_CLINICS,
+  DEFAULT_PREMIUM_SUB_CLINICS,
   LEAVE_TYPES,
-  getEffectiveTotalPt
+  WorkloadRecordType,
+  getEffectiveTotalPt,
+  normalizeWorkloadRecord
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -200,6 +203,11 @@ export const loadLocalDatabase = (): AppDatabase => {
         position: (s.position === 'PCA' ? 'NA' : s.position) as StaffPosition,
       }));
 
+      const mergedPremiumClinics =
+        Array.isArray(parsed.settings?.premiumSubClinics) && parsed.settings.premiumSubClinics.length > 0
+          ? parsed.settings.premiumSubClinics
+          : INITIAL_SETTINGS.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
+
       const rawWorkloads: any[] = parsed.workloads || INITIAL_WORKLOADS;
       const migratedWorkloads = (needsDemoPurge
         ? rawWorkloads.filter((w) => !isDemoWorkloadId(w.id))
@@ -208,11 +216,14 @@ export const loadLocalDatabase = (): AppDatabase => {
         const adult = Number(w.adultPt) || 0;
         const child = Number(w.childPt) || 0;
         const total = Math.max(Number(w.totalPt) || 0, adult + child);
-        return {
-          ...w,
-          totalPt: total,
-          na: w.na !== undefined ? Number(w.na) : Number(w.pca || 0),
-        };
+        return normalizeWorkloadRecord(
+          {
+            ...w,
+            totalPt: total,
+            na: w.na !== undefined ? Number(w.na) : Number(w.pca || 0),
+          },
+          mergedPremiumClinics
+        );
       });
 
       const rawLeaves: any[] = parsed.leaves || INITIAL_LEAVES;
@@ -238,7 +249,7 @@ export const loadLocalDatabase = (): AppDatabase => {
         ...(parsed.settings || {}),
         screeningNhppd:
           Number(parsed.settings?.screeningNhppd) > 0
-            ? Number(parsed.settings?.screeningNhppd)
+            ? Number(parsed.settings.screeningNhppd)
             : 0.1,
         inTimeClinics:
           Array.isArray(parsed.settings?.inTimeClinics) && parsed.settings.inTimeClinics.length > 0
@@ -248,6 +259,7 @@ export const loadLocalDatabase = (): AppDatabase => {
           Array.isArray(parsed.settings?.outTimeClinics) && parsed.settings.outTimeClinics.length > 0
             ? parsed.settings.outTimeClinics
             : INITIAL_SETTINGS.outTimeClinics,
+        premiumSubClinics: mergedPremiumClinics,
         leaveTypes:
           Array.isArray(parsed.settings?.leaveTypes) && parsed.settings.leaveTypes.length > 0
             ? parsed.settings.leaveTypes
@@ -445,6 +457,7 @@ export const createGoogleSpreadsheet = async (
     ['Admin_Emails', settings.adminEmails.join(', ')],
     ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
     ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
+    ['Premium_Sub_Clinics', (settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
     ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
     ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
     ['Primary_Admin_Owner', settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
@@ -463,7 +476,7 @@ export const createGoogleSpreadsheet = async (
         ],
       },
       {
-        range: 'Daily_Workload!A1:O1',
+        range: 'Daily_Workload!A1:R1',
         values: [
           [
             'Date',
@@ -481,6 +494,9 @@ export const createGoogleSpreadsheet = async (
             'Service_Worker',
             'Note',
             'Reporter',
+            'Clinic_Group',
+            'Pool_ID',
+            'Record_Type',
           ],
         ],
       },
@@ -493,7 +509,7 @@ export const createGoogleSpreadsheet = async (
         values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
       },
       {
-        range: 'Settings!A1:B12',
+        range: `Settings!A1:B${settingsRows.length}`,
         values: settingsRows,
       },
       {
@@ -639,7 +655,7 @@ export const syncAllWithGoogleSheet = async (
   const batchGetRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?ranges=${encodeURIComponent(
       'Staff_Master!A:G'
-    )}&ranges=${encodeURIComponent('Daily_Workload!A:O')}&ranges=${encodeURIComponent(
+    )}&ranges=${encodeURIComponent('Daily_Workload!A:R')}&ranges=${encodeURIComponent(
       'Leave_Records!A:H'
     )}&ranges=${encodeURIComponent('OT_Attendance!A:F')}&ranges=${encodeURIComponent(
       'Settings!A:B'
@@ -696,24 +712,35 @@ export const syncAllWithGoogleSheet = async (
       const adultPt = Number(r[4] || 0);
       const childPt = Number(r[5] || 0);
       const totalPt = Math.max(Number(r[3] || 0), adultPt + childPt);
-      return {
-        id: `REC-GS-${Date.now()}-${idx}`,
-        date: String(r[0] || '').trim(),
-        shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
-        clinic: String(r[2] || '').trim(),
-        totalPt,
-        adultPt,
-        childPt,
-        admit: Number(r[6] || 0),
-        hn: Number(r[7] || 0),
-        rn: Number(r[8] || 0),
-        pn: Number(r[9] || 0),
-        na: Number(r[10] || 0),
-        clerk: Number(r[11] || 0),
-        serviceWorker: Number(r[12] || 0),
-        note: String(r[13] || '').trim(),
-        reporter: String(r[14] || '').trim(),
-      };
+      const rawRecordType = String(r[17] || '').trim();
+      const recordType: WorkloadRecordType | undefined =
+        rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
+          ? rawRecordType
+          : undefined;
+      return normalizeWorkloadRecord(
+        {
+          id: `REC-GS-${Date.now()}-${idx}`,
+          date: String(r[0] || '').trim(),
+          shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+          clinic: String(r[2] || '').trim(),
+          totalPt,
+          adultPt,
+          childPt,
+          admit: Number(r[6] || 0),
+          hn: Number(r[7] || 0),
+          rn: Number(r[8] || 0),
+          pn: Number(r[9] || 0),
+          na: Number(r[10] || 0),
+          clerk: Number(r[11] || 0),
+          serviceWorker: Number(r[12] || 0),
+          note: String(r[13] || '').trim(),
+          reporter: String(r[14] || '').trim(),
+          clinicGroup: String(r[15] || '').trim() || undefined,
+          poolId: String(r[16] || '').trim() || undefined,
+          recordType,
+        },
+        db.settings.premiumSubClinics
+      );
     });
 
   const shouldOverwriteWorkloads = isWorkloadsDirty();
@@ -731,7 +758,10 @@ export const syncAllWithGoogleSheet = async (
   (shouldOverwriteWorkloads ? db.workloads : [...db.workloads, ...sheetWorkloads]).forEach((w) => {
     const k = workloadKey(w);
     if (!mergedWorkloadsMap.has(k)) {
-      mergedWorkloadsMap.set(k, { ...w, totalPt: getEffectiveTotalPt(w) });
+      mergedWorkloadsMap.set(
+        k,
+        normalizeWorkloadRecord({ ...w, totalPt: getEffectiveTotalPt(w) }, db.settings.premiumSubClinics)
+      );
     }
   });
   const mergedWorkloads = Array.from(mergedWorkloadsMap.values()).sort((a, b) =>
@@ -881,6 +911,15 @@ export const syncAllWithGoogleSheet = async (
         : settingsMap['Out_Time_Clinics']
         ? settingsMap['Out_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
         : [...OUT_TIME_CLINICS],
+    premiumSubClinics: settingsDirty
+      ? db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
+        ? db.settings.premiumSubClinics
+        : [...DEFAULT_PREMIUM_SUB_CLINICS]
+      : settingsMap['Premium_Sub_Clinics']
+      ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+      : db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
+      ? db.settings.premiumSubClinics
+      : [...DEFAULT_PREMIUM_SUB_CLINICS],
     leaveTypes:
       db.settings.leaveTypes && db.settings.leaveTypes.length > 0
         ? db.settings.leaveTypes
@@ -935,14 +974,14 @@ export const syncAllWithGoogleSheet = async (
 
   if (shouldOverwriteWorkloads) {
     await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Daily_Workload!A:O:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Daily_Workload!A:R:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
       }
     );
     writeData.push({
-      range: 'Daily_Workload!A1:O',
+      range: 'Daily_Workload!A1:R',
       values: [
         [
           'Date',
@@ -960,6 +999,9 @@ export const syncAllWithGoogleSheet = async (
           'Service_Worker',
           'Note',
           'Reporter',
+          'Clinic_Group',
+          'Pool_ID',
+          'Record_Type',
         ],
         ...mergedWorkloads.map((w) => [
           w.date,
@@ -977,12 +1019,15 @@ export const syncAllWithGoogleSheet = async (
           w.serviceWorker,
           w.note,
           w.reporter,
+          w.clinicGroup || '',
+          w.poolId || '',
+          w.recordType || 'STANDARD',
         ]),
       ],
     });
   } else if (workloadRawRows.length === 0) {
     writeData.push({
-      range: 'Daily_Workload!A1:O1',
+      range: 'Daily_Workload!A1:R1',
       values: [
         [
           'Date',
@@ -1000,6 +1045,9 @@ export const syncAllWithGoogleSheet = async (
           'Service_Worker',
           'Note',
           'Reporter',
+          'Clinic_Group',
+          'Pool_ID',
+          'Record_Type',
         ],
       ],
     });
@@ -1073,7 +1121,7 @@ export const syncAllWithGoogleSheet = async (
   }
 
   writeData.push({
-    range: 'Settings!A1:B14',
+    range: 'Settings!A1:B15',
     values: [
       ['Key', 'Value'],
       ['NHPPD', finalSettings.nhppd.toString()],
@@ -1084,6 +1132,7 @@ export const syncAllWithGoogleSheet = async (
       ['Admin_Emails', finalSettings.adminEmails.join(', ')],
       ['In_Time_Clinics', (finalSettings.inTimeClinics || []).join(', ')],
       ['Out_Time_Clinics', (finalSettings.outTimeClinics || []).join(', ')],
+      ['Premium_Sub_Clinics', (finalSettings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
       ['Leave_Types', (finalSettings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
       ['Custom_Holidays', JSON.stringify(finalSettings.customHolidays || [])],
       ['Primary_Admin_Owner', finalSettings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
@@ -1140,6 +1189,9 @@ export const syncAllWithGoogleSheet = async (
             w.serviceWorker,
             w.note,
             w.reporter,
+            w.clinicGroup || '',
+            w.poolId || '',
+            w.recordType || 'STANDARD',
           ]),
         }),
       }
@@ -1244,10 +1296,12 @@ export const syncAllWithGoogleSheet = async (
 export const appendDailyWorkloadToSheet = async (
   accessToken: string,
   spreadsheetId: string,
-  entry: DailyWorkload
+  entryOrEntries: DailyWorkload | DailyWorkload[]
 ): Promise<boolean> => {
   try {
-    const row = [
+    const entries = Array.isArray(entryOrEntries) ? entryOrEntries : [entryOrEntries];
+    if (entries.length === 0) return true;
+    const rows = entries.map((entry) => [
       entry.date,
       entry.shift,
       entry.clinic,
@@ -1263,7 +1317,10 @@ export const appendDailyWorkloadToSheet = async (
       entry.serviceWorker,
       entry.note,
       entry.reporter,
-    ];
+      entry.clinicGroup || '',
+      entry.poolId || '',
+      entry.recordType || 'STANDARD',
+    ]);
 
     const res = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Daily_Workload!A1:append?valueInputOption=USER_ENTERED`,
@@ -1273,7 +1330,7 @@ export const appendDailyWorkloadToSheet = async (
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ values: [row] }),
+        body: JSON.stringify({ values: rows }),
       }
     );
     return res.ok;
@@ -1500,31 +1557,45 @@ function mergeRemoteDataRows(
       const adultPt = Number(r[4] || 0);
       const childPt = Number(r[5] || 0);
       const totalPt = Math.max(Number(r[3] || 0), adultPt + childPt);
-      return {
-        id: `REC-GS-${Date.now()}-${idx}`,
-        date: String(r[0] || '').trim(),
-        shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
-        clinic: String(r[2] || '').trim(),
-        totalPt,
-        adultPt,
-        childPt,
-        admit: Number(r[6] || 0),
-        hn: Number(r[7] || 0),
-        rn: Number(r[8] || 0),
-        pn: Number(r[9] || 0),
-        na: Number(r[10] || 0),
-        clerk: Number(r[11] || 0),
-        serviceWorker: Number(r[12] || 0),
-        note: String(r[13] || '').trim(),
-        reporter: String(r[14] || '').trim(),
-      };
+      const rawRecordType = String(r[17] || '').trim();
+      const recordType: WorkloadRecordType | undefined =
+        rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
+          ? rawRecordType
+          : undefined;
+      return normalizeWorkloadRecord(
+        {
+          id: `REC-GS-${Date.now()}-${idx}`,
+          date: String(r[0] || '').trim(),
+          shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+          clinic: String(r[2] || '').trim(),
+          totalPt,
+          adultPt,
+          childPt,
+          admit: Number(r[6] || 0),
+          hn: Number(r[7] || 0),
+          rn: Number(r[8] || 0),
+          pn: Number(r[9] || 0),
+          na: Number(r[10] || 0),
+          clerk: Number(r[11] || 0),
+          serviceWorker: Number(r[12] || 0),
+          note: String(r[13] || '').trim(),
+          reporter: String(r[14] || '').trim(),
+          clinicGroup: String(r[15] || '').trim() || undefined,
+          poolId: String(r[16] || '').trim() || undefined,
+          recordType,
+        },
+        db.settings.premiumSubClinics
+      );
     });
 
   const mergedWorkloadsMap = new Map<string, DailyWorkload>();
   [...db.workloads, ...sheetWorkloads].forEach((w) => {
     const k = workloadKey(w);
     if (!mergedWorkloadsMap.has(k)) {
-      mergedWorkloadsMap.set(k, { ...w, totalPt: getEffectiveTotalPt(w) });
+      mergedWorkloadsMap.set(
+        k,
+        normalizeWorkloadRecord({ ...w, totalPt: getEffectiveTotalPt(w) }, db.settings.premiumSubClinics)
+      );
     }
   });
   const mergedWorkloads = Array.from(mergedWorkloadsMap.values()).sort((a, b) =>
@@ -1644,6 +1715,11 @@ function mergeRemoteDataRows(
     outTimeClinics: settingsMap['Out_Time_Clinics']
       ? settingsMap['Out_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.outTimeClinics,
+    premiumSubClinics: settingsMap['Premium_Sub_Clinics']
+      ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+      : db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
+      ? db.settings.premiumSubClinics
+      : [...DEFAULT_PREMIUM_SUB_CLINICS],
     leaveTypes: settingsMap['Leave_Types']
       ? settingsMap['Leave_Types'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.leaveTypes,
@@ -1756,10 +1832,18 @@ export const appendViaAppsScript = async (
   payload: unknown
 ): Promise<boolean> => {
   try {
+    const bodyObj =
+      action === 'appendWorkload'
+        ? {
+            action,
+            payload,
+            records: Array.isArray(payload) ? payload : [payload],
+          }
+        : { action, payload };
     const res = await fetch(gasUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action, payload }),
+      body: JSON.stringify(bodyObj),
     });
     if (!res.ok) return false;
     const data = await res.json();
@@ -1799,24 +1883,35 @@ export const syncPublicViaAppsScript = async (
           .map((r: string[], idx: number) => {
             const adultPt = Number(r[4] || 0);
             const childPt = Number(r[5] || 0);
-            return {
-              id: `REC-GS-${idx}`,
-              date: String(r[0] || '').trim(),
-              shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
-              clinic: String(r[2] || '').trim(),
-              totalPt: Math.max(Number(r[3] || 0), adultPt + childPt),
-              adultPt,
-              childPt,
-              admit: Number(r[6] || 0),
-              hn: Number(r[7] || 0),
-              rn: Number(r[8] || 0),
-              pn: Number(r[9] || 0),
-              na: Number(r[10] || 0),
-              clerk: Number(r[11] || 0),
-              serviceWorker: Number(r[12] || 0),
-              note: String(r[13] || '').trim(),
-              reporter: String(r[14] || '').trim(),
-            };
+            const rawRecordType = String(r[17] || '').trim();
+            const recordType: WorkloadRecordType | undefined =
+              rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
+                ? rawRecordType
+                : undefined;
+            return normalizeWorkloadRecord(
+              {
+                id: `REC-GS-${idx}`,
+                date: String(r[0] || '').trim(),
+                shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+                clinic: String(r[2] || '').trim(),
+                totalPt: Math.max(Number(r[3] || 0), adultPt + childPt),
+                adultPt,
+                childPt,
+                admit: Number(r[6] || 0),
+                hn: Number(r[7] || 0),
+                rn: Number(r[8] || 0),
+                pn: Number(r[9] || 0),
+                na: Number(r[10] || 0),
+                clerk: Number(r[11] || 0),
+                serviceWorker: Number(r[12] || 0),
+                note: String(r[13] || '').trim(),
+                reporter: String(r[14] || '').trim(),
+                clinicGroup: String(r[15] || '').trim() || undefined,
+                poolId: String(r[16] || '').trim() || undefined,
+                recordType,
+              },
+              db.settings.premiumSubClinics
+            );
           })
       : [];
 

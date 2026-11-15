@@ -1,4 +1,12 @@
-import { StaffMember, DailyWorkload, LeaveRecord, OTAttendance, SystemSettings, LEAVE_TYPES } from '../types';
+import {
+  StaffMember,
+  DailyWorkload,
+  LeaveRecord,
+  OTAttendance,
+  SystemSettings,
+  LEAVE_TYPES,
+  DEFAULT_PREMIUM_SUB_CLINICS
+} from '../types';
 import { DEFAULT_PRIMARY_ADMIN_OWNER, buildDefaultAdditionalAdminPins } from '../services/adminSecurity';
 
 export const INITIAL_SETTINGS: SystemSettings = {
@@ -40,6 +48,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
     'คลินิกหัวใจ',
     'หน่วยคัดกรอง'
   ],
+  premiumSubClinics: [...DEFAULT_PREMIUM_SUB_CLINICS],
   leaveTypes: [...LEAVE_TYPES],
   customHolidays: [],
   autoSync: true

@@ -39,6 +39,18 @@ var DEFAULT_OUT_TIME_CLINICS = [
   'จักษุวิทยา', 'โสต ศอ นาสิก', 'อายุรกรรม', 'คลินิกหัวใจ', 'หน่วยคัดกรอง'
 ];
 
+var DEFAULT_PREMIUM_SUB_CLINICS = [
+  'อายุรกรรม-Premium', 'ศัลยกรรม-Premium', 'จักษุวิทยา-Premium', 'โสต ศอ นาสิก-Premium',
+  'ศัลยกรรม-กระดูก-Premium', 'เวชศาสตร์ฟื้นฟู-Premium', 'กุมารเวชกรรม-Premium', 'สูติ-นรีเวชกรรม-Premium',
+  'คลินิกหัวใจฯ-Premium', 'คลินิกภูมิแพ้ฯ-Premium', 'จิตเวช-Premium', 'เวชศาสตร์ครอบครัว-Premium'
+];
+
+var WORKLOAD_BASE_HEADERS = [
+  'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
+  'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter',
+  'Clinic_Group', 'Pool_ID', 'Record_Type'
+];
+
 var DEFAULT_LEAVE_TYPES = [
   'ลาป่วย', 'ลากิจ', 'ลาพักผ่อน', 'ลาคลอด', 'ไปอบรม/ประชุม', 'ขาดเวร/อื่นๆ'
 ];
@@ -74,10 +86,7 @@ function setupOpdDatabase() {
     },
     {
       name: SHEET_NAMES.WORKLOAD,
-      headers: [
-        'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
-        'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
-      ],
+      headers: WORKLOAD_BASE_HEADERS,
       color: '#047857',
       rows: []
     },
@@ -112,6 +121,7 @@ function setupOpdDatabase() {
         ['Admin_Emails', 'screening.pcmc@gmail.com, admin.opd@pcmc.ac.th, headnurse@pcmc.ac.th'],
         ['In_Time_Clinics', DEFAULT_IN_TIME_CLINICS.join(', ')],
         ['Out_Time_Clinics', DEFAULT_OUT_TIME_CLINICS.join(', ')],
+        ['Premium_Sub_Clinics', DEFAULT_PREMIUM_SUB_CLINICS.join(', ')],
         ['Leave_Types', DEFAULT_LEAVE_TYPES.join(', ')],
         ['Custom_Holidays', '[]'],
         ['Gas_Web_App_URL', getSavedGasUrl_()]
@@ -249,7 +259,8 @@ function doPost(e) {
     var adminPin = String(req.adminPin || (payload && payload.adminPin) || '').trim();
 
     if (action === 'appendWorkload') {
-      return jsonResponse_(appendWorkloadFromApi_(payload));
+      var workloadInput = (req.records !== undefined) ? req.records : payload;
+      return jsonResponse_(appendWorkloadFromApi_(workloadInput));
     }
     if (action === 'appendLeave') {
       return jsonResponse_(appendLeaveFromApi_(payload));
@@ -378,11 +389,32 @@ function getSheetRowsNormalized_(sheetName, minCols) {
   return { headers: headers, rows: rows };
 }
 
+function ensureWorkloadColumns_(sheet) {
+  if (!sheet || sheet.getLastRow() === 0) return;
+  var lastCol = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, Math.max(lastCol, 1)).getValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+  var firstHeader = headers[0] || '';
+  var expectedTail = ['Clinic_Group', 'Pool_ID', 'Record_Type'];
+  var baseColCount = (firstHeader === 'Record_ID') ? 16 : 15;
+  var needsUpdate = false;
+  for (var i = 0; i < expectedTail.length; i++) {
+    if (headers[baseColCount + i] !== expectedTail[i]) {
+      needsUpdate = true;
+      break;
+    }
+  }
+  if (needsUpdate) {
+    sheet.getRange(1, baseColCount + 1, 1, expectedTail.length).setValues([expectedTail]);
+  }
+}
+
 function buildPublicReadAllPayload_() {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
-    var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 15);
+    var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
     var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 8);
     var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 6);
     var settingsData = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
@@ -410,7 +442,7 @@ function buildPublicReadAllPayload_() {
       gasUrl: activeGasUrl,
       staffRows: staffData.rows.map(function(r) { return r.slice(0, 7); }),
       workloadRows: workloadData.rows.map(function(r) {
-        return workloadHasId ? r.slice(1, 16) : r.slice(0, 15);
+        return workloadHasId ? r.slice(1, 19) : r.slice(0, 18);
       }),
       leaveRows: leaveData.rows.map(function(r) {
         return leaveHasId ? r.slice(1, 9) : r.slice(0, 8);
@@ -441,10 +473,8 @@ function ensureSheetWithHeaders_(sheetName, defaultHeaders) {
 
 function appendWorkloadFromApi_(payload) {
   var list = Array.isArray(payload) ? payload : [payload];
-  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, [
-    'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
-    'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
-  ]);
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
+  ensureWorkloadColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
   var rowsToAppend = [];
 
@@ -468,7 +498,10 @@ function appendWorkloadFromApi_(payload) {
       Number(entry.clerk || 0),
       Number(entry.serviceWorker || 0),
       String(entry.note || ''),
-      String(entry.reporter || '')
+      String(entry.reporter || ''),
+      String(entry.clinicGroup || ''),
+      String(entry.poolId || ''),
+      String(entry.recordType || 'STANDARD')
     ];
     if (firstHeader === 'Record_ID') {
       var recId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
@@ -641,10 +674,8 @@ function writeStaffRowsToSheet_(staffList) {
 }
 
 function writeWorkloadRowsToSheet_(workloads) {
-  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, [
-    'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
-    'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker', 'Note', 'Reporter'
-  ]);
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
+  ensureWorkloadColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
   var rows = (workloads || []).map(function(entry, idx) {
     var adultPt = Number(entry.adultPt || 0);
@@ -665,7 +696,10 @@ function writeWorkloadRowsToSheet_(workloads) {
       Number(entry.clerk || 0),
       Number(entry.serviceWorker || 0),
       String(entry.note || ''),
-      String(entry.reporter || '')
+      String(entry.reporter || ''),
+      String(entry.clinicGroup || ''),
+      String(entry.poolId || ''),
+      String(entry.recordType || 'STANDARD')
     ];
     if (firstHeader === 'Record_ID') {
       return [String(entry.id || ('REC-' + idx))].concat(baseRow);
@@ -739,6 +773,7 @@ function writeSettingsToSheet_(settings) {
     ['Work_Days', String(settings.workDays || 245)],
     ['In_Time_Clinics', Array.isArray(settings.inTimeClinics) ? settings.inTimeClinics.join(', ') : DEFAULT_IN_TIME_CLINICS.join(', ')],
     ['Out_Time_Clinics', Array.isArray(settings.outTimeClinics) ? settings.outTimeClinics.join(', ') : DEFAULT_OUT_TIME_CLINICS.join(', ')],
+    ['Premium_Sub_Clinics', Array.isArray(settings.premiumSubClinics) ? settings.premiumSubClinics.join(', ') : DEFAULT_PREMIUM_SUB_CLINICS.join(', ')],
     ['Leave_Types', Array.isArray(settings.leaveTypes) ? settings.leaveTypes.join(', ') : DEFAULT_LEAVE_TYPES.join(', ')],
     ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
     ['Primary_Admin_Owner', String(settings.primaryAdminOwner || 'หัวหน้าพยาบาล')],
