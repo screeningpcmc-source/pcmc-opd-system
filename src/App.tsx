@@ -33,6 +33,24 @@ import {
   markWorkloadsDirty,
   markLeavesDirty,
   markOtDirty,
+  hasPendingAdminDirtyFlags,
+  getWorkloadKey,
+  getLeaveKey,
+  getOtKey,
+  recordDeletedWorkloadTombstone,
+  clearWorkloadTombstone,
+  recordDeletedLeaveTombstone,
+  clearLeaveTombstone,
+  recordDeletedOtTombstone,
+  clearOtTombstone,
+  clearAllTombstones,
+  clearStaffMasterDirty,
+  clearSettingsDirty,
+  clearWorkloadsDirty,
+  clearLeavesDirty,
+  clearOtDirty,
+  pushAdminTableViaAppsScript,
+  pushAdminTableViaOAuth,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
   appendOTToSheet,
@@ -84,8 +102,12 @@ export default function App() {
   const dbRef = useRef(db);
   dbRef.current = db;
   const isSyncInFlightRef = useRef<boolean>(false);
+  const adminWriteInFlightRef = useRef<boolean>(false);
+  const adminWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastSyncEpochRef = useRef<number>(0);
   const lastSyncedKeyRef = useRef<string>('');
+  const mutationSeqRef = useRef<number>(0);
+  const pendingSyncAfterFlightRef = useRef<boolean>(false);
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -201,6 +223,32 @@ export default function App() {
       setIsAdminUnlocked(true);
       setAdminOwnerName(match.ownerName);
       showToast(`ปลดล็อกสิทธิ์ผู้ดูแลระบบ (${match.ownerName}) สำเร็จ!`, 'success');
+      if (hasPendingAdminDirtyFlags()) {
+        adminWriteQueueRef.current = adminWriteQueueRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            const latestDb = dbRef.current;
+            const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
+            if (targetGasUrl && unlockedAdminPinRef.current) {
+              adminWriteInFlightRef.current = true;
+              try {
+                const res = await syncAdminViaAppsScript(
+                  targetGasUrl,
+                  unlockedAdminPinRef.current,
+                  latestDb
+                );
+                if (res.accessible && res.adminSynced) {
+                  dbRef.current = res.mergedDb;
+                  setDb(res.mergedDb);
+                  lastSyncEpochRef.current = Date.now();
+                  setLastSyncedAt(formatSyncTime());
+                }
+              } finally {
+                adminWriteInFlightRef.current = false;
+              }
+            }
+          });
+      }
       return true;
     }
     return false;
@@ -249,25 +297,52 @@ export default function App() {
   // 2) Public GViz read-only sync when ?sheetId= is shared as Anyone with link can view
   // 3) Optional passive OAuth 2-way sync only if user happened to already hold a valid token
   const performBackgroundSync = useCallback(async (_reason: 'initial' | 'interval' | 'focus' | 'edit') => {
-    if (isSyncInFlightRef.current) return;
+    if (isSyncInFlightRef.current || adminWriteInFlightRef.current) {
+      if (_reason === 'edit') {
+        pendingSyncAfterFlightRef.current = true;
+      }
+      return;
+    }
     const currentDb = dbRef.current;
     const targetSheetId = (currentDb.settings.spreadsheetId || '').trim();
     const targetGasUrl = (currentDb.settings.gasUrl || '').trim();
     if ((!targetSheetId && !targetGasUrl) || currentDb.settings.autoSync === false) return;
 
     const syncKey = `${targetSheetId}|${targetGasUrl}`;
-    const token = await getPassiveGoogleToken();
+    const startSeq = mutationSeqRef.current;
 
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
+      const token = await getPassiveGoogleToken();
+      if (mutationSeqRef.current !== startSeq) {
+        pendingSyncAfterFlightRef.current = true;
+        return;
+      }
+
+      const applySyncedDb = (nextDb: typeof currentDb) => {
+        if (mutationSeqRef.current !== startSeq) {
+          pendingSyncAfterFlightRef.current = true;
+          return false;
+        }
+        dbRef.current = nextDb;
+        setDb(nextDb);
+        lastSyncEpochRef.current = Date.now();
+        lastSyncedKeyRef.current = syncKey;
+        setLastSyncedAt(formatSyncTime());
+        return true;
+      };
+
       if (targetGasUrl) {
-        const gasRes =
-          isAdminUnlockedRef.current && unlockedAdminPinRef.current
-            ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, currentDb)
-            : await syncPublicViaAppsScript(targetGasUrl, currentDb);
+        const useAdmin = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
+        const gasRes = useAdmin
+          ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, currentDb)
+          : await syncPublicViaAppsScript(targetGasUrl, currentDb);
         if (gasRes.accessible) {
-          setDb({
+          if (useAdmin && 'adminSynced' in gasRes && !gasRes.adminSynced) {
+            console.warn('Admin sync warning:', 'error' in gasRes ? gasRes.error : '');
+          }
+          applySyncedDb({
             ...gasRes.mergedDb,
             settings: {
               ...gasRes.mergedDb.settings,
@@ -279,16 +354,13 @@ export default function App() {
               gasUrl: targetGasUrl,
             },
           });
-          lastSyncEpochRef.current = Date.now();
-          lastSyncedKeyRef.current = syncKey;
-          setLastSyncedAt(formatSyncTime());
           return;
         }
       }
 
       if (token && targetSheetId) {
         const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-        setDb({
+        applySyncedDb({
           ...result.mergedDb,
           settings: {
             ...result.mergedDb.settings,
@@ -299,9 +371,6 @@ export default function App() {
             gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
           },
         });
-        lastSyncEpochRef.current = Date.now();
-        lastSyncedKeyRef.current = syncKey;
-        setLastSyncedAt(formatSyncTime());
         return;
       }
 
@@ -315,7 +384,7 @@ export default function App() {
                 ? await syncAdminViaAppsScript(discoveredGas, unlockedAdminPinRef.current, pubRes.mergedDb)
                 : await syncPublicViaAppsScript(discoveredGas, pubRes.mergedDb);
             const finalDb = gasRes.accessible ? gasRes.mergedDb : pubRes.mergedDb;
-            setDb({
+            applySyncedDb({
               ...finalDb,
               settings: {
                 ...finalDb.settings,
@@ -327,7 +396,7 @@ export default function App() {
               },
             });
           } else {
-            setDb({
+            applySyncedDb({
               ...pubRes.mergedDb,
               settings: {
                 ...pubRes.mergedDb.settings,
@@ -338,9 +407,6 @@ export default function App() {
               },
             });
           }
-          lastSyncEpochRef.current = Date.now();
-          lastSyncedKeyRef.current = syncKey;
-          setLastSyncedAt(formatSyncTime());
         } else {
           lastSyncedKeyRef.current = syncKey;
         }
@@ -350,6 +416,12 @@ export default function App() {
     } finally {
       isSyncInFlightRef.current = false;
       setIsSyncingSheet(false);
+      if (pendingSyncAfterFlightRef.current) {
+        pendingSyncAfterFlightRef.current = false;
+        window.setTimeout(() => {
+          performBackgroundSync('edit');
+        }, 100);
+      }
     }
   }, []);
 
@@ -402,7 +474,7 @@ export default function App() {
 
     const timer = window.setTimeout(() => {
       performBackgroundSync('edit');
-    }, 1500);
+    }, 400);
 
     return () => window.clearTimeout(timer);
   }, [localRevision, performBackgroundSync]);
@@ -420,9 +492,22 @@ export default function App() {
 
     if (isSyncInFlightRef.current) return;
 
+    const startSeq = mutationSeqRef.current;
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
+      const applyManualDb = (nextDb: typeof currentDb) => {
+        if (mutationSeqRef.current !== startSeq) {
+          pendingSyncAfterFlightRef.current = true;
+          return false;
+        }
+        dbRef.current = nextDb;
+        setDb(nextDb);
+        lastSyncEpochRef.current = Date.now();
+        setLastSyncedAt(formatSyncTime());
+        return true;
+      };
+
       let publicFallbackRes: { accessible: boolean; mergedDb: typeof currentDb } | null = null;
 
       // If gasUrl isn't saved yet but spreadsheetId exists, check public sheet first to read & auto-discover Gas_Web_App_URL
@@ -433,7 +518,6 @@ export default function App() {
         }
       }
 
-      // 1) Preferred: Full sync via Apps Script Web App URL (ZERO Google Sign-In)
       if (targetGasUrl) {
         const workingDb = publicFallbackRes?.accessible ? publicFallbackRes.mergedDb : currentDb;
         const useAdminSync = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
@@ -443,7 +527,7 @@ export default function App() {
 
         if (gasRes.accessible) {
           const finalSheetId = targetSheetId || gasRes.mergedDb.settings.spreadsheetId || '';
-          setDb({
+          const applied = applyManualDb({
             ...gasRes.mergedDb,
             settings: {
               ...gasRes.mergedDb.settings,
@@ -454,9 +538,18 @@ export default function App() {
               gasUrl: targetGasUrl,
             },
           });
-          lastSyncEpochRef.current = Date.now();
-          lastSyncedKeyRef.current = `${finalSheetId}|${targetGasUrl}`;
-          setLastSyncedAt(formatSyncTime());
+          if (applied) {
+            lastSyncedKeyRef.current = `${finalSheetId}|${targetGasUrl}`;
+          }
+
+          if (useAdminSync && 'adminSynced' in gasRes && !gasRes.adminSynced) {
+            const errMsg = 'error' in gasRes ? gasRes.error : undefined;
+            showToast(
+              `ดึงข้อมูลสำเร็จ แต่เขียนทับ Google Sheet ในสิทธิ์ Admin ไม่สำเร็จ: ${errMsg || 'กรุณาตรวจสอบ Code.gs'}`,
+              'error'
+            );
+            return;
+          }
 
           const syncDetail =
             gasRes.pushedCount > 0
@@ -471,7 +564,7 @@ export default function App() {
       const token = await getPassiveGoogleToken();
       if (token && targetSheetId) {
         const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-        setDb({
+        const applied = applyManualDb({
           ...result.mergedDb,
           settings: {
             ...result.mergedDb.settings,
@@ -481,9 +574,9 @@ export default function App() {
               `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
           },
         });
-        lastSyncEpochRef.current = Date.now();
-        lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
-        setLastSyncedAt(formatSyncTime());
+        if (applied) {
+          lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
+        }
         showToast(
           `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
           'success'
@@ -495,7 +588,7 @@ export default function App() {
       if (targetSheetId) {
         const pubRes = publicFallbackRes || (await readPublicGoogleSheet(targetSheetId, currentDb));
         if (pubRes.accessible) {
-          setDb({
+          const applied = applyManualDb({
             ...pubRes.mergedDb,
             settings: {
               ...pubRes.mergedDb.settings,
@@ -505,9 +598,9 @@ export default function App() {
                 `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
             },
           });
-          lastSyncEpochRef.current = Date.now();
-          lastSyncedKeyRef.current = `${targetSheetId}|${pubRes.mergedDb.settings.gasUrl || ''}`;
-          setLastSyncedAt(formatSyncTime());
+          if (applied) {
+            lastSyncedKeyRef.current = `${targetSheetId}|${pubRes.mergedDb.settings.gasUrl || ''}`;
+          }
           showToast(
             `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${pubRes.mergedDb.staff.length} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
             'success'
@@ -526,6 +619,12 @@ export default function App() {
     } finally {
       isSyncInFlightRef.current = false;
       setIsSyncingSheet(false);
+      if (pendingSyncAfterFlightRef.current) {
+        pendingSyncAfterFlightRef.current = false;
+        window.setTimeout(() => {
+          performBackgroundSync('edit');
+        }, 100);
+      }
     }
   };
 
@@ -665,12 +764,17 @@ export default function App() {
       });
     }
 
-    setDb(prev => ({
-      ...prev,
-      workloads: [entry, ...prev.workloads],
-      leaves: [...newLeaveEntries, ...prev.leaves],
-      ot: [...newOtEntries, ...prev.ot],
-    }));
+    clearWorkloadTombstone(entry);
+    mutationSeqRef.current += 1;
+    const baseDb = dbRef.current;
+    const nextDb = {
+      ...baseDb,
+      workloads: [entry, ...baseDb.workloads],
+      leaves: [...newLeaveEntries, ...baseDb.leaves],
+      ot: [...newOtEntries, ...baseDb.ot],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
 
     showToast(`บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`, 'success');
 
@@ -769,12 +873,17 @@ export default function App() {
       });
     }
 
-    setDb(prev => ({
-      ...prev,
-      workloads: [...entries, ...prev.workloads],
-      leaves: [...newLeaveEntries, ...prev.leaves],
-      ot: [...newOtEntries, ...prev.ot],
-    }));
+    entries.forEach(clearWorkloadTombstone);
+    mutationSeqRef.current += 1;
+    const baseDb = dbRef.current;
+    const nextDb = {
+      ...baseDb,
+      workloads: [...entries, ...baseDb.workloads],
+      leaves: [...newLeaveEntries, ...baseDb.leaves],
+      ot: [...newOtEntries, ...baseDb.ot],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
 
     const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
     showToast(
@@ -831,6 +940,94 @@ export default function App() {
     }
   };
 
+  // Sequential direct Admin sync queue (always executes regardless of autoSync setting)
+  const enqueueAdminSync = (
+    table: 'workloads' | 'leaves' | 'ot' | 'staff' | 'settings',
+    expectedDirtyVersion: number,
+    auditEntry?: AuditLogEntry
+  ) => {
+    adminWriteQueueRef.current = adminWriteQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        adminWriteInFlightRef.current = true;
+        try {
+          const latestDb = dbRef.current;
+          const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
+          const targetSheetId = (latestDb.settings.spreadsheetId || '').trim();
+          const pin = unlockedAdminPinRef.current;
+
+          if (targetGasUrl && pin) {
+            const gasRes = await pushAdminTableViaAppsScript({
+              gasUrl: targetGasUrl,
+              adminPin: pin,
+              table,
+              db: latestDb,
+              auditEntry,
+              expectedDirtyVersion,
+            });
+            if (gasRes.ok) {
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              return;
+            }
+
+            const token = await getAccessToken();
+            if (token && targetSheetId) {
+              const oauthRes = await pushAdminTableViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                table,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+              if (oauthRes.ok) {
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                return;
+              }
+            }
+
+            if (auditEntry) {
+              await recordAuditToSheet(auditEntry);
+            }
+            showToast(
+              `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${gasRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+              'error'
+            );
+            return;
+          }
+
+          if (targetSheetId) {
+            const token = await getAccessToken();
+            if (token) {
+              const oauthRes = await pushAdminTableViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                table,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+              if (oauthRes.ok) {
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                return;
+              }
+              showToast(`บันทึกทับ Google Sheet ไม่สำเร็จ: ${oauthRes.error || 'OAuth error'}`, 'error');
+              return;
+            }
+          }
+
+          if (auditEntry) {
+            await recordAuditToSheet(auditEntry);
+          }
+        } finally {
+          adminWriteInFlightRef.current = false;
+        }
+      });
+  };
+
   // Handler: Update Daily Workload (Admin, mandatory reason + timestamp)
   const handleUpdateWorkload = (updated: DailyWorkload, reason: string) => {
     if (!isAdmin) {
@@ -839,9 +1036,10 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
+    const baseDb = dbRef.current;
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
-    const prevItem = db.workloads.find(w => w.id === updated.id);
+    const prevItem = baseDb.workloads.find(w => w.id === updated.id);
 
     const stamped: DailyWorkload = {
       ...updated,
@@ -864,15 +1062,27 @@ export default function App() {
       editedBy,
     };
 
-    markWorkloadsDirty();
-    setDb(prev => ({
-      ...prev,
-      workloads: prev.workloads.map(w => w.id === stamped.id ? stamped : w),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextWorkloads = baseDb.workloads.map(w => w.id === stamped.id ? stamped : w);
+    if (prevItem) {
+      const oldKey = getWorkloadKey(prevItem);
+      const newKey = getWorkloadKey(stamped);
+      if (oldKey !== newKey && !nextWorkloads.some(w => getWorkloadKey(w) === oldKey)) {
+        recordDeletedWorkloadTombstone(prevItem);
+      }
+    }
+    clearWorkloadTombstone(stamped);
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markWorkloadsDirty();
+    const nextDb = {
+      ...baseDb,
+      workloads: nextWorkloads,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} พร้อมบันทึกเหตุผลแล้ว`, 'success');
+    enqueueAdminSync('workloads', dirtyVer, auditEntry);
   };
 
   // Handler: Delete Daily Workload (Admin, mandatory reason + timestamp)
@@ -883,7 +1093,8 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
-    const target = db.workloads.find(w => w.id === id);
+    const baseDb = dbRef.current;
+    const target = baseDb.workloads.find(w => w.id === id);
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
 
@@ -899,23 +1110,38 @@ export default function App() {
       editedBy,
     };
 
-    markWorkloadsDirty();
-    setDb(prev => ({
-      ...prev,
-      workloads: prev.workloads.filter(w => w.id !== id),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextWorkloads = baseDb.workloads.filter(w => w.id !== id);
+    if (target) {
+      const targetKey = getWorkloadKey(target);
+      if (!nextWorkloads.some(w => getWorkloadKey(w) === targetKey)) {
+        recordDeletedWorkloadTombstone(target);
+      }
+    }
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markWorkloadsDirty();
+    const nextDb = {
+      ...baseDb,
+      workloads: nextWorkloads,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast('ลบรายการภาระงานพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
+    enqueueAdminSync('workloads', dirtyVer, auditEntry);
   };
 
   // Handler: Save Leave (Data Entry: allowed via GAS or OAuth)
   const handleSaveLeave = async (leave: LeaveRecord) => {
-    setDb(prev => ({
-      ...prev,
-      leaves: [leave, ...prev.leaves],
-    }));
+    clearLeaveTombstone(leave);
+    mutationSeqRef.current += 1;
+    const baseDb = dbRef.current;
+    const nextDb = {
+      ...baseDb,
+      leaves: [leave, ...baseDb.leaves],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`บันทึกวันลา ${leave.staffName} สำเร็จ!`, 'success');
 
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
@@ -947,9 +1173,10 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
+    const baseDb = dbRef.current;
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
-    const prevItem = db.leaves.find(l => l.id === updated.id);
+    const prevItem = baseDb.leaves.find(l => l.id === updated.id);
 
     const stamped: LeaveRecord = {
       ...updated,
@@ -973,15 +1200,27 @@ export default function App() {
       editedBy,
     };
 
-    markLeavesDirty();
-    setDb(prev => ({
-      ...prev,
-      leaves: prev.leaves.map(l => l.id === stamped.id ? stamped : l),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextLeaves = baseDb.leaves.map(l => l.id === stamped.id ? stamped : l);
+    if (prevItem) {
+      const oldKey = getLeaveKey(prevItem);
+      const newKey = getLeaveKey(stamped);
+      if (oldKey !== newKey && !nextLeaves.some(l => getLeaveKey(l) === oldKey)) {
+        recordDeletedLeaveTombstone(prevItem);
+      }
+    }
+    clearLeaveTombstone(stamped);
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markLeavesDirty();
+    const nextDb = {
+      ...baseDb,
+      leaves: nextLeaves,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`อัปเดตประวัติการลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
+    enqueueAdminSync('leaves', dirtyVer, auditEntry);
   };
 
   // Handler: Delete Leave (Admin, mandatory reason + timestamp)
@@ -992,7 +1231,8 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
-    const target = db.leaves.find(l => l.id === id);
+    const baseDb = dbRef.current;
+    const target = baseDb.leaves.find(l => l.id === id);
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
 
@@ -1008,23 +1248,38 @@ export default function App() {
       editedBy,
     };
 
-    markLeavesDirty();
-    setDb(prev => ({
-      ...prev,
-      leaves: prev.leaves.filter(l => l.id !== id),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextLeaves = baseDb.leaves.filter(l => l.id !== id);
+    if (target) {
+      const targetKey = getLeaveKey(target);
+      if (!nextLeaves.some(l => getLeaveKey(l) === targetKey)) {
+        recordDeletedLeaveTombstone(target);
+      }
+    }
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markLeavesDirty();
+    const nextDb = {
+      ...baseDb,
+      leaves: nextLeaves,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast('ลบประวัติการลาพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
+    enqueueAdminSync('leaves', dirtyVer, auditEntry);
   };
 
   // Handler: Save Batch OT (Data Entry: allowed via GAS or OAuth)
   const handleSaveBatchOT = async (records: OTAttendance[]) => {
-    setDb(prev => ({
-      ...prev,
-      ot: [...records, ...prev.ot],
-    }));
+    records.forEach(clearOtTombstone);
+    mutationSeqRef.current += 1;
+    const baseDb = dbRef.current;
+    const nextDb = {
+      ...baseDb,
+      ot: [...records, ...baseDb.ot],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`บันทึกเวรนอกเวลาจำนวน ${records.length} คน เรียบร้อยแล้ว!`, 'success');
 
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
@@ -1062,9 +1317,10 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
+    const baseDb = dbRef.current;
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
-    const prevItem = db.ot.find(o => o.id === updated.id);
+    const prevItem = baseDb.ot.find(o => o.id === updated.id);
 
     const stamped: OTAttendance = {
       ...updated,
@@ -1087,15 +1343,27 @@ export default function App() {
       editedBy,
     };
 
-    markOtDirty();
-    setDb(prev => ({
-      ...prev,
-      ot: prev.ot.map(o => o.id === stamped.id ? stamped : o),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextOt = baseDb.ot.map(o => o.id === stamped.id ? stamped : o);
+    if (prevItem) {
+      const oldKey = getOtKey(prevItem);
+      const newKey = getOtKey(stamped);
+      if (oldKey !== newKey && !nextOt.some(o => getOtKey(o) === oldKey)) {
+        recordDeletedOtTombstone(prevItem);
+      }
+    }
+    clearOtTombstone(stamped);
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markOtDirty();
+    const nextDb = {
+      ...baseDb,
+      ot: nextOt,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`อัปเดตเวรนอกเวลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
+    enqueueAdminSync('ot', dirtyVer, auditEntry);
   };
 
   // Handler: Delete OT (Admin, mandatory reason + timestamp)
@@ -1106,7 +1374,8 @@ export default function App() {
     }
     const cleanReason = reason.trim();
     if (!cleanReason) return;
-    const target = db.ot.find(o => o.id === id);
+    const baseDb = dbRef.current;
+    const target = baseDb.ot.find(o => o.id === id);
     const nowIso = new Date().toISOString();
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
 
@@ -1122,15 +1391,25 @@ export default function App() {
       editedBy,
     };
 
-    markOtDirty();
-    setDb(prev => ({
-      ...prev,
-      ot: prev.ot.filter(o => o.id !== id),
-      auditLogs: [auditEntry, ...(prev.auditLogs || [])],
-    }));
-    setLocalRevision(r => r + 1);
-    void recordAuditToSheet(auditEntry);
+    const nextOt = baseDb.ot.filter(o => o.id !== id);
+    if (target) {
+      const targetKey = getOtKey(target);
+      if (!nextOt.some(o => getOtKey(o) === targetKey)) {
+        recordDeletedOtTombstone(target);
+      }
+    }
+
+    mutationSeqRef.current += 1;
+    const dirtyVer = markOtDirty();
+    const nextDb = {
+      ...baseDb,
+      ot: nextOt,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast('ลบรายการเวรนอกเวลาพร้อมบันทึกเหตุผลแล้ว', 'info');
+    enqueueAdminSync('ot', dirtyVer, auditEntry);
   };
 
   // Handler: Add Staff Member
@@ -1139,21 +1418,18 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
-    const nextStaff = [...db.staff, staff];
-    markStaffMasterDirty();
-    setDb(prev => ({
-      ...prev,
+    const baseDb = dbRef.current;
+    const nextStaff = [...baseDb.staff, staff];
+    mutationSeqRef.current += 1;
+    const dirtyVer = markStaffMasterDirty();
+    const nextDb = {
+      ...baseDb,
       staff: nextStaff,
-    }));
-    setLocalRevision(r => r + 1);
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`เพิ่มเจ้าหน้าที่ ${staff.name} เข้าสู่ระบบแล้ว`, 'success');
-
-    const token = await getAccessToken();
-    if (token && db.settings.spreadsheetId) {
-      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
-      lastSyncEpochRef.current = Date.now();
-      setLastSyncedAt(formatSyncTime());
-    }
+    enqueueAdminSync('staff', dirtyVer);
   };
 
   // Handler: Delete Staff Member
@@ -1162,22 +1438,19 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
-    const target = db.staff.find(s => s.staffId === staffId);
-    const nextStaff = db.staff.filter(s => s.staffId !== staffId);
-    markStaffMasterDirty();
-    setDb(prev => ({
-      ...prev,
+    const baseDb = dbRef.current;
+    const target = baseDb.staff.find(s => s.staffId === staffId);
+    const nextStaff = baseDb.staff.filter(s => s.staffId !== staffId);
+    mutationSeqRef.current += 1;
+    const dirtyVer = markStaffMasterDirty();
+    const nextDb = {
+      ...baseDb,
       staff: nextStaff,
-    }));
-    setLocalRevision(r => r + 1);
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`ลบบุคลากร ${target?.name || ''} ออกจากระบบแล้ว`, 'info');
-
-    const token = await getAccessToken();
-    if (token && db.settings.spreadsheetId) {
-      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
-      lastSyncEpochRef.current = Date.now();
-      setLastSyncedAt(formatSyncTime());
-    }
+    enqueueAdminSync('staff', dirtyVer);
   };
 
   // Handler: Update Staff Member (Admin)
@@ -1186,21 +1459,18 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
-    const nextStaff = db.staff.map(s => s.staffId === updatedStaff.staffId ? updatedStaff : s);
-    markStaffMasterDirty();
-    setDb(prev => ({
-      ...prev,
+    const baseDb = dbRef.current;
+    const nextStaff = baseDb.staff.map(s => s.staffId === updatedStaff.staffId ? updatedStaff : s);
+    mutationSeqRef.current += 1;
+    const dirtyVer = markStaffMasterDirty();
+    const nextDb = {
+      ...baseDb,
       staff: nextStaff,
-    }));
-    setLocalRevision(r => r + 1);
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`อัปเดตข้อมูลบุคลากร ${updatedStaff.name} เรียบร้อยแล้ว`, 'success');
-
-    const token = await getAccessToken();
-    if (token && db.settings.spreadsheetId) {
-      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
-      lastSyncEpochRef.current = Date.now();
-      setLastSyncedAt(formatSyncTime());
-    }
+    enqueueAdminSync('staff', dirtyVer);
   };
 
   // Handler: Update Staff Status (Active / Resigned / Retired)
@@ -1209,28 +1479,25 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
+    const baseDb = dbRef.current;
     const todayStr = new Date().toISOString().split('T')[0];
-    const nextStaff = db.staff.map(s => {
+    const nextStaff = baseDb.staff.map(s => {
       if (s.staffId !== staffId) return s;
       if (status === 'Resigned' || status === 'Retired') {
         return { ...s, status, endDate: s.endDate || todayStr };
       }
       return { ...s, status, endDate: undefined };
     });
-    markStaffMasterDirty();
-    setDb(prev => ({
-      ...prev,
+    mutationSeqRef.current += 1;
+    const dirtyVer = markStaffMasterDirty();
+    const nextDb = {
+      ...baseDb,
       staff: nextStaff,
-    }));
-    setLocalRevision(r => r + 1);
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast(`อัปเดตสถานะเป็น ${status} สำเร็จ`, 'info');
-
-    const token = await getAccessToken();
-    if (token && db.settings.spreadsheetId) {
-      await syncStaffMasterToSheet(token, db.settings.spreadsheetId, nextStaff);
-      lastSyncEpochRef.current = Date.now();
-      setLastSyncedAt(formatSyncTime());
-    }
+    enqueueAdminSync('staff', dirtyVer);
   };
 
   // Handler: Save Settings
@@ -1239,26 +1506,35 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
-    markSettingsDirty();
-    setDb(prev => ({
-      ...prev,
+    const baseDb = dbRef.current;
+    mutationSeqRef.current += 1;
+    const dirtyVer = markSettingsDirty();
+    const nextDb = {
+      ...baseDb,
       settings,
-    }));
-    setLocalRevision(r => r + 1);
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
     showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
+    enqueueAdminSync('settings', dirtyVer);
   };
 
   // Handler: Toggle Auto Sync
   const handleToggleAutoSync = (enabled: boolean) => {
     if (!isAdmin) return;
-    markSettingsDirty();
-    setDb(prev => ({
-      ...prev,
+    const baseDb = dbRef.current;
+    mutationSeqRef.current += 1;
+    const dirtyVer = markSettingsDirty();
+    const nextDb = {
+      ...baseDb,
       settings: {
-        ...prev.settings,
+        ...baseDb.settings,
         autoSync: enabled,
       },
-    }));
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
+    enqueueAdminSync('settings', dirtyVer);
     showToast(enabled ? 'เปิดใช้งาน Auto ซิงค์อัตโนมัติแล้ว' : 'ปิดโหมด Auto ซิงค์ชั่วคราว (สามารถกดปุ่มซิงค์เองได้)', 'info');
   };
 
@@ -1268,9 +1544,18 @@ export default function App() {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
+    mutationSeqRef.current += 1;
     localStorage.removeItem('pcmc_opd_system_db_v1');
+    clearAllTombstones();
+    clearWorkloadsDirty();
+    clearLeavesDirty();
+    clearOtDirty();
+    clearSettingsDirty();
+    clearStaffMasterDirty();
     markStaffMasterDirty();
-    setDb(loadLocalDatabase());
+    const clean = loadLocalDatabase();
+    dbRef.current = clean;
+    setDb(clean);
     showToast('ล้างข้อมูลทั้งหมดเรียบร้อยแล้ว พร้อมเริ่มต้นใช้งานจริง', 'info');
   };
 

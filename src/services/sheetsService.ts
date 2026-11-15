@@ -45,6 +45,7 @@ const SETTINGS_DIRTY_KEY = 'pcmc_settings_dirty_v1';
 const WORKLOADS_DIRTY_KEY = 'pcmc_workloads_dirty_v1';
 const LEAVES_DIRTY_KEY = 'pcmc_leaves_dirty_v1';
 const OT_DIRTY_KEY = 'pcmc_ot_dirty_v1';
+const TOMBSTONES_STORAGE_KEY = 'pcmc_deleted_tombstones_v1';
 const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
@@ -52,124 +53,221 @@ const isDemoWorkloadId = (id?: string) => /^WL-\d{3}$/.test((id || '').trim());
 const isDemoLeaveId = (id?: string) => /^LV-\d{3}$/.test((id || '').trim());
 const isDemoOtId = (id?: string) => /^OT-\d{3}$/.test((id || '').trim());
 
-export const markStaffMasterDirty = (): void => {
+type DirtyDomain = 'staff' | 'settings' | 'workloads' | 'leaves' | 'ot';
+
+const DIRTY_KEY_MAP: Record<DirtyDomain, string> = {
+  staff: STAFF_DIRTY_KEY,
+  settings: SETTINGS_DIRTY_KEY,
+  workloads: WORKLOADS_DIRTY_KEY,
+  leaves: LEAVES_DIRTY_KEY,
+  ot: OT_DIRTY_KEY,
+};
+
+function readStoredDirtyVersion(storageKey: string): number {
   try {
-    localStorage.setItem(STAFF_DIRTY_KEY, 'true');
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return 0;
+    if (raw === 'true') return 1;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+const memDirtyVersions: Record<DirtyDomain, number> = {
+  staff: readStoredDirtyVersion(STAFF_DIRTY_KEY),
+  settings: readStoredDirtyVersion(SETTINGS_DIRTY_KEY),
+  workloads: readStoredDirtyVersion(WORKLOADS_DIRTY_KEY),
+  leaves: readStoredDirtyVersion(LEAVES_DIRTY_KEY),
+  ot: readStoredDirtyVersion(OT_DIRTY_KEY),
+};
+
+function getDomainDirtyVersion(domain: DirtyDomain): number {
+  const stored = readStoredDirtyVersion(DIRTY_KEY_MAP[domain]);
+  if (stored > memDirtyVersions[domain]) {
+    memDirtyVersions[domain] = stored;
+  }
+  return memDirtyVersions[domain];
+}
+
+function markDomainDirty(domain: DirtyDomain): number {
+  const next = getDomainDirtyVersion(domain) + 1;
+  memDirtyVersions[domain] = next;
+  try {
+    localStorage.setItem(DIRTY_KEY_MAP[domain], String(next));
+  } catch {
+    // ignore storage errors; in-memory version still protects current session
+  }
+  return next;
+}
+
+function clearDomainDirty(domain: DirtyDomain, expectedVersion?: number): void {
+  const current = getDomainDirtyVersion(domain);
+  if (expectedVersion !== undefined && current !== expectedVersion) {
+    return;
+  }
+  memDirtyVersions[domain] = 0;
+  try {
+    localStorage.removeItem(DIRTY_KEY_MAP[domain]);
   } catch {
     // ignore
   }
-};
+}
 
-export const clearStaffMasterDirty = (): void => {
+export const getStaffMasterDirtyVersion = (): number => getDomainDirtyVersion('staff');
+export const markStaffMasterDirty = (): number => markDomainDirty('staff');
+export const clearStaffMasterDirty = (expectedVersion?: number): void =>
+  clearDomainDirty('staff', expectedVersion);
+export const isStaffMasterDirty = (): boolean => getDomainDirtyVersion('staff') > 0;
+
+export const getSettingsDirtyVersion = (): number => getDomainDirtyVersion('settings');
+export const markSettingsDirty = (): number => markDomainDirty('settings');
+export const clearSettingsDirty = (expectedVersion?: number): void =>
+  clearDomainDirty('settings', expectedVersion);
+export const isSettingsDirty = (): boolean => getDomainDirtyVersion('settings') > 0;
+
+export const getWorkloadsDirtyVersion = (): number => getDomainDirtyVersion('workloads');
+export const markWorkloadsDirty = (): number => markDomainDirty('workloads');
+export const clearWorkloadsDirty = (expectedVersion?: number): void =>
+  clearDomainDirty('workloads', expectedVersion);
+export const isWorkloadsDirty = (): boolean => getDomainDirtyVersion('workloads') > 0;
+
+export const getLeavesDirtyVersion = (): number => getDomainDirtyVersion('leaves');
+export const markLeavesDirty = (): number => markDomainDirty('leaves');
+export const clearLeavesDirty = (expectedVersion?: number): void =>
+  clearDomainDirty('leaves', expectedVersion);
+export const isLeavesDirty = (): boolean => getDomainDirtyVersion('leaves') > 0;
+
+export const getOtDirtyVersion = (): number => getDomainDirtyVersion('ot');
+export const markOtDirty = (): number => markDomainDirty('ot');
+export const clearOtDirty = (expectedVersion?: number): void =>
+  clearDomainDirty('ot', expectedVersion);
+export const isOtDirty = (): boolean => getDomainDirtyVersion('ot') > 0;
+
+interface DeletedTombstonesState {
+  workloads: Record<string, number>;
+  leaves: Record<string, number>;
+  ot: Record<string, number>;
+}
+
+const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function pruneExpiredTombstones(raw: Partial<DeletedTombstonesState> | null): DeletedTombstonesState {
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+  const cleanBucket = (bucket: unknown): Record<string, number> => {
+    if (!bucket || typeof bucket !== 'object') return {};
+    const out: Record<string, number> = {};
+    Object.entries(bucket as Record<string, unknown>).forEach(([k, ts]) => {
+      const n = Number(ts);
+      if (k && Number.isFinite(n) && n >= cutoff) {
+        out[k] = n;
+      }
+    });
+    return out;
+  };
+  return {
+    workloads: cleanBucket(raw?.workloads),
+    leaves: cleanBucket(raw?.leaves),
+    ot: cleanBucket(raw?.ot),
+  };
+}
+
+let memTombstones: DeletedTombstonesState = (() => {
   try {
-    localStorage.removeItem(STAFF_DIRTY_KEY);
+    const raw = localStorage.getItem(TOMBSTONES_STORAGE_KEY);
+    if (raw) {
+      return pruneExpiredTombstones(JSON.parse(raw));
+    }
   } catch {
     // ignore
   }
-};
+  return { workloads: {}, leaves: {}, ot: {} };
+})();
 
-export const isStaffMasterDirty = (): boolean => {
+function persistTombstones(): void {
   try {
-    return localStorage.getItem(STAFF_DIRTY_KEY) === 'true';
-  } catch {
-    return false;
-  }
-};
-
-export const markSettingsDirty = (): void => {
-  try {
-    localStorage.setItem(SETTINGS_DIRTY_KEY, 'true');
+    localStorage.setItem(TOMBSTONES_STORAGE_KEY, JSON.stringify(memTombstones));
   } catch {
     // ignore
   }
+}
+
+export const getDeletedWorkloadKeySet = (): Set<string> => {
+  memTombstones = pruneExpiredTombstones(memTombstones);
+  return new Set(Object.keys(memTombstones.workloads));
 };
 
-export const clearSettingsDirty = (): void => {
-  try {
-    localStorage.removeItem(SETTINGS_DIRTY_KEY);
-  } catch {
-    // ignore
+export const getDeletedLeaveKeySet = (): Set<string> => {
+  memTombstones = pruneExpiredTombstones(memTombstones);
+  return new Set(Object.keys(memTombstones.leaves));
+};
+
+export const getDeletedOtKeySet = (): Set<string> => {
+  memTombstones = pruneExpiredTombstones(memTombstones);
+  return new Set(Object.keys(memTombstones.ot));
+};
+
+export const recordDeletedWorkloadTombstone = (w: DailyWorkload): void => {
+  const key = getWorkloadKey(w);
+  memTombstones.workloads[key] = Date.now();
+  persistTombstones();
+};
+
+export const clearWorkloadTombstone = (w: DailyWorkload): void => {
+  const key = getWorkloadKey(w);
+  if (key in memTombstones.workloads) {
+    delete memTombstones.workloads[key];
+    persistTombstones();
   }
 };
 
-export const isSettingsDirty = (): boolean => {
-  try {
-    return localStorage.getItem(SETTINGS_DIRTY_KEY) === 'true';
-  } catch {
-    return false;
+export const clearAllWorkloadTombstones = (): void => {
+  memTombstones.workloads = {};
+  persistTombstones();
+};
+
+export const recordDeletedLeaveTombstone = (l: LeaveRecord): void => {
+  const key = getLeaveKey(l);
+  memTombstones.leaves[key] = Date.now();
+  persistTombstones();
+};
+
+export const clearLeaveTombstone = (l: LeaveRecord): void => {
+  const key = getLeaveKey(l);
+  if (key in memTombstones.leaves) {
+    delete memTombstones.leaves[key];
+    persistTombstones();
   }
 };
 
-export const markWorkloadsDirty = (): void => {
-  try {
-    localStorage.setItem(WORKLOADS_DIRTY_KEY, 'true');
-  } catch {
-    // ignore
+export const clearAllLeaveTombstones = (): void => {
+  memTombstones.leaves = {};
+  persistTombstones();
+};
+
+export const recordDeletedOtTombstone = (o: OTAttendance): void => {
+  const key = getOtKey(o);
+  memTombstones.ot[key] = Date.now();
+  persistTombstones();
+};
+
+export const clearOtTombstone = (o: OTAttendance): void => {
+  const key = getOtKey(o);
+  if (key in memTombstones.ot) {
+    delete memTombstones.ot[key];
+    persistTombstones();
   }
 };
 
-export const clearWorkloadsDirty = (): void => {
-  try {
-    localStorage.removeItem(WORKLOADS_DIRTY_KEY);
-  } catch {
-    // ignore
-  }
+export const clearAllOtTombstones = (): void => {
+  memTombstones.ot = {};
+  persistTombstones();
 };
 
-export const isWorkloadsDirty = (): boolean => {
-  try {
-    return localStorage.getItem(WORKLOADS_DIRTY_KEY) === 'true';
-  } catch {
-    return false;
-  }
-};
-
-export const markLeavesDirty = (): void => {
-  try {
-    localStorage.setItem(LEAVES_DIRTY_KEY, 'true');
-  } catch {
-    // ignore
-  }
-};
-
-export const clearLeavesDirty = (): void => {
-  try {
-    localStorage.removeItem(LEAVES_DIRTY_KEY);
-  } catch {
-    // ignore
-  }
-};
-
-export const isLeavesDirty = (): boolean => {
-  try {
-    return localStorage.getItem(LEAVES_DIRTY_KEY) === 'true';
-  } catch {
-    return false;
-  }
-};
-
-export const markOtDirty = (): void => {
-  try {
-    localStorage.setItem(OT_DIRTY_KEY, 'true');
-  } catch {
-    // ignore
-  }
-};
-
-export const clearOtDirty = (): void => {
-  try {
-    localStorage.removeItem(OT_DIRTY_KEY);
-  } catch {
-    // ignore
-  }
-};
-
-export const isOtDirty = (): boolean => {
-  try {
-    return localStorage.getItem(OT_DIRTY_KEY) === 'true';
-  } catch {
-    return false;
-  }
+export const clearAllTombstones = (): void => {
+  memTombstones = { workloads: {}, leaves: {}, ot: {} };
+  persistTombstones();
 };
 
 function normalizeAdditionalAdminPins(raw: unknown): AdminPinEntry[] {
@@ -599,32 +697,60 @@ export const syncStaffMasterToSheet = async (
   }
 };
 
-function workloadKey(w: DailyWorkload): string {
+export function getWorkloadKey(w: DailyWorkload): string {
   return [
     (w.date || '').trim(),
     (w.shift || '').trim(),
     (w.clinic || '').trim(),
     getEffectiveTotalPt(w),
+    Number(w.adultPt || 0),
+    Number(w.childPt || 0),
+    Number(w.admit || 0),
+    Number(w.hn || 0),
+    Number(w.rn || 0),
+    Number(w.pn || 0),
+    Number(w.na !== undefined ? w.na : (w.pca || 0)),
+    Number(w.clerk || 0),
+    Number(w.serviceWorker || 0),
+    (w.note || '').trim(),
     (w.reporter || '').trim(),
+    (w.clinicGroup || '').trim(),
+    (w.recordType || 'STANDARD').trim(),
+  ].join('|');
+}
+
+function workloadKey(w: DailyWorkload): string {
+  return getWorkloadKey(w);
+}
+
+export function getLeaveKey(l: LeaveRecord): string {
+  return [
+    (l.startDate || '').trim(),
+    (l.endDate || l.startDate || '').trim(),
+    (l.staffName || '').trim(),
+    (l.clinic || '').trim(),
+    (l.leaveType || '').trim(),
+    Number(l.days || 1),
+    (l.note || '').trim(),
   ].join('|');
 }
 
 function leaveKey(l: LeaveRecord): string {
-  return [
-    (l.startDate || '').trim(),
-    (l.endDate || '').trim(),
-    (l.staffName || '').trim(),
-    (l.leaveType || '').trim(),
-  ].join('|');
+  return getLeaveKey(l);
 }
 
-function otKey(o: OTAttendance): string {
+export function getOtKey(o: OTAttendance): string {
   return [
     (o.date || '').trim(),
     (o.shift || '').trim(),
     (o.staffName || '').trim(),
+    (o.homeClinic || '').trim(),
     (o.workClinic || '').trim(),
   ].join('|');
+}
+
+function otKey(o: OTAttendance): string {
+  return getOtKey(o);
 }
 
 function auditLogKey(a: AuditLogEntry): string {
@@ -1274,6 +1400,9 @@ export const syncAllWithGoogleSheet = async (
   clearWorkloadsDirty();
   clearLeavesDirty();
   clearOtDirty();
+  if (shouldOverwriteWorkloads) clearAllWorkloadTombstones();
+  if (shouldOverwriteLeaves) clearAllLeaveTombstones();
+  if (shouldOverwriteOt) clearAllOtTombstones();
 
   return {
     mergedDb: {
@@ -1551,6 +1680,7 @@ function mergeRemoteDataRows(
 
   const finalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
 
+  const deletedWKeys = getDeletedWorkloadKeySet();
   const sheetWorkloads: DailyWorkload[] = params.workloadRows
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
     .map((r, idx) => {
@@ -1586,10 +1716,12 @@ function mergeRemoteDataRows(
         },
         db.settings.premiumSubClinics
       );
-    });
+    })
+    .filter((w) => !deletedWKeys.has(workloadKey(w)));
 
+  const shouldOverwriteWorkloads = isWorkloadsDirty();
   const mergedWorkloadsMap = new Map<string, DailyWorkload>();
-  [...db.workloads, ...sheetWorkloads].forEach((w) => {
+  (shouldOverwriteWorkloads ? db.workloads : [...db.workloads, ...sheetWorkloads]).forEach((w) => {
     const k = workloadKey(w);
     if (!mergedWorkloadsMap.has(k)) {
       mergedWorkloadsMap.set(
@@ -1602,6 +1734,7 @@ function mergeRemoteDataRows(
     b.date.localeCompare(a.date)
   );
 
+  const deletedLKeys = getDeletedLeaveKeySet();
   const sheetLeaves: LeaveRecord[] = params.leaveRows
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
     .map((r, idx) => {
@@ -1617,10 +1750,12 @@ function mergeRemoteDataRows(
         days: Number(r[6] || 1),
         note: String(r[7] || '').trim(),
       };
-    });
+    })
+    .filter((l) => !deletedLKeys.has(leaveKey(l)));
 
+  const shouldOverwriteLeaves = isLeavesDirty();
   const mergedLeavesMap = new Map<string, LeaveRecord>();
-  [...db.leaves, ...sheetLeaves].forEach((l) => {
+  (shouldOverwriteLeaves ? db.leaves : [...db.leaves, ...sheetLeaves]).forEach((l) => {
     const k = leaveKey(l);
     if (!mergedLeavesMap.has(k)) mergedLeavesMap.set(k, l);
   });
@@ -1628,6 +1763,7 @@ function mergeRemoteDataRows(
     b.startDate.localeCompare(a.startDate)
   );
 
+  const deletedOKeys = getDeletedOtKeySet();
   const sheetOt: OTAttendance[] = params.otRows
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
     .map((r, idx) => {
@@ -1641,10 +1777,12 @@ function mergeRemoteDataRows(
         homeClinic: String(r[4] || '').trim(),
         workClinic: String(r[5] || '').trim(),
       };
-    });
+    })
+    .filter((o) => !deletedOKeys.has(otKey(o)));
 
+  const shouldOverwriteOt = isOtDirty();
   const mergedOtMap = new Map<string, OTAttendance>();
-  [...db.ot, ...sheetOt].forEach((o) => {
+  (shouldOverwriteOt ? db.ot : [...db.ot, ...sheetOt]).forEach((o) => {
     const k = otKey(o);
     if (!mergedOtMap.has(k)) mergedOtMap.set(k, o);
   });
@@ -1676,6 +1814,7 @@ function mergeRemoteDataRows(
     if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
   });
 
+  const settingsDirty = isSettingsDirty();
   const parsedHolidays = (() => {
     try {
       const raw = settingsMap['Custom_Holidays'];
@@ -1704,32 +1843,59 @@ function mergeRemoteDataRows(
 
   const finalSettings: SystemSettings = {
     ...db.settings,
-    nhppd: Number(settingsMap['NHPPD']) || db.settings.nhppd || 0.4,
-    screeningNhppd: Number(settingsMap['Screening_NHPPD']) || db.settings.screeningNhppd || 0.1,
-    stdHr: Number(settingsMap['Std_Hr']) || db.settings.stdHr || 7,
-    annualHr: Number(settingsMap['Annual_Hr']) || db.settings.annualHr || 2080,
-    workDays: Number(settingsMap['Work_Days']) || db.settings.workDays || 245,
-    inTimeClinics: settingsMap['In_Time_Clinics']
+    nhppd: settingsDirty
+      ? Number(db.settings.nhppd) || 0.4
+      : Number(settingsMap['NHPPD']) || db.settings.nhppd || 0.4,
+    screeningNhppd: settingsDirty
+      ? Number(db.settings.screeningNhppd) || 0.1
+      : Number(settingsMap['Screening_NHPPD']) || db.settings.screeningNhppd || 0.1,
+    stdHr: settingsDirty
+      ? Number(db.settings.stdHr) || 7
+      : Number(settingsMap['Std_Hr']) || db.settings.stdHr || 7,
+    annualHr: settingsDirty
+      ? Number(db.settings.annualHr) || 2080
+      : Number(settingsMap['Annual_Hr']) || db.settings.annualHr || 2080,
+    workDays: settingsDirty
+      ? Number(db.settings.workDays) || 245
+      : Number(settingsMap['Work_Days']) || db.settings.workDays || 245,
+    inTimeClinics: settingsDirty
+      ? db.settings.inTimeClinics
+      : settingsMap['In_Time_Clinics']
       ? settingsMap['In_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.inTimeClinics,
-    outTimeClinics: settingsMap['Out_Time_Clinics']
+    outTimeClinics: settingsDirty
+      ? db.settings.outTimeClinics
+      : settingsMap['Out_Time_Clinics']
       ? settingsMap['Out_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.outTimeClinics,
-    premiumSubClinics: settingsMap['Premium_Sub_Clinics']
+    premiumSubClinics: settingsDirty
+      ? db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
+        ? db.settings.premiumSubClinics
+        : [...DEFAULT_PREMIUM_SUB_CLINICS]
+      : settingsMap['Premium_Sub_Clinics']
       ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.premiumSubClinics && db.settings.premiumSubClinics.length > 0
       ? db.settings.premiumSubClinics
       : [...DEFAULT_PREMIUM_SUB_CLINICS],
-    leaveTypes: settingsMap['Leave_Types']
+    leaveTypes: settingsDirty
+      ? db.settings.leaveTypes
+      : settingsMap['Leave_Types']
       ? settingsMap['Leave_Types'].split(',').map((s) => s.trim()).filter(Boolean)
       : db.settings.leaveTypes,
-    customHolidays: parsedHolidays || db.settings.customHolidays || [],
-    primaryAdminOwner:
-      settingsMap['Primary_Admin_Owner'] ||
-      db.settings.primaryAdminOwner ||
-      DEFAULT_PRIMARY_ADMIN_OWNER,
-    additionalAdminPins: parsedPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
-    gasUrl: db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
+    customHolidays: settingsDirty
+      ? db.settings.customHolidays || []
+      : parsedHolidays || db.settings.customHolidays || [],
+    primaryAdminOwner: settingsDirty
+      ? db.settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER
+      : settingsMap['Primary_Admin_Owner'] ||
+        db.settings.primaryAdminOwner ||
+        DEFAULT_PRIMARY_ADMIN_OWNER,
+    additionalAdminPins: settingsDirty
+      ? normalizeAdditionalAdminPins(db.settings.additionalAdminPins)
+      : parsedPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
+    gasUrl: settingsDirty
+      ? db.settings.gasUrl || ''
+      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
   };
 
   return {
@@ -1787,7 +1953,10 @@ export const readViaAppsScript = async (
 ): Promise<{ accessible: boolean; mergedDb: AppDatabase }> => {
   try {
     const sep = gasUrl.includes('?') ? '&' : '?';
-    const res = await fetch(`${gasUrl}${sep}action=readAll`, { method: 'GET' });
+    const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
     if (!res.ok) return { accessible: false, mergedDb: db };
     const data = await res.json();
     if (!data || data.success === false) return { accessible: false, mergedDb: db };
@@ -1872,10 +2041,17 @@ export const syncPublicViaAppsScript = async (
 ): Promise<{ accessible: boolean; mergedDb: AppDatabase; pushedCount: number }> => {
   try {
     const sep = gasUrl.includes('?') ? '&' : '?';
-    const res = await fetch(`${gasUrl}${sep}action=readAll`, { method: 'GET' });
+    const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
     if (!res.ok) return { accessible: false, mergedDb: db, pushedCount: 0 };
     const data = await res.json();
     if (!data || data.success === false) return { accessible: false, mergedDb: db, pushedCount: 0 };
+
+    const deletedWKeys = getDeletedWorkloadKeySet();
+    const deletedLKeys = getDeletedLeaveKeySet();
+    const deletedOKeys = getDeletedOtKeySet();
 
     const remoteWorkloads: DailyWorkload[] = Array.isArray(data.workloadRows)
       ? data.workloadRows
@@ -1913,6 +2089,7 @@ export const syncPublicViaAppsScript = async (
               db.settings.premiumSubClinics
             );
           })
+          .filter((w: DailyWorkload) => !deletedWKeys.has(workloadKey(w)))
       : [];
 
     const remoteLeaves: LeaveRecord[] = Array.isArray(data.leaveRows)
@@ -1929,6 +2106,7 @@ export const syncPublicViaAppsScript = async (
             days: Number(r[6] || 1),
             note: String(r[7] || '').trim(),
           }))
+          .filter((l: LeaveRecord) => !deletedLKeys.has(leaveKey(l)))
       : [];
 
     const remoteOt: OTAttendance[] = Array.isArray(data.otRows)
@@ -1943,6 +2121,7 @@ export const syncPublicViaAppsScript = async (
             homeClinic: String(r[4] || '').trim(),
             workClinic: String(r[5] || '').trim(),
           }))
+          .filter((o: OTAttendance) => !deletedOKeys.has(otKey(o)))
       : [];
 
     const remoteWKeys = new Set(remoteWorkloads.map(workloadKey));
@@ -2010,6 +2189,341 @@ export const syncPublicViaAppsScript = async (
   }
 };
 
+function parseRemoteWorkloadsOnly(
+  workloadRows: unknown,
+  premiumSubClinics?: string[]
+): DailyWorkload[] {
+  if (!Array.isArray(workloadRows)) return [];
+  return workloadRows
+    .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r: string[], idx: number) => {
+      const adultPt = Number(r[4] || 0);
+      const childPt = Number(r[5] || 0);
+      const rawRecordType = String(r[17] || '').trim();
+      const recordType: WorkloadRecordType | undefined =
+        rawRecordType === 'PREMIUM_POOL' || rawRecordType === 'PREMIUM_SUB' || rawRecordType === 'STANDARD'
+          ? rawRecordType
+          : undefined;
+      return normalizeWorkloadRecord(
+        {
+          id: `REC-CHK-${idx}`,
+          date: String(r[0] || '').trim(),
+          shift: String(r[1] || 'ในเวลา 08:00-16:00').trim() as WorkShift,
+          clinic: String(r[2] || '').trim(),
+          totalPt: Math.max(Number(r[3] || 0), adultPt + childPt),
+          adultPt,
+          childPt,
+          admit: Number(r[6] || 0),
+          hn: Number(r[7] || 0),
+          rn: Number(r[8] || 0),
+          pn: Number(r[9] || 0),
+          na: Number(r[10] || 0),
+          clerk: Number(r[11] || 0),
+          serviceWorker: Number(r[12] || 0),
+          note: String(r[13] || '').trim(),
+          reporter: String(r[14] || '').trim(),
+          clinicGroup: String(r[15] || '').trim() || undefined,
+          poolId: String(r[16] || '').trim() || undefined,
+          recordType,
+        },
+        premiumSubClinics
+      );
+    });
+}
+
+function parseRemoteLeavesOnly(leaveRows: unknown): LeaveRecord[] {
+  if (!Array.isArray(leaveRows)) return [];
+  return leaveRows
+    .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r: string[], idx: number) => {
+      const rawPos = (r[3] || 'RN').trim();
+      return {
+        id: `LV-CHK-${idx}`,
+        startDate: String(r[0] || '').trim(),
+        endDate: String(r[1] || r[0] || '').trim(),
+        staffName: String(r[2] || '').trim(),
+        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        clinic: String(r[4] || '').trim(),
+        leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
+        days: Number(r[6] || 1),
+        note: String(r[7] || '').trim(),
+      };
+    });
+}
+
+function parseRemoteOtOnly(otRows: unknown): OTAttendance[] {
+  if (!Array.isArray(otRows)) return [];
+  return otRows
+    .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
+    .map((r: string[], idx: number) => {
+      const rawPos = (r[3] || 'RN').trim();
+      return {
+        id: `OT-CHK-${idx}`,
+        date: String(r[0] || '').trim(),
+        shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
+        staffName: String(r[2] || '').trim(),
+        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        homeClinic: String(r[4] || '').trim(),
+        workClinic: String(r[5] || '').trim(),
+      };
+    });
+}
+
+/**
+ * Direct immediate Admin overwrite for a specific modified table via Apps Script Web App URL.
+ * Bypasses GET pre-sync and verifies the remote sheet reflects the exact overwrite/deletion.
+ */
+export const pushAdminTableViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  table: DirtyDomain;
+  db: AppDatabase;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const { gasUrl, adminPin, table, db, auditEntry, expectedDirtyVersion } = params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+
+  try {
+    const payload: Record<string, unknown> = {
+      dirty: {
+        staff: table === 'staff',
+        settings: table === 'settings',
+        workloads: table === 'workloads',
+        leaves: table === 'leaves',
+        ot: table === 'ot',
+      },
+    };
+    if (table === 'staff') payload.staff = db.staff;
+    if (table === 'workloads') payload.workloads = db.workloads;
+    if (table === 'leaves') payload.leaves = db.leaves;
+    if (table === 'ot') payload.ot = db.ot;
+    if (table === 'settings') payload.settings = db.settings;
+    if (auditEntry) payload.auditLogs = [auditEntry];
+
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'syncAdminAll',
+        adminPin,
+        payload,
+      }),
+    });
+
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+
+    const data = await res.json();
+    if (!data || data.success === false) {
+      return { ok: false, error: String(data?.error || 'Apps Script ปฏิเสธการบันทึก') };
+    }
+
+    if (table === 'workloads' && Array.isArray(data.workloadRows)) {
+      const remoteParsed = parseRemoteWorkloadsOnly(
+        data.workloadRows,
+        db.settings.premiumSubClinics
+      );
+      const deletedSet = getDeletedWorkloadKeySet();
+      const stillHasDeleted = remoteParsed.some((r) => deletedSet.has(workloadKey(r)));
+      if (stillHasDeleted || remoteParsed.length !== db.workloads.length) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่ารายการเดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearWorkloadsDirty(expectedDirtyVersion);
+      if (getWorkloadsDirtyVersion() === 0) {
+        clearAllWorkloadTombstones();
+      }
+    } else if (table === 'leaves' && Array.isArray(data.leaveRows)) {
+      const remoteParsed = parseRemoteLeavesOnly(data.leaveRows);
+      const deletedSet = getDeletedLeaveKeySet();
+      const stillHasDeleted = remoteParsed.some((r) => deletedSet.has(leaveKey(r)));
+      if (stillHasDeleted || remoteParsed.length !== db.leaves.length) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่าวันลาเดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearLeavesDirty(expectedDirtyVersion);
+      if (getLeavesDirtyVersion() === 0) {
+        clearAllLeaveTombstones();
+      }
+    } else if (table === 'ot' && Array.isArray(data.otRows)) {
+      const remoteParsed = parseRemoteOtOnly(data.otRows);
+      const deletedSet = getDeletedOtKeySet();
+      const stillHasDeleted = remoteParsed.some((r) => deletedSet.has(otKey(r)));
+      if (stillHasDeleted || remoteParsed.length !== db.ot.length) {
+        return {
+          ok: false,
+          error: 'Google Sheet ยังคืนค่ารายการ OT เดิมหลังลบ/แก้ไข กรุณาอัปเดตและ Deploy Code.gs เวอร์ชันล่าสุด',
+        };
+      }
+      clearOtDirty(expectedDirtyVersion);
+      if (getOtDirtyVersion() === 0) {
+        clearAllOtTombstones();
+      }
+    } else if (table === 'staff') {
+      clearStaffMasterDirty(expectedDirtyVersion);
+    } else if (table === 'settings') {
+      clearSettingsDirty(expectedDirtyVersion);
+    }
+
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+/**
+ * Direct immediate Admin overwrite for a specific modified table via Google OAuth API.
+ */
+export const pushAdminTableViaOAuth = async (params: {
+  accessToken: string;
+  spreadsheetId: string;
+  table: DirtyDomain;
+  db: AppDatabase;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const { accessToken, spreadsheetId, table, db, auditEntry, expectedDirtyVersion } = params;
+  try {
+    await ensureSpreadsheetTabs(accessToken, spreadsheetId);
+
+    const clearAndPut = async (
+      clearRange: string,
+      putRange: string,
+      values: (string | number)[][]
+    ) => {
+      const clearRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(clearRange)}:clear`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      );
+      if (!clearRes.ok) {
+        throw parseSheetsApiError(await clearRes.text(), 'ล้างข้อมูลเดิมในชีทไม่สำเร็จ');
+      }
+      const putRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(putRange)}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ values }),
+        }
+      );
+      if (!putRes.ok) {
+        throw parseSheetsApiError(await putRes.text(), 'บันทึกทับลงชีทไม่สำเร็จ');
+      }
+    };
+
+    if (table === 'workloads') {
+      const rows = [
+        [
+          'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
+          'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker',
+          'Note', 'Reporter', 'Clinic_Group', 'Pool_ID', 'Record_Type',
+        ],
+        ...db.workloads.map((w) => [
+          w.date,
+          w.shift,
+          w.clinic,
+          getEffectiveTotalPt(w),
+          w.adultPt,
+          w.childPt,
+          w.admit,
+          w.hn,
+          w.rn,
+          w.pn,
+          w.na ?? w.pca ?? 0,
+          w.clerk,
+          w.serviceWorker,
+          w.note,
+          w.reporter,
+          w.clinicGroup || '',
+          w.poolId || '',
+          w.recordType || 'STANDARD',
+        ]),
+      ];
+      await clearAndPut('Daily_Workload!A:R', `Daily_Workload!A1:R${rows.length}`, rows);
+      clearWorkloadsDirty(expectedDirtyVersion);
+      if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+    } else if (table === 'leaves') {
+      const rows = [
+        ['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'],
+        ...db.leaves.map((l) => [
+          l.startDate,
+          l.endDate,
+          l.staffName,
+          l.position,
+          l.clinic,
+          l.leaveType,
+          l.days,
+          l.note || '',
+        ]),
+      ];
+      await clearAndPut('Leave_Records!A:H', `Leave_Records!A1:H${rows.length}`, rows);
+      clearLeavesDirty(expectedDirtyVersion);
+      if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
+    } else if (table === 'ot') {
+      const rows = [
+        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+        ...db.ot.map((o) => [
+          o.date,
+          o.shift,
+          o.staffName,
+          o.position,
+          o.homeClinic,
+          o.workClinic,
+        ]),
+      ];
+      await clearAndPut('OT_Attendance!A:F', `OT_Attendance!A1:F${rows.length}`, rows);
+      clearOtDirty(expectedDirtyVersion);
+      if (getOtDirtyVersion() === 0) clearAllOtTombstones();
+    } else if (table === 'staff') {
+      const ok = await syncStaffMasterToSheet(accessToken, spreadsheetId, db.staff);
+      if (!ok) return { ok: false, error: 'อัปเดต Staff_Master ไม่สำเร็จ' };
+      clearStaffMasterDirty(expectedDirtyVersion);
+    } else if (table === 'settings') {
+      const s = db.settings;
+      const rows = [
+        ['Key', 'Value'],
+        ['NHPPD', s.nhppd.toString()],
+        ['Screening_NHPPD', (s.screeningNhppd ?? 0.1).toString()],
+        ['Std_Hr', s.stdHr.toString()],
+        ['Annual_Hr', s.annualHr.toString()],
+        ['Work_Days', s.workDays.toString()],
+        ['Admin_Emails', s.adminEmails.join(', ')],
+        ['In_Time_Clinics', (s.inTimeClinics || []).join(', ')],
+        ['Out_Time_Clinics', (s.outTimeClinics || []).join(', ')],
+        ['Premium_Sub_Clinics', (s.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
+        ['Leave_Types', (s.leaveTypes || [...LEAVE_TYPES]).join(', ')],
+        ['Custom_Holidays', JSON.stringify(s.customHolidays || [])],
+        ['Primary_Admin_Owner', s.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
+        ['Additional_Admin_Pins', JSON.stringify(s.additionalAdminPins || buildDefaultAdditionalAdminPins())],
+        ['Gas_Web_App_URL', s.gasUrl || ''],
+      ];
+      await clearAndPut('Settings!A:B', `Settings!A1:B${rows.length}`, rows);
+      clearSettingsDirty(expectedDirtyVersion);
+    }
+
+    if (auditEntry) {
+      await appendAuditLogToSheet(accessToken, spreadsheetId, auditEntry);
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'OAuth write error') };
+  }
+};
+
 /**
  * Full 2-Way Apps Script sync for Admin PIN-unlocked session (zero Google Sign-In).
  */
@@ -2030,12 +2544,19 @@ export const syncAdminViaAppsScript = async (
   }
 
   const workingDb = pubRes.mergedDb;
+  const dirtyVersions = {
+    staff: getStaffMasterDirtyVersion(),
+    settings: getSettingsDirtyVersion(),
+    workloads: getWorkloadsDirtyVersion(),
+    leaves: getLeavesDirtyVersion(),
+    ot: getOtDirtyVersion(),
+  };
   const dirty = {
-    staff: isStaffMasterDirty(),
-    settings: isSettingsDirty(),
-    workloads: isWorkloadsDirty(),
-    leaves: isLeavesDirty(),
-    ot: isOtDirty(),
+    staff: dirtyVersions.staff > 0,
+    settings: dirtyVersions.settings > 0,
+    workloads: dirtyVersions.workloads > 0,
+    leaves: dirtyVersions.leaves > 0,
+    ot: dirtyVersions.ot > 0,
   };
   const anyDirty =
     dirty.staff ||
@@ -2079,6 +2600,7 @@ export const syncAdminViaAppsScript = async (
         adminSynced: false,
         mergedDb: workingDb,
         pushedCount: pubRes.pushedCount,
+        error: `HTTP ${res.status}`,
       };
     }
 
@@ -2089,15 +2611,42 @@ export const syncAdminViaAppsScript = async (
         adminSynced: false,
         mergedDb: workingDb,
         pushedCount: pubRes.pushedCount,
-        error: String(data?.error || ''),
+        error: String(data?.error || 'Apps Script syncAdminAll failed'),
       };
     }
 
-    clearStaffMasterDirty();
-    clearSettingsDirty();
-    clearWorkloadsDirty();
-    clearLeavesDirty();
-    clearOtDirty();
+    // Verify dirty tables actually cleared deleted items before clearing dirty versions
+    if (dirty.workloads && Array.isArray(data.workloadRows)) {
+      const remoteParsed = parseRemoteWorkloadsOnly(
+        data.workloadRows,
+        workingDb.settings.premiumSubClinics
+      );
+      const deletedSet = getDeletedWorkloadKeySet();
+      if (remoteParsed.some((r) => deletedSet.has(workloadKey(r)))) {
+        return {
+          accessible: true,
+          adminSynced: false,
+          mergedDb: workingDb,
+          pushedCount: pubRes.pushedCount,
+          error: 'Google Sheet ยังแสดงรายการที่ลบไปแล้ว (กรุณาตรวจสอบการ Deploy Code.gs)',
+        };
+      }
+    }
+
+    if (dirty.staff) clearStaffMasterDirty(dirtyVersions.staff);
+    if (dirty.settings) clearSettingsDirty(dirtyVersions.settings);
+    if (dirty.workloads) {
+      clearWorkloadsDirty(dirtyVersions.workloads);
+      if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+    }
+    if (dirty.leaves) {
+      clearLeavesDirty(dirtyVersions.leaves);
+      if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
+    }
+    if (dirty.ot) {
+      clearOtDirty(dirtyVersions.ot);
+      if (getOtDirtyVersion() === 0) clearAllOtTombstones();
+    }
 
     const refreshed = mergeRemoteDataRows(
       {
@@ -2110,33 +2659,46 @@ export const syncAdminViaAppsScript = async (
       },
       workingDb
     );
+
+    // Preserve authoritative local arrays for tables that were just overwritten by Admin
+    // so local metadata (IDs, edit reasons/timestamps) stays exact and remote echoes cannot duplicate
+    const authoritativeDb: AppDatabase = {
+      ...refreshed,
+      staff: dirty.staff ? workingDb.staff : refreshed.staff,
+      workloads: dirty.workloads ? workingDb.workloads : refreshed.workloads,
+      leaves: dirty.leaves ? workingDb.leaves : refreshed.leaves,
+      ot: dirty.ot ? workingDb.ot : refreshed.ot,
+      settings: dirty.settings ? workingDb.settings : refreshed.settings,
+    };
+
     const resolvedSheetId =
-      refreshed.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+      authoritativeDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
 
     return {
       accessible: true,
       adminSynced: true,
       pushedCount: pubRes.pushedCount,
       mergedDb: {
-        ...refreshed,
+        ...authoritativeDb,
         settings: {
-          ...refreshed.settings,
+          ...authoritativeDb.settings,
           spreadsheetId: resolvedSheetId || undefined,
           spreadsheetUrl:
-            refreshed.settings.spreadsheetUrl ||
+            authoritativeDb.settings.spreadsheetUrl ||
             (resolvedSheetId
               ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit`
               : undefined),
-          gasUrl: refreshed.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+          gasUrl: authoritativeDb.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
         },
       },
     };
-  } catch {
+  } catch (err: any) {
     return {
       accessible: true,
       adminSynced: false,
       mergedDb: workingDb,
       pushedCount: pubRes.pushedCount,
+      error: String(err?.message || err || 'Network error'),
     };
   }
 };

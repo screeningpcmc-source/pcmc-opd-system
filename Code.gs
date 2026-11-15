@@ -436,22 +436,42 @@ function buildPublicReadAllPayload_() {
       }
     }
 
+    var nonEmptyStaff = staffData.rows.filter(function(r) { return String(r[1] || '').trim() !== ''; });
+    var nonEmptyWorkloads = workloadData.rows.filter(function(r) {
+      var dateCol = workloadHasId ? r[1] : r[0];
+      var clinicCol = workloadHasId ? r[3] : r[2];
+      return String(dateCol || '').trim() !== '' && String(clinicCol || '').trim() !== '';
+    });
+    var nonEmptyLeaves = leaveData.rows.filter(function(r) {
+      var startCol = leaveHasId ? r[1] : r[0];
+      var nameCol = leaveHasId ? r[3] : r[2];
+      return String(startCol || '').trim() !== '' && String(nameCol || '').trim() !== '';
+    });
+    var nonEmptyOt = otData.rows.filter(function(r) {
+      var dateCol = otHasId ? r[1] : r[0];
+      var nameCol = otHasId ? r[3] : r[2];
+      return String(dateCol || '').trim() !== '' && String(nameCol || '').trim() !== '';
+    });
+    var nonEmptyAudit = auditData.rows.filter(function(r) {
+      return String(r[0] || '').trim() !== '' && String(r[1] || '').trim() !== '';
+    });
+
     return {
       success: true,
       spreadsheetId: ss.getId(),
       gasUrl: activeGasUrl,
-      staffRows: staffData.rows.map(function(r) { return r.slice(0, 7); }),
-      workloadRows: workloadData.rows.map(function(r) {
+      staffRows: nonEmptyStaff.map(function(r) { return r.slice(0, 7); }),
+      workloadRows: nonEmptyWorkloads.map(function(r) {
         return workloadHasId ? r.slice(1, 19) : r.slice(0, 18);
       }),
-      leaveRows: leaveData.rows.map(function(r) {
+      leaveRows: nonEmptyLeaves.map(function(r) {
         return leaveHasId ? r.slice(1, 9) : r.slice(0, 8);
       }),
-      otRows: otData.rows.map(function(r) {
+      otRows: nonEmptyOt.map(function(r) {
         return otHasId ? r.slice(1, 7) : r.slice(0, 6);
       }),
       settingsRows: settingsRows,
-      auditRows: auditData.rows.map(function(r) { return r.slice(0, 6); })
+      auditRows: nonEmptyAudit.map(function(r) { return r.slice(0, 6); })
     };
   } catch (err) {
     return { success: false, error: err.toString() };
@@ -647,12 +667,14 @@ function verifyAdminPinInGas_(enteredPin) {
 
 function replaceSheetBodyRows_(sheet, rows) {
   var lastRow = sheet.getLastRow();
+  var maxCols = Math.max(sheet.getLastColumn(), (rows && rows.length > 0 ? rows[0].length : 1), 1);
   if (lastRow > 1) {
-    sheet.getRange(2, 1, lastRow - 1, Math.max(sheet.getLastColumn(), 1)).clearContent();
+    sheet.getRange(2, 1, lastRow - 1, maxCols).clearContent();
   }
   if (rows && rows.length > 0) {
     sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
   }
+  SpreadsheetApp.flush();
 }
 
 function writeStaffRowsToSheet_(staffList) {
