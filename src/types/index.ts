@@ -27,8 +27,10 @@ export interface StaffMember {
 
 export type WorkloadRecordType = 'STANDARD' | 'PREMIUM_POOL' | 'PREMIUM_SUB';
 
-export const PREMIUM_CLINIC_GROUP = 'คลินิกพิเศษ PREMIUM';
-export const PREMIUM_POOL_CLINIC_NAME = 'คลินิกพิเศษ PREMIUM (กำลังคนรวม)';
+export const PREMIUM_CLINIC_GROUP = 'ศูนย์ปัญญาภิรมย์';
+export const LEGACY_PREMIUM_CLINIC_GROUP = 'คลินิกพิเศษ PREMIUM';
+export const PREMIUM_POOL_CLINIC_NAME = 'ศูนย์ปัญญาภิรมย์ (กำลังคนรวม)';
+export const LEGACY_PREMIUM_POOL_CLINIC_NAME = 'คลินิกพิเศษ PREMIUM (กำลังคนรวม)';
 
 export const DEFAULT_PREMIUM_SUB_CLINICS = [
   'อายุรกรรม-Premium',
@@ -136,6 +138,7 @@ export interface SystemSettings {
   spreadsheetId?: string;
   spreadsheetUrl?: string;
   gasUrl?: string;
+  isUnlinked?: boolean;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
   premiumSubClinics?: string[];
@@ -147,16 +150,29 @@ export interface SystemSettings {
 export const SCREENING_CLINIC_NAME = 'หน่วยคัดกรอง';
 export const DEFAULT_SCREENING_NHPPD = 0.1;
 
+export function isPremiumGroupName(group?: string): boolean {
+  const g = (group || '').trim();
+  return g === PREMIUM_CLINIC_GROUP || g === LEGACY_PREMIUM_CLINIC_GROUP;
+}
+
+export function isPremiumPoolClinicName(clinic?: string): boolean {
+  const c = (clinic || '').trim();
+  return c === PREMIUM_POOL_CLINIC_NAME || c === LEGACY_PREMIUM_POOL_CLINIC_NAME;
+}
+
 export function isPremiumWorkloadRecord(
   w: Pick<DailyWorkload, 'clinic' | 'clinicGroup' | 'recordType'>,
   premiumSubClinics?: string[]
 ): boolean {
   const clinic = (w.clinic || '').trim();
   if (w.recordType === 'PREMIUM_POOL' || w.recordType === 'PREMIUM_SUB') return true;
-  if ((w.clinicGroup || '').trim() === PREMIUM_CLINIC_GROUP) return true;
-  if (clinic === PREMIUM_POOL_CLINIC_NAME || clinic === PREMIUM_CLINIC_GROUP) return true;
+  if (isPremiumGroupName(w.clinicGroup)) return true;
+  if (isPremiumPoolClinicName(clinic)) return true;
   if (/-Premium$/i.test(clinic)) return true;
   if (premiumSubClinics && premiumSubClinics.includes(clinic)) return true;
+  if (w.recordType !== 'STANDARD' && (clinic === PREMIUM_CLINIC_GROUP || clinic === LEGACY_PREMIUM_CLINIC_GROUP)) {
+    return true;
+  }
   return false;
 }
 
@@ -171,7 +187,7 @@ export function normalizeWorkloadRecord(
       : [...DEFAULT_PREMIUM_SUB_CLINICS];
   const fallbackPoolId = (w.poolId || '').trim() || `POOL-${w.date}-${w.shift}`;
 
-  if (w.recordType === 'PREMIUM_POOL' || clinic === PREMIUM_POOL_CLINIC_NAME) {
+  if (w.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(clinic)) {
     return {
       ...w,
       clinicGroup: PREMIUM_CLINIC_GROUP,
@@ -182,7 +198,7 @@ export function normalizeWorkloadRecord(
 
   if (
     w.recordType === 'PREMIUM_SUB' ||
-    (w.clinicGroup || '').trim() === PREMIUM_CLINIC_GROUP ||
+    isPremiumGroupName(w.clinicGroup) ||
     /-Premium$/i.test(clinic) ||
     subList.includes(clinic)
   ) {

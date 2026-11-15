@@ -603,7 +603,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                     const poolRec = grp.primaryPoolRecord;
                     return (
                       <React.Fragment key={grp.key}>
-                        {/* Master Row: คลินิกพิเศษ PREMIUM */}
+                        {/* Master Row: ศูนย์ปัญญาภิรมย์ */}
                         <tr className="bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200">
                           <td className="py-2 px-2 text-center font-bold text-orange-900 print:px-0.5 print:py-1">
                             {regularWorkloads.length + grpIdx + 1}
@@ -677,7 +677,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                         setEditModalError('');
                                       }}
                                       className="text-orange-700 hover:text-orange-900 p-1 rounded hover:bg-orange-200/70 cursor-pointer"
-                                      title="แก้ไขกำลังคนรวมคลินิกพิเศษ PREMIUM"
+                                      title="แก้ไขกำลังคนรวมศูนย์ปัญญาภิรมย์"
                                     >
                                       <Pencil className="w-3.5 h-3.5" />
                                     </button>
@@ -704,7 +704,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                           )}
                         </tr>
 
-                        {/* Detail Rows: แผนกย่อยของคลินิกพิเศษ PREMIUM */}
+                        {/* Detail Rows: แผนกย่อยของศูนย์ปัญญาภิรมย์ */}
                         {grp.subRows.map((sub) => (
                           <tr key={sub.id} className="bg-orange-50/20 hover:bg-orange-50/60 text-gray-700">
                             <td className="py-1.5 px-2 text-center text-orange-400 print:px-0.5 print:py-0.5">•</td>
@@ -860,12 +860,12 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <div className="space-y-4 text-xs">
               {editingWorkload.recordType === 'PREMIUM_POOL' && (
                 <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2 text-[11px] text-orange-900">
-                  <strong>แถวกำลังคนรวม (PREMIUM_POOL):</strong> ใช้สำหรับเก็บกำลังคนปฏิบัติงานรวมทั้งคลินิกพิเศษ PREMIUM ในกะนี้ (ยอดผู้ป่วยควรเป็น 0 เพื่อไม่ให้นับซ้ำกับแผนกย่อย)
+                  <strong>แถวกำลังคนรวม (PREMIUM_POOL):</strong> ใช้สำหรับเก็บกำลังคนปฏิบัติงานรวมทั้งศูนย์ปัญญาภิรมย์ในกะนี้ (ยอดผู้ป่วยควรเป็น 0 เพื่อไม่ให้นับซ้ำกับแผนกย่อย)
                 </div>
               )}
               {editingWorkload.recordType === 'PREMIUM_SUB' && (
                 <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2 text-[11px] text-orange-900">
-                  <strong>แถวแผนกย่อย (PREMIUM_SUB):</strong> ใช้สำหรับเก็บยอดผู้ป่วยรายแผนกของคลินิกพิเศษ PREMIUM (กำลังคนควรเป็น 0 เพราะใช้กำลังคนร่วมจากแถวหลัก)
+                  <strong>แถวแผนกย่อย (PREMIUM_SUB):</strong> ใช้สำหรับเก็บยอดผู้ป่วยรายแผนกของศูนย์ปัญญาภิรมย์ (กำลังคนควรเป็น 0 เพราะใช้กำลังคนร่วมจากแถวหลัก)
                 </div>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

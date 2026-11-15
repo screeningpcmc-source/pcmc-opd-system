@@ -363,7 +363,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     const trimmed = newPremiumClinicName.trim();
     if (!trimmed) return;
     if (premiumSubClinics.includes(trimmed)) {
-      setInlineError(`แผนก "${trimmed}" มีอยู่ในคลินิกพิเศษ PREMIUM แล้ว`);
+      setInlineError(`แผนก "${trimmed}" มีอยู่ในศูนย์ปัญญาภิรมย์แล้ว`);
       return;
     }
     setInlineError('');
@@ -378,7 +378,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleRemovePremiumSubClinic = (clinicName: string) => {
     if (premiumSubClinics.length <= 1) {
-      setInlineError('ต้องมีแผนกย่อยในคลินิกพิเศษ PREMIUM อย่างน้อย 1 แผนก');
+      setInlineError('ต้องมีแผนกย่อยในศูนย์ปัญญาภิรมย์อย่างน้อย 1 แผนก');
       return;
     }
     setInlineError('');
@@ -410,6 +410,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         spreadsheetId: undefined,
         spreadsheetUrl: undefined,
         gasUrl: undefined,
+        isUnlinked: true,
       });
       return;
     }
@@ -426,6 +427,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       spreadsheetId: extractedId,
       spreadsheetUrl: normalizedUrl,
       gasUrl: trimmedGas || undefined,
+      isUnlinked: false,
     });
   };
 
@@ -437,6 +439,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       spreadsheetId: undefined,
       spreadsheetUrl: undefined,
       gasUrl: undefined,
+      isUnlinked: true,
     });
   };
 
@@ -570,7 +573,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       outTimeClinics,
       premiumSubClinics,
       leaveTypes,
-      gasUrl: customGasUrl.trim() || settings.gasUrl || undefined,
+      gasUrl: settings.isUnlinked ? undefined : customGasUrl.trim() || settings.gasUrl || undefined,
+      isUnlinked: settings.isUnlinked,
     };
 
     onSaveSettings(updated);
@@ -1375,13 +1379,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </div>
         </div>
 
-        {/* คลินิกพิเศษ PREMIUM Sub-Departments (Orange Theme) */}
+        {/* ศูนย์ปัญญาภิรมย์ Sub-Departments (Orange Theme) */}
         <div className="bg-orange-50/60 border border-orange-200/90 rounded-xl p-4 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h4 className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
                 <Sparkles className="w-4 h-4 text-orange-600" />
-                <span>คลินิกพิเศษ PREMIUM — รายชื่อแผนกย่อย ({premiumSubClinics.length} แผนก)</span>
+                <span>ศูนย์ปัญญาภิรมย์ — รายชื่อแผนกย่อย ({premiumSubClinics.length} แผนก)</span>
               </h4>
               <p className="text-[11px] text-orange-800/80 mt-0.5">
                 ใช้โครงสร้างกำลังคนรวม 1 ชุดต่อกะ (Pooled Staffing) ร่วมกับยอดผู้ป่วยแยกตามแผนกแพทย์ที่เปิดตรวจจริง และบันทึกลงชีท Settings
@@ -1393,7 +1397,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-100 bg-white rounded-lg border border-orange-200 transition-colors cursor-pointer shrink-0"
             >
               <RotateCcw className="w-3 h-3" />
-              <span>คืนค่า 12 แผนก PREMIUM</span>
+              <span>คืนค่า 12 แผนกเริ่มต้น</span>
             </button>
           </div>
 
@@ -1402,7 +1406,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               type="text"
               value={newPremiumClinicName}
               onChange={(e) => setNewPremiumClinicName(e.target.value)}
-              placeholder="พิมพ์ชื่อแผนกย่อยคลินิกพิเศษ PREMIUM (เช่น อายุรกรรม-Premium)..."
+              placeholder="พิมพ์ชื่อแผนกย่อยศูนย์ปัญญาภิรมย์ (เช่น อายุรกรรม-Premium)..."
               className="flex-1 text-xs rounded-lg border border-orange-300 bg-white px-3 py-1.5 outline-none focus:ring-2 focus:ring-orange-200"
             />
             <button
@@ -1410,7 +1414,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               className="inline-flex items-center justify-center gap-1 px-3.5 py-1.5 bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer shrink-0"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>เพิ่มแผนก PREMIUM</span>
+              <span>เพิ่มแผนกย่อย</span>
             </button>
           </form>
 

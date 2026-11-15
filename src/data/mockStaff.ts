@@ -9,6 +9,11 @@ import {
 } from '../types';
 import { DEFAULT_PRIMARY_ADMIN_OWNER, buildDefaultAdditionalAdminPins } from '../services/adminSecurity';
 
+export const DEFAULT_SPREADSHEET_ID = '1eldsoTvmVIDsKo9BJO2_Nvzjnemi805jpla5Qdc1Ys8';
+export const DEFAULT_SPREADSHEET_URL = `https://docs.google.com/spreadsheets/d/${DEFAULT_SPREADSHEET_ID}/edit`;
+export const DEFAULT_GAS_URL =
+  'https://script.google.com/macros/s/AKfycby6HA3-VEtckDuEmppJihqeEFxFlFujzXZsic6Vtl_S7DWqZ4NUMABduHtpQvXjWIdZcQ/exec';
+
 export const INITIAL_SETTINGS: SystemSettings = {
   nhppd: 0.4,
   screeningNhppd: 0.1,
@@ -19,6 +24,10 @@ export const INITIAL_SETTINGS: SystemSettings = {
   adminPin: '',
   primaryAdminOwner: DEFAULT_PRIMARY_ADMIN_OWNER,
   additionalAdminPins: buildDefaultAdditionalAdminPins(),
+  spreadsheetId: DEFAULT_SPREADSHEET_ID,
+  spreadsheetUrl: DEFAULT_SPREADSHEET_URL,
+  gasUrl: DEFAULT_GAS_URL,
+  isUnlinked: false,
   inTimeClinics: [
     'กุมารเวชกรรม',
     'สูติ-นรีเวชกรรม',

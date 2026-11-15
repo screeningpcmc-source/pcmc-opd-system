@@ -7,7 +7,10 @@ import {
   OUT_TIME_CLINICS, 
   DEFAULT_PREMIUM_SUB_CLINICS,
   PREMIUM_CLINIC_GROUP,
+  LEGACY_PREMIUM_CLINIC_GROUP,
   PREMIUM_POOL_CLINIC_NAME,
+  isPremiumGroupName,
+  isPremiumPoolClinicName,
   LeaveType,
   LEAVE_TYPES,
   formatPositionLabel,
@@ -141,7 +144,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [crossStaffName, setCrossStaffName] = useState<string>('');
   const [crossTargetClinic, setCrossTargetClinic] = useState<string>('');
 
-  // คลินิกพิเศษ PREMIUM sub-department inputs
+  // ศูนย์ปัญญาภิรมย์ sub-department inputs
   const [premiumInputs, setPremiumInputs] = useState<
     Record<string, { adultPt: number; childPt: number; admit: number }>
   >({});
@@ -157,9 +160,15 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     }
   }, [regularLeaveOptions, leaveType]);
 
-  // Shift & Clinics logic
+  // Shift & Clinics logic (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at bottom)
   const isOutTime = shift !== 'ในเวลา 08:00-16:00';
-  const availableClinics = isOutTime ? outTimeClinics : inTimeClinics;
+  const availableClinics = useMemo(
+    () =>
+      (isOutTime ? outTimeClinics : inTimeClinics).filter(
+        c => c !== PREMIUM_CLINIC_GROUP && c !== LEGACY_PREMIUM_CLINIC_GROUP
+      ),
+    [isOutTime, outTimeClinics, inTimeClinics]
+  );
   const isEchoClinic = clinic === 'Echo';
   const isPremiumClinic = clinic === PREMIUM_CLINIC_GROUP;
 
@@ -169,7 +178,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         w =>
           w.date === date &&
           w.shift === shift &&
-          (w.recordType === 'PREMIUM_POOL' || w.clinic === PREMIUM_POOL_CLINIC_NAME)
+          (w.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(w.clinic))
       ) || null
     );
   }, [workloads, date, shift]);
@@ -182,8 +191,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             w.date === date &&
             w.shift === shift &&
             (w.recordType === 'PREMIUM_SUB' ||
-              ((w.clinicGroup === PREMIUM_CLINIC_GROUP || /-Premium$/i.test(w.clinic)) &&
-                w.clinic !== PREMIUM_POOL_CLINIC_NAME))
+              ((isPremiumGroupName(w.clinicGroup) || /-Premium$/i.test(w.clinic)) &&
+                !isPremiumPoolClinicName(w.clinic)))
         )
         .map(w => w.clinic)
     );
@@ -246,7 +255,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   // Handle shift change
   const handleShiftChange = (newShift: WorkShift) => {
     setShift(newShift);
-    const newClinics = newShift !== 'ในเวลา 08:00-16:00' ? outTimeClinics : inTimeClinics;
+    const newClinics = (newShift !== 'ในเวลา 08:00-16:00' ? outTimeClinics : inTimeClinics).filter(
+      c => c !== PREMIUM_CLINIC_GROUP && c !== LEGACY_PREMIUM_CLINIC_GROUP
+    );
     if (clinic !== PREMIUM_CLINIC_GROUP && newClinics.length > 0 && !newClinics.includes(clinic)) {
       setClinic(newClinics[0]);
     }
@@ -277,9 +288,15 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const clinicStaff = useMemo(
     () =>
       staffList
-        .filter(s => s.status === 'Active' && s.homeClinic === clinic)
+        .filter(
+          s =>
+            s.status === 'Active' &&
+            (isPremiumClinic
+              ? s.homeClinic === PREMIUM_CLINIC_GROUP || s.homeClinic === LEGACY_PREMIUM_CLINIC_GROUP
+              : s.homeClinic === clinic)
+        )
         .sort(compareStaffByPositionAndStartDate),
-    [staffList, clinic]
+    [staffList, clinic, isPremiumClinic]
   );
   const activeStaffAll = useMemo(
     () =>
@@ -349,7 +366,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         setFormError(
           existingPremiumPool
             ? 'พบกำลังคนรวมในกะนี้แล้ว กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตาราง'
-            : 'กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตารางคลินิกพิเศษ PREMIUM'
+            : 'กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตารางศูนย์ปัญญาภิรมย์'
         );
         return;
       }
@@ -531,7 +548,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 ข้อมูลห้องตรวจและกะเวลา
               </h3>
               <span className="text-xs font-medium text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full">
-                {isOutTime ? `กะนอกเวลา (${outTimeClinics.length} ห้อง)` : `กะในเวลา (${inTimeClinics.length} ห้อง)`}
+                {isOutTime ? `กะนอกเวลา (${availableClinics.length} ห้อง)` : `กะในเวลา (${availableClinics.length} ห้อง)`}
               </span>
             </div>
 
@@ -603,7 +620,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   <Sparkles className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
                   <div className="text-xs text-orange-950 space-y-0.5">
                     <div className="font-bold">
-                      โหมดคลินิกพิเศษ PREMIUM (Pooled Staffing Model — 1 ชุดกำลังคนรวมหลายแผนก)
+                      โหมดศูนย์ปัญญาภิรมย์ (Pooled Staffing Model — 1 ชุดกำลังคนรวมหลายแผนก)
                     </div>
                     <p className="text-[11px] text-orange-900/85">
                       บันทึกกำลังคนปฏิบัติงานรวม 1 ชุดต่อกะ และกรอกยอดผู้ป่วยแยกเฉพาะแผนกที่มีแพทย์ออกตรวจจริง เพื่อไม่ให้นับจำนวนเจ้าหน้าที่ซ้ำซ้อน
@@ -620,7 +637,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h4 className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
                       <Users className="w-4 h-4 text-orange-600" />
-                      <span>ส่วนที่ 1: กำลังคนรวมทั้งคลินิกพิเศษ PREMIUM (1 ชุดต่อกะ)</span>
+                      <span>ส่วนที่ 1: กำลังคนรวมทั้งศูนย์ปัญญาภิรมย์ (1 ชุดต่อกะ)</span>
                     </h4>
                     <span className="text-[11px] font-semibold text-orange-900 bg-white px-2.5 py-0.5 rounded-full border border-orange-200">
                       กำลังคนพยาบาล (RN+PN+NA):{' '}
@@ -752,7 +769,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       <thead className="bg-orange-50/90 text-orange-950 font-bold border-b border-orange-200">
                         <tr>
                           <th className="py-2 px-2.5 text-center w-10">ที่</th>
-                          <th className="py-2 px-3">แผนกย่อย (คลินิกพิเศษ PREMIUM)</th>
+                          <th className="py-2 px-3">แผนกย่อย (ศูนย์ปัญญาภิรมย์)</th>
                           <th className="py-2 px-2 text-center w-24">ผู้ใหญ่</th>
                           <th className="py-2 px-2 text-center w-24">เด็ก</th>
                           <th className="py-2 px-2 text-center w-24 text-red-700">Admit</th>
@@ -831,7 +848,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       <tfoot className="bg-orange-100/70 text-orange-950 font-extrabold border-t border-orange-200">
                         <tr>
                           <td colSpan={2} className="py-2 px-3">
-                            สรุปรวมคลินิกพิเศษ PREMIUM ({premiumSummary.activeCount} แผนกที่เปิดตรวจ)
+                            สรุปรวมศูนย์ปัญญาภิรมย์ ({premiumSummary.activeCount} แผนกที่เปิดตรวจ)
                           </td>
                           <td className="py-2 px-2 text-center">{premiumSummary.adultSum.toLocaleString()}</td>
                           <td className="py-2 px-2 text-center">{premiumSummary.childSum.toLocaleString()}</td>
@@ -1600,7 +1617,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 <FileCheck2 className="w-4 h-4" />
                 <span>
                   {isPremiumClinic
-                    ? 'บันทึกข้อมูลคลินิกพิเศษ PREMIUM (กำลังคน + ยอดผู้ป่วย)'
+                    ? 'บันทึกข้อมูลศูนย์ปัญญาภิรมย์ (กำลังคน + ยอดผู้ป่วย)'
                     : 'บันทึกภาระงานห้องตรวจนี้'}
                 </span>
               </button>
@@ -1630,10 +1647,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
                 {todayWorkloads.map((item) => {
                   const isPoolRow =
-                    item.recordType === 'PREMIUM_POOL' || item.clinic === PREMIUM_POOL_CLINIC_NAME;
+                    item.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(item.clinic);
                   const isSubRow =
                     item.recordType === 'PREMIUM_SUB' ||
-                    (!isPoolRow && item.clinicGroup === PREMIUM_CLINIC_GROUP);
+                    (!isPoolRow && isPremiumGroupName(item.clinicGroup));
                   return (
                   <div
                     key={item.id}
@@ -1648,7 +1665,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <div>
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-bold text-gray-900 text-sm">{item.clinic}</span>
+                          <span className="font-bold text-gray-900 text-sm">
+                            {isPoolRow ? PREMIUM_POOL_CLINIC_NAME : item.clinic}
+                          </span>
                           {isPoolRow && (
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-orange-600 text-white font-bold">
                               กำลังคนรวม
@@ -1656,7 +1675,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                           )}
                           {isSubRow && (
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-orange-100 text-orange-800 border border-orange-200 font-semibold">
-                              PREMIUM
+                              ศูนย์ปัญญาภิรมย์
                             </span>
                           )}
                         </div>

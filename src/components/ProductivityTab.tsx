@@ -9,6 +9,7 @@ import {
   getClinicNhppd,
   SCREENING_CLINIC_NAME,
   PREMIUM_CLINIC_GROUP,
+  LEGACY_PREMIUM_CLINIC_GROUP,
   DEFAULT_PREMIUM_SUB_CLINICS,
   isPremiumWorkloadRecord,
   normalizeWorkloadRecord
@@ -53,9 +54,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [selectedClinic, setSelectedClinic] = useState<string>('ALL');
   const [excludeLasik, setExcludeLasik] = useState<boolean>(true); // Default exclude LASIK as per standard OPD nursing formula
 
-  // Combine unique clinics list
+  // Combine unique clinics list (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at top)
   const allClinicsList = useMemo(() => {
-    return Array.from(new Set([...inTimeClinics, ...outTimeClinics]));
+    return Array.from(new Set([...inTimeClinics, ...outTimeClinics])).filter(
+      c => c !== PREMIUM_CLINIC_GROUP && c !== LEGACY_PREMIUM_CLINIC_GROUP
+    );
   }, [inTimeClinics, outTimeClinics]);
 
   // Filter workloads matching month, shift, clinic, and LASIK rule
@@ -63,10 +66,13 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return workloads.filter(w => {
       const matchMonth = w.date.startsWith(selectedMonth);
       const matchShift = selectedShift === 'ALL' || w.shift === selectedShift;
+      const clinicTrim = (w.clinic || '').trim();
       const matchClinic =
         selectedClinic === 'ALL' ||
         (selectedClinic === PREMIUM_CLINIC_GROUP
-          ? isPremiumWorkloadRecord(w, premiumSubClinics)
+          ? isPremiumWorkloadRecord(w, premiumSubClinics) ||
+            clinicTrim === PREMIUM_CLINIC_GROUP ||
+            clinicTrim === LEGACY_PREMIUM_CLINIC_GROUP
           : w.clinic === selectedClinic);
       const matchLasik = !(excludeLasik && selectedClinic === 'ALL' && w.clinic === 'ศูนย์เลสิก');
 
@@ -201,7 +207,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     >();
 
     filteredWorkloads.forEach(raw => {
-      const isPremium = isPremiumWorkloadRecord(raw, premiumSubClinics);
+      const clinicTrim = (raw.clinic || '').trim();
+      const isPremium =
+        isPremiumWorkloadRecord(raw, premiumSubClinics) ||
+        clinicTrim === PREMIUM_CLINIC_GROUP ||
+        clinicTrim === LEGACY_PREMIUM_CLINIC_GROUP;
       const w = isPremium ? normalizeWorkloadRecord(raw, premiumSubClinics) : raw;
       const c = isPremium ? PREMIUM_CLINIC_GROUP : w.clinic;
 
@@ -321,7 +331,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
               className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-emerald-950"
             >
               <option value="ALL">ภาพรวมทั้ง OPD (ทุกคลินิก)</option>
-              <option value={PREMIUM_CLINIC_GROUP}>★ คลินิกพิเศษ PREMIUM (ภาพรวม)</option>
+              <option value={PREMIUM_CLINIC_GROUP}>★ ศูนย์ปัญญาภิรมย์ (ภาพรวม)</option>
               {allClinicsList.map(c => (
                 <option key={c} value={c}>{c}</option>
               ))}

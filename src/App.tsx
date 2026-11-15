@@ -213,6 +213,7 @@ export default function App() {
                 ? `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
                 : prev.settings.spreadsheetUrl,
               gasUrl: sharedGasParam || prev.settings.gasUrl,
+              isUnlinked: false,
             },
           }));
           setToastMessage({

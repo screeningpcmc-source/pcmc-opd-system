@@ -566,6 +566,14 @@ export const loadLocalDatabase = (): AppDatabase => {
         position: (o.position === 'PCA' ? 'NA' : o.position) as StaffPosition,
       }));
 
+      const isUnlinked = Boolean(parsed.settings?.isUnlinked);
+      const storedSpreadsheetId =
+        typeof parsed.settings?.spreadsheetId === 'string' ? parsed.settings.spreadsheetId.trim() : '';
+      const storedSpreadsheetUrl =
+        typeof parsed.settings?.spreadsheetUrl === 'string' ? parsed.settings.spreadsheetUrl.trim() : '';
+      const storedGasUrl =
+        typeof parsed.settings?.gasUrl === 'string' ? parsed.settings.gasUrl.trim() : '';
+
       const mergedSettings: SystemSettings = {
         ...INITIAL_SETTINGS,
         ...(parsed.settings || {}),
@@ -594,7 +602,14 @@ export const loadLocalDatabase = (): AppDatabase => {
             ? parsed.settings.primaryAdminOwner.trim()
             : INITIAL_SETTINGS.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER,
         additionalAdminPins: normalizeAdditionalAdminPins(parsed.settings?.additionalAdminPins),
-        gasUrl: typeof parsed.settings?.gasUrl === 'string' ? parsed.settings.gasUrl.trim() : '',
+        spreadsheetId: isUnlinked
+          ? undefined
+          : storedSpreadsheetId || INITIAL_SETTINGS.spreadsheetId,
+        spreadsheetUrl: isUnlinked
+          ? undefined
+          : storedSpreadsheetUrl || INITIAL_SETTINGS.spreadsheetUrl,
+        gasUrl: isUnlinked ? '' : storedGasUrl || INITIAL_SETTINGS.gasUrl || '',
+        isUnlinked,
         autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
 
@@ -2317,9 +2332,11 @@ function mergeRemoteDataRows(
     additionalAdminPins: settingsDirty
       ? normalizeAdditionalAdminPins(db.settings.additionalAdminPins)
       : parsedPins || normalizeAdditionalAdminPins(db.settings.additionalAdminPins),
-    gasUrl: settingsDirty
-      ? db.settings.gasUrl || ''
-      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
+    gasUrl: db.settings.isUnlinked
+      ? ''
+      : settingsDirty
+      ? db.settings.gasUrl || INITIAL_SETTINGS.gasUrl || ''
+      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || INITIAL_SETTINGS.gasUrl || '',
   };
 
   return {
