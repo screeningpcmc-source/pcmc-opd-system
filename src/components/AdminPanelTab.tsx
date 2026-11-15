@@ -762,7 +762,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                         ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/50 hover:bg-emerald-500/35'
                         : 'bg-black/25 text-slate-300 border-white/15 hover:bg-black/35'
                     }`}
-                    title="เปิด/ปิด การซิงค์ข้อมูลกับ Google Sheet อัตโนมัติ"
+                    title="เปิด/ปิด การซิงค์ข้อมูลกับ Google Sheet อัตโนมัติทุกครั้งที่มีการกดบันทึก"
                   >
                     <span
                       className={`w-2 h-2 rounded-full ${
@@ -773,7 +773,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                           : 'bg-slate-400'
                       }`}
                     />
-                    <span>{settings.autoSync !== false ? 'Auto ซิงค์: เปิด' : 'Auto ซิงค์: ปิด'}</span>
+                    <span>{settings.autoSync !== false ? 'ซิงค์เมื่อบันทึก: เปิด' : 'Auto ซิงค์: ปิด'}</span>
                     {lastSyncedAt && (
                       <span className="text-[10px] text-emerald-200/80">({lastSyncedAt})</span>
                     )}

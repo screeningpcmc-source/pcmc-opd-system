@@ -109,7 +109,6 @@ export default function App() {
   const [isSettingUpSheet, setIsSettingUpSheet] = useState<boolean>(false);
   const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const [localRevision, setLocalRevision] = useState<number>(0);
 
   const dbRef = useRef(db);
   dbRef.current = db;
@@ -497,7 +496,7 @@ export default function App() {
     }
   }, []);
 
-  // Auto-Sync: initial load / when user or spreadsheetId/gasUrl changes
+  // Auto-Sync: initial load / when user or spreadsheetId/gasUrl changes (no background interval polling)
   useEffect(() => {
     const sheetId = (db.settings.spreadsheetId || '').trim();
     const gasUrl = (db.settings.gasUrl || '').trim();
@@ -510,58 +509,6 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [user, db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
-
-  // Auto-Sync: live multi-client polling every 15s (while tab is visible) + instant focus/visibility refresh
-  useEffect(() => {
-    const sheetId = (db.settings.spreadsheetId || '').trim();
-    const gasUrl = (db.settings.gasUrl || '').trim();
-    if ((!sheetId && !gasUrl) || db.settings.autoSync === false) return;
-
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        performBackgroundSync('interval');
-      }
-    }, 15 * 1000);
-
-    const handleVisibilityOrFocus = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastSyncEpochRef.current > 3 * 1000) {
-        performBackgroundSync('focus');
-      }
-    };
-
-    window.addEventListener('focus', handleVisibilityOrFocus);
-    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener('focus', handleVisibilityOrFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
-    };
-  }, [db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
-
-  // Auto-Sync: refresh silently when switching tabs so reports/lists always match remote sheet
-  useEffect(() => {
-    const sheetId = (dbRef.current.settings.spreadsheetId || '').trim();
-    const gasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    if ((!sheetId && !gasUrl) || dbRef.current.settings.autoSync === false) return;
-    if (Date.now() - lastSyncEpochRef.current > 3 * 1000) {
-      performBackgroundSync('focus');
-    }
-  }, [activeTab, performBackgroundSync]);
-
-  // Auto-Sync: debounced sync after local edits (workloads, leaves, OT, staff, settings)
-  useEffect(() => {
-    if (localRevision === 0) return;
-    const sheetId = (dbRef.current.settings.spreadsheetId || '').trim();
-    const gasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    if ((!sheetId && !gasUrl) || dbRef.current.settings.autoSync === false) return;
-
-    const timer = window.setTimeout(() => {
-      performBackgroundSync('edit');
-    }, 400);
-
-    return () => window.clearTimeout(timer);
-  }, [localRevision, performBackgroundSync]);
 
   // Manual Sync with linked Google Spreadsheet — works completely WITHOUT Google Sign-In
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
@@ -866,7 +813,8 @@ export default function App() {
 
     showToast(`บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`, 'success');
 
-    // Silent Sync Data Entry (append-only) to Google Sheets via Code.gs Web App or active Admin Google token
+    // Auto-Sync on Save (append-only) to Google Sheets when Auto-Sync is enabled
+    if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
@@ -995,6 +943,7 @@ export default function App() {
       'success'
     );
 
+    if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
@@ -1154,6 +1103,11 @@ export default function App() {
             if (gasRes.ok) {
               lastSyncEpochRef.current = Date.now();
               setLastSyncedAt(formatSyncTime());
+              if (dbRef.current.settings.autoSync !== false) {
+                window.setTimeout(() => {
+                  void performBackgroundSync('edit');
+                }, 0);
+              }
               return;
             }
 
@@ -1356,6 +1310,7 @@ export default function App() {
     setDb(nextDb);
     showToast(`บันทึกวันลา ${leave.staffName} สำเร็จ!`, 'success');
 
+    if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
@@ -1526,6 +1481,7 @@ export default function App() {
     setDb(nextDb);
     showToast(`บันทึกเวรนอกเวลาจำนวน ${records.length} คน เรียบร้อยแล้ว!`, 'success');
 
+    if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
@@ -1805,7 +1761,12 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     enqueueAdminSync('settings', dirtyVer);
-    showToast(enabled ? 'เปิดใช้งาน Auto ซิงค์อัตโนมัติแล้ว' : 'ปิดโหมด Auto ซิงค์ชั่วคราว (สามารถกดปุ่มซิงค์เองได้)', 'info');
+    showToast(
+      enabled
+        ? 'เปิดใช้งาน Auto ซิงค์ทุกครั้งที่กดบันทึกแล้ว'
+        : 'ปิดโหมด Auto ซิงค์ชั่วคราว (สามารถกดปุ่มซิงค์เองได้)',
+      'info'
+    );
   };
 
   // Handler: Reset to clean empty production data
