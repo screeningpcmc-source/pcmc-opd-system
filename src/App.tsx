@@ -25,7 +25,8 @@ import {
   WorkloadCrossCoveragePayload,
   WorkloadTrainingPayload,
   formatLeaveNoteWithPeriod,
-  formatOtWorkClinicValue
+  formatOtWorkClinicValue,
+  isTrainingLeaveType
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -754,7 +755,20 @@ export default function App() {
     const newOtEntries: OTAttendance[] = [];
 
     if (leaveData) {
+      const existingLeaves = dbRef.current.leaves;
+      const skippedNames: string[] = [];
       leaveData.forEach((ld, idx) => {
+        const cleanName = (ld.staffName || '').trim();
+        const isDuplicateInDb = existingLeaves.some(l => {
+          if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
+          const sDate = (l.startDate || '').trim();
+          const eDate = (l.endDate || l.startDate || '').trim();
+          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+        });
+        if (isDuplicateInDb) {
+          skippedNames.push(cleanName);
+          return;
+        }
         const staff = db.staff.find(s => s.name === ld.staffName);
         const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
         const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
@@ -770,6 +784,9 @@ export default function App() {
           note: formattedNote,
         });
       });
+      if (skippedNames.length > 0) {
+        showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
+      }
     }
 
     if (trainingData) {
@@ -897,7 +914,20 @@ export default function App() {
     const newOtEntries: OTAttendance[] = [];
 
     if (leaveData) {
+      const existingLeaves = dbRef.current.leaves;
+      const skippedNames: string[] = [];
       leaveData.forEach((ld, idx) => {
+        const cleanName = (ld.staffName || '').trim();
+        const isDuplicateInDb = existingLeaves.some(l => {
+          if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
+          const sDate = (l.startDate || '').trim();
+          const eDate = (l.endDate || l.startDate || '').trim();
+          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+        });
+        if (isDuplicateInDb) {
+          skippedNames.push(cleanName);
+          return;
+        }
         const staff = db.staff.find(s => s.name === ld.staffName);
         const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
         const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
@@ -913,6 +943,9 @@ export default function App() {
           note: formattedNote,
         });
       });
+      if (skippedNames.length > 0) {
+        showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
+      }
     }
 
     if (trainingData) {
@@ -1341,6 +1374,25 @@ export default function App() {
 
   // Handler: Save Leave (Data Entry: allowed via GAS or OAuth)
   const handleSaveLeave = async (leave: LeaveRecord) => {
+    const cleanName = (leave.staffName || '').trim();
+    const lStart = (leave.startDate || '').trim();
+    const lEnd = (leave.endDate || lStart).trim();
+    const isTrain = isTrainingLeaveType(leave.leaveType);
+    const conflict = dbRef.current.leaves.find(existing => {
+      if ((existing.staffName || '').trim() !== cleanName) return false;
+      if (isTrain !== isTrainingLeaveType(existing.leaveType)) return false;
+      const exStart = (existing.startDate || '').trim();
+      const exEnd = (existing.endDate || exStart).trim();
+      return Boolean(exStart) && exStart <= lEnd && exEnd >= lStart;
+    });
+    if (conflict) {
+      showToast(
+        `ไม่สามารถบันทึกได้: ${cleanName} มีรายการ "${conflict.leaveType}" ในวันที่ซ้ำซ้อน (${conflict.startDate}) อยู่ในฐานข้อมูลแล้ว`,
+        'error'
+      );
+      return;
+    }
+
     clearLeaveTombstone(leave);
     enqueuePendingOutboxLeaves([leave]);
     mutationSeqRef.current += 1;

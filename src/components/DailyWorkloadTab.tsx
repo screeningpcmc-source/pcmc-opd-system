@@ -151,7 +151,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [admit, setAdmit] = useState<number>(0);
 
   // Staff on duty (supports 0.5 steps)
-  const [hn, setHn] = useState<number>(1);
+  const [hn, setHn] = useState<number>(0);
   const [rn, setRn] = useState<number>(2);
   const [pn, setPn] = useState<number>(1);
   const [na, setNa] = useState<number>(1);
@@ -440,7 +440,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     });
 
     const baselineStaff = staffList.filter(
-      s => isActiveOnDate(s) && normalizeUnit(s.homeClinic) === targetUnit
+      s =>
+        isActiveOnDate(s) &&
+        normalizeUnit(s.homeClinic) === targetUnit &&
+        normalizePos(s.position) !== 'HN'
     );
     const baseTotalAll = baselineStaff.length;
     const nursingPositions: StaffPosition[] = ['RN', 'PN', 'NA'];
@@ -455,7 +458,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     const conflictErrors: string[] = [];
 
     const savedLeaveAmtByName = new Map<string, number>();
-    const savedLeavePeriodsByName = new Map<string, Set<HalfDayPeriod>>();
+    const savedLeaveDetailsByName = new Map<string, string[]>();
     const trainingNameSet = new Set<string>();
     const absentTrackKeys = new Set<string>();
     const incomingTrackKeys = new Set<string>();
@@ -493,18 +496,19 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         absentTrackKeys.add(tKey);
 
         savedLeaveAmtByName.set(name, Math.min(1, (savedLeaveAmtByName.get(name) || 0) + amt));
-        if (!savedLeavePeriodsByName.has(name)) savedLeavePeriodsByName.set(name, new Set());
-        savedLeavePeriodsByName.get(name)!.add(pLabel);
+        const desc = `${l.leaveType}${isSingleDayHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''}`;
+        const prevDescs = savedLeaveDetailsByName.get(name) || [];
+        savedLeaveDetailsByName.set(name, [...prevDescs, desc]);
 
         absents.push({
           name,
           pos: normalizePos(l.position),
           amount: amt,
-          detail: `${name} (${l.leaveType}${isSingleDayHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''})`,
+          detail: `${name} (${desc})`,
         });
       });
 
-      // Selected in Section 4 Block 1: Per-person Leave
+      // Selected in Section 4 Block 1: Per-person Leave (disallow duplicate same-day leave if already in DB)
       if (hasStaffLeave) {
         selectedLeaveItems.forEach(item => {
           const st = staffList.find(s => s.staffId === item.staffId);
@@ -514,20 +518,14 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             return;
           }
           const existingSavedAmt = savedLeaveAmtByName.get(st.name) || 0;
-          const existingPeriods = savedLeavePeriodsByName.get(st.name);
+          const existingDescs = savedLeaveDetailsByName.get(st.name) || [];
           const itemPeriod: HalfDayPeriod =
             item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '';
 
-          if (existingSavedAmt >= 1) {
-            conflictErrors.push(`${st.name} มีประวัติลาเต็มวันบันทึกไว้แล้วในวันนี้ (1 คนลาได้ 1 รายการ/วัน)`);
-            return;
-          }
-          if (existingSavedAmt + item.days > 1) {
-            conflictErrors.push(`${st.name} มีวันลาบันทึกไว้แล้ว 0.5 วัน ไม่สามารถเพิ่มลาเต็มวันซ้ำได้`);
-            return;
-          }
-          if (existingPeriods && itemPeriod && existingPeriods.has(itemPeriod)) {
-            conflictErrors.push(`${st.name} มีประวัติ${itemPeriod}บันทึกไว้แล้วในวันนี้`);
+          if (existingSavedAmt > 0 || existingDescs.length > 0) {
+            conflictErrors.push(
+              `${st.name} มีประวัติการลา (${existingDescs.join(', ')}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกวันลาซ้ำในวันเดียวกันได้`
+            );
             return;
           }
 
@@ -658,11 +656,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       });
     }
 
-    const totalAbsentAll = Number(absents.reduce((s, a) => s + a.amount, 0).toFixed(1));
-    const totalIncomingAll = Number(incomings.reduce((s, i) => s + i.amount, 0).toFixed(1));
-
     const enteredByPos: Record<StaffPosition, number> = {
-      HN: Number(hn) || 0,
+      HN: 0,
       RN: Number(rn) || 0,
       PN: Number(pn) || 0,
       NA: Number(na) || 0,
@@ -681,7 +676,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       'Service Worker': 'พนักงานบริการ',
     };
 
-    const positionRows = ALL_POSITIONS.map(pos => {
+    const trackedPositions = ALL_POSITIONS.filter(pos => pos !== 'HN');
+
+    const positionRows = trackedPositions.map(pos => {
       const full = baselineStaff.filter(s => normalizePos(s.position) === pos).length;
       const working = enteredByPos[pos] || 0;
       const absent = Number(
@@ -730,6 +727,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       };
     });
 
+    const totalAbsentAll = Number(positionRows.reduce((s, r) => s + r.absent, 0).toFixed(1));
+    const totalIncomingAll = Number(positionRows.reduce((s, r) => s + r.incoming, 0).toFixed(1));
+
     const activePositionRows = positionRows.filter(
       r => r.full > 0 || r.working > 0 || r.absent > 0 || r.incoming > 0
     );
@@ -737,7 +737,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     const getExpected = (p: StaffPosition) =>
       positionRows.find(r => r.pos === p)?.expectedWorking ?? 0;
 
-    const expectedHN = getExpected('HN');
+    const expectedHN = 0;
     const expectedRN = getExpected('RN');
     const expectedPN = getExpected('PN');
     const expectedNA = getExpected('NA');
@@ -750,7 +750,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       0,
       Number((baseTotalAll - totalAbsentAll + totalIncomingAll).toFixed(1))
     );
-    const enteredTotalAll = Number((hn + rn + pn + na + clerk + serviceWorker).toFixed(1));
+    const enteredTotalAll = Number((rn + pn + na + clerk + serviceWorker).toFixed(1));
 
     const isStrictActive = needsStrictValidation && baseTotalAll > 0;
     const allPositionsBalanced = positionRows.every(r => r.isBalanced);
@@ -828,7 +828,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   ]);
 
   const applyExpectedAllPositions = () => {
-    setHn(dayStaffingCheck.expectedHN);
+    setHn(0);
     setRn(dayStaffingCheck.expectedRN);
     setPn(dayStaffingCheck.expectedPN);
     setNa(dayStaffingCheck.expectedNA);
@@ -1107,10 +1107,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:items-stretch">
         {/* Left Form: 7 cols */}
-        <div className="lg:col-span-7">
-          <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 sm:p-6 space-y-5">
+        <div className="lg:col-span-7 flex flex-col min-w-0">
+          <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 sm:p-6 space-y-5 flex-1 flex flex-col">
             <div className="flex items-center justify-between border-b border-gray-100 pb-3">
               <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
@@ -1231,7 +1231,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   )}
 
                   {(() => {
-                    const dispHn = existingPremiumPool ? existingPremiumPool.hn : hn;
                     const dispRn = existingPremiumPool ? existingPremiumPool.rn : rn;
                     const dispPn = existingPremiumPool ? existingPremiumPool.pn : pn;
                     const dispNa = existingPremiumPool
@@ -1242,7 +1241,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     const isLocked = Boolean(existingPremiumPool);
 
                     const cards = [
-                      { label: 'HN (หัวหน้าเวร)', val: dispHn, setter: setHn, border: 'border-gray-200', text: 'text-gray-700', badge: 'bg-gray-100 text-gray-900' },
                       { label: 'RN (พยาบาลวิชาชีพ)', val: dispRn, setter: setRn, border: 'border-blue-200', text: 'text-blue-700', badge: 'bg-blue-50 text-blue-800' },
                       { label: 'PN (ผู้ช่วยพยาบาล)', val: dispPn, setter: setPn, border: 'border-teal-200', text: 'text-teal-700', badge: 'bg-teal-50 text-teal-800' },
                       { label: 'NA (ผู้ช่วยคนไข้)', val: dispNa, setter: setNa, border: 'border-emerald-200', text: 'text-emerald-700', badge: 'bg-emerald-50 text-emerald-800' },
@@ -1627,40 +1625,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               )}
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {/* HN */}
-                <div className="bg-white p-2.5 rounded-lg border border-gray-200 shadow-2xs">
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-xs font-bold text-gray-700">HN (หัวหน้าเวร)</span>
-                    <span className="text-xs font-bold text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">
-                      {hn.toFixed(1)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => adjustStaff(setHn, -0.5)}
-                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                    </button>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0"
-                      value={hn}
-                      onChange={(e) => setHn(Math.max(0, Number(e.target.value) || 0))}
-                      className="w-full text-center text-xs font-bold py-1 border rounded border-gray-200"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => adjustStaff(setHn, 0.5)}
-                      className="p-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-
                 {/* RN */}
                 <div className="bg-white p-2.5 rounded-lg border border-blue-200 shadow-2xs">
                   <div className="flex justify-between items-center mb-1">
@@ -1970,45 +1934,33 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                           const eDate = (l.endDate || l.startDate || '').trim();
                           return l.staffName === s.name && sDate && date >= sDate && date <= eDate;
                         });
-                        const savedDaysTotal = existingSavedLeaves.reduce(
-                          (sum, l) => sum + (l.startDate === l.endDate && Number(l.days) === 0.5 ? 0.5 : 1),
-                          0
-                        );
-                        const isBlockedFull = savedDaysTotal >= 1;
+                        const isBlockedAlready = existingSavedLeaves.length > 0;
+                        const existingTypeLabel = existingSavedLeaves[0]?.leaveType || '';
 
                         return (
                           <div
                             key={s.staffId}
                             onClick={() => {
-                              if (isBlockedFull && !checked) return;
+                              if (isBlockedAlready && !checked) return;
                               setSelectedLeaveItems(prev => {
                                 if (checked) {
                                   return prev.filter(it => it.staffId !== s.staffId);
                                 }
-                                const existingPeriod = existingSavedLeaves[0]
-                                  ? parseLeavePeriodFromNote(existingSavedLeaves[0].note)
-                                  : '';
-                                const defaultHalf = existingSavedLeaves.length > 0;
-                                const defaultPeriod: HalfDayPeriod = defaultHalf
-                                  ? existingPeriod === 'ครึ่งวันเช้า'
-                                    ? 'ครึ่งวันบ่าย'
-                                    : 'ครึ่งวันเช้า'
-                                  : '';
                                 return [
                                   ...prev,
                                   {
                                     staffId: s.staffId,
                                     leaveType: regularLeaveOptions[0] || 'ลาป่วย',
-                                    days: defaultHalf ? 0.5 : 1,
-                                    periodLabel: defaultPeriod,
+                                    days: 1,
+                                    periodLabel: '',
                                     note: '',
                                   },
                                 ];
                               });
                             }}
                             className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border transition-all ${
-                              isBlockedFull && !checked
-                                ? 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed'
+                              isBlockedAlready && !checked
+                                ? 'bg-red-50/50 border-red-200 text-gray-400 cursor-not-allowed'
                                 : checked
                                   ? 'bg-amber-50/90 border-amber-300 text-amber-950 font-semibold cursor-pointer'
                                   : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700 cursor-pointer'
@@ -2021,9 +1973,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                                 <Square className="w-4 h-4 text-gray-300 shrink-0" />
                               )}
                               <span className="truncate">{s.name}</span>
-                              {savedDaysTotal > 0 && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold shrink-0">
-                                  {savedDaysTotal >= 1 ? 'ลาเต็มวันแล้ว' : 'มีลา 0.5 วันแล้ว'}
+                              {isBlockedAlready && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-800 border border-red-200 font-semibold shrink-0">
+                                  มีประวัติ{existingTypeLabel ? `${existingTypeLabel}` : 'ลา'}ในฐานข้อมูลแล้ว
                                 </span>
                               )}
                             </div>
@@ -2681,7 +2633,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             )}
 
             {/* Submit Button */}
-            <div className="pt-2 flex justify-end">
+            <div className="mt-auto pt-2 flex justify-end">
               <button
                 type="submit"
                 className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg ${
@@ -2701,11 +2653,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           </form>
         </div>
 
-        {/* Right Info & Today's Records: 5 cols */}
-        <div className="lg:col-span-5 space-y-4">
+        {/* Right Info & Today's Records: 5 cols (equal height to Left Form) */}
+        <div className="lg:col-span-5 lg:relative min-w-0">
+          <div className="lg:absolute lg:inset-0 flex flex-col gap-4">
           {/* Quick Summary Card */}
-          <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4">
-            <h3 className="text-xs font-bold text-gray-800 mb-3 flex items-center justify-between">
+          <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 flex flex-col flex-1 min-h-0">
+            <h3 className="text-xs font-bold text-gray-800 mb-3 flex items-center justify-between shrink-0">
               <span className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 รายการที่บันทึกแล้วในวันที่ {formatThaiShortDate(date)}
@@ -2716,11 +2669,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             </h3>
 
             {todayWorkloads.length === 0 ? (
-              <div className="py-8 text-center text-gray-400 text-xs">
+              <div className="flex-1 flex items-center justify-center py-8 text-center text-gray-400 text-xs">
                 ยังไม่มีข้อมูลการบันทึกภาระงานในวันที่เลือก
               </div>
             ) : (
-              <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
+              <div className="space-y-2 flex-1 min-h-0 max-h-[460px] lg:max-h-none overflow-y-auto pr-1">
                 {todayWorkloads.map((item) => {
                   const isPoolRow =
                     item.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(item.clinic);
@@ -2832,7 +2785,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             )}
 
             {todayWorkloads.length > 0 && (
-              <div className="mt-2.5 pt-2 border-t border-gray-100">
+              <div className="mt-2.5 pt-2 border-t border-gray-100 shrink-0">
                 {isAdmin ? (
                   <div className="bg-emerald-50 border border-emerald-200 rounded-lg py-1 px-2 text-center flex items-center justify-center gap-1.5 text-[11px] text-emerald-800 font-medium">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
@@ -2860,7 +2813,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           </div>
 
           {/* Clinical Informatics Reference Card */}
-          <div className="bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-2xl p-4 shadow-sm text-xs space-y-2.5">
+          <div className="bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-2xl p-4 shadow-sm text-xs space-y-2.5 shrink-0">
             <div className="flex items-center gap-2 text-emerald-400 font-bold">
               <HelpCircle className="w-4 h-4" />
               <span>หลักการคำนวณกำลังคนทางการพยาบาล OPD</span>
@@ -2871,6 +2824,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             <p className="text-slate-300 text-[11px] leading-relaxed">
               • <strong>การเกลี่ยอัตรากำลัง 0.5:</strong> สำหรับเจ้าหน้าที่ที่หมุนเวียนปฏิบัติงานครึ่งวัน หรือช่วยงานข้ามแผนกในชั่วโมงเร่งด่วน
             </p>
+          </div>
           </div>
         </div>
       </div>
@@ -2994,23 +2948,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               </div>
 
-              {/* Row 3: Staffing (HN, RN, PN, NA, Clerk, Service Worker) */}
+              {/* Row 3: Staffing (RN, PN, NA, Clerk, Service Worker) */}
               <div>
                 <label className="block font-semibold text-gray-800 mb-1.5">
                   กำลังคนปฏิบัติงาน (รองรับ 0.5 แรง)
                 </label>
-                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                  <div>
-                    <span className="block text-[11px] text-gray-500 mb-1">HN</span>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0"
-                      value={editingWorkload.hn}
-                      onChange={(e) => setEditingWorkload({ ...editingWorkload, hn: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
-                    />
-                  </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   <div>
                     <span className="block text-[11px] font-bold text-blue-800 mb-1">RN *</span>
                     <input

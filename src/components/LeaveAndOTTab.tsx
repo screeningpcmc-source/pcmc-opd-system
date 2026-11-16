@@ -251,6 +251,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [editingLeave, setEditingLeave] = useState<LeaveRecord | null>(null);
   const [editLeaveReason, setEditLeaveReason] = useState<string>('');
   const [editLeaveReasonError, setEditLeaveReasonError] = useState<string>('');
+  const [editLeaveDuplicateError, setEditLeaveDuplicateError] = useState<string>('');
   const [deletingLeave, setDeletingLeave] = useState<LeaveRecord | null>(null);
   const [deleteLeaveReason, setDeleteLeaveReason] = useState<string>('');
   const [deleteLeaveReasonError, setDeleteLeaveReasonError] = useState<string>('');
@@ -269,6 +270,40 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const selectedLeaveStaff = useMemo(() => {
     return activeStaff.find((s) => s.staffId === leaveStaffId) || null;
   }, [activeStaff, leaveStaffId]);
+
+  const findOverlappingLeaveConflict = (
+    targetStaffName: string,
+    targetLeaveType: string,
+    startIso: string,
+    endIso: string,
+    excludeId?: string
+  ): LeaveRecord | null => {
+    const cleanName = (targetStaffName || '').trim();
+    if (!cleanName || !startIso) return null;
+    const rangeEnd = (endIso || startIso).trim();
+    const targetIsTraining = isTrainingLeaveType(targetLeaveType);
+    return (
+      leaves.find((lv) => {
+        if (excludeId && lv.id === excludeId) return false;
+        if ((lv.staffName || '').trim() !== cleanName) return false;
+        if (isTrainingLeaveType(lv.leaveType) !== targetIsTraining) return false;
+        const lvStart = (lv.startDate || '').trim();
+        const lvEnd = (lv.endDate || lvStart).trim();
+        if (!lvStart) return false;
+        return startIso <= lvEnd && rangeEnd >= lvStart;
+      }) || null
+    );
+  };
+
+  const overlappingLeaveInDb = useMemo(() => {
+    if (!selectedLeaveStaff) return null;
+    return findOverlappingLeaveConflict(
+      selectedLeaveStaff.name,
+      leaveType,
+      leaveStartDate,
+      leaveEndDate
+    );
+  }, [selectedLeaveStaff, leaveType, leaveStartDate, leaveEndDate, leaves]);
 
   const filteredLeaveDropdownStaff = useMemo(() => {
     const q = leaveStaffQuery.toLowerCase().trim();
@@ -471,6 +506,18 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const staff = staffList.find((s) => s.staffId === leaveStaffId);
     if (!staff) {
       setLeaveFormError('กรุณาพิมพ์ค้นหาและเลือกเจ้าหน้าที่จากรายการ');
+      return;
+    }
+    const conflict = findOverlappingLeaveConflict(
+      staff.name,
+      leaveType,
+      leaveStartDate,
+      leaveEndDate
+    );
+    if (conflict) {
+      setLeaveFormError(
+        `ไม่สามารถบันทึกซ้ำได้: ${staff.name} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
+      );
       return;
     }
     const numericDays = Number(leaveDays) || 0;
@@ -1166,12 +1213,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       {/* --- SUB-TAB 1: LEAVE ENTRY --- */}
       {activeSubTab === 'leave' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-5">
+          <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 lg:items-stretch">
+          <div className="lg:col-span-3 flex flex-col min-w-0">
             <form
               onSubmit={handleSaveLeaveSubmit}
-              className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4"
+              className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-5 space-y-4 flex-1 flex flex-col justify-between"
             >
+              <div className="space-y-4">
               <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2 border-b pb-2">
                 <CalendarDays className="w-4 h-4 text-amber-600" />
                 แบบฟอร์มบันทึกวันลาของบุคลากร
@@ -1236,29 +1284,46 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             ไม่พบรายชื่อเจ้าหน้าที่ที่ตรงกับคำค้นหา
                           </div>
                         ) : (
-                          filteredLeaveDropdownStaff.map((s) => (
-                            <button
-                              key={s.staffId}
-                              type="button"
-                              onClick={() => {
-                                setLeaveStaffId(s.staffId);
-                                setLeaveStaffQuery(s.name);
-                                setIsLeaveDropdownOpen(false);
-                                setLeaveFormError('');
-                              }}
-                              className="w-full text-left px-3 py-2 hover:bg-amber-50 flex items-center justify-between gap-2 cursor-pointer transition-colors"
-                            >
-                              <div className="min-w-0">
-                                <span className="text-xs font-semibold text-gray-900 block truncate">
-                                  {s.name}
+                          filteredLeaveDropdownStaff.map((s) => {
+                            const conflictItem = findOverlappingLeaveConflict(
+                              s.name,
+                              leaveType,
+                              leaveStartDate,
+                              leaveEndDate
+                            );
+                            return (
+                              <button
+                                key={s.staffId}
+                                type="button"
+                                onClick={() => {
+                                  setLeaveStaffId(s.staffId);
+                                  setLeaveStaffQuery(s.name);
+                                  setIsLeaveDropdownOpen(false);
+                                  setLeaveFormError('');
+                                }}
+                                className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                                  conflictItem ? 'bg-red-50/70 hover:bg-red-100/70' : 'hover:bg-amber-50'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs font-semibold text-gray-900 truncate">
+                                      {s.name}
+                                    </span>
+                                    {conflictItem && (
+                                      <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-red-100 text-red-800 border border-red-200 shrink-0">
+                                        {conflictItem.leaveType}แล้วในวันที่เลือก
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] text-gray-500">{s.homeClinic}</span>
+                                </div>
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0">
+                                  {formatPositionLabel(s.position)}
                                 </span>
-                                <span className="text-[11px] text-gray-500">{s.homeClinic}</span>
-                              </div>
-                              <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0">
-                                {formatPositionLabel(s.position)}
-                              </span>
-                            </button>
-                          ))
+                              </button>
+                            );
+                          })
                         )}
                       </div>
                     )}
@@ -1436,19 +1501,34 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 />
               </div>
 
+              {overlappingLeaveInDb && (
+                <div className="p-2.5 rounded-xl bg-red-50 border border-red-300 text-[11px] text-red-900 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold text-red-800">ตรวจพบรายการซ้ำในวันเดียวกัน</div>
+                    <div>
+                      <strong>{selectedLeaveStaff?.name}</strong> มีประวัติ <strong>{overlappingLeaveInDb.leaveType}</strong> วันที่{' '}
+                      {formatThaiLeaveRange(overlappingLeaveInDb.startDate, overlappingLeaveInDb.endDate)} ({overlappingLeaveInDb.days} วัน) ในฐานข้อมูลแล้ว จึงไม่สามารถบันทึกซ้ำได้
+                    </div>
+                  </div>
+                </div>
+              )}
+              </div>
+
               <button
                 type="submit"
-                className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                disabled={Boolean(overlappingLeaveInDb)}
+                className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <FileCheck2 className="w-4 h-4" />
-                <span>บันทึกประวัติการลา</span>
+                <span>{overlappingLeaveInDb ? 'มีประวัติในวันเดียวกันแล้ว (บันทึกซ้ำไม่ได้)' : 'บันทึกประวัติการลา'}</span>
               </button>
             </form>
           </div>
 
-          <div className="lg:col-span-7">
-            <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+          <div className="lg:col-span-7 lg:relative min-w-0">
+            <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 flex flex-col gap-3 lg:absolute lg:inset-0">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2 shrink-0">
                 <h3 className="text-xs font-bold text-gray-900 flex items-center gap-2">
                   <CalendarDays className="w-4 h-4 text-amber-600" />
                   <span>ประวัติการลาและไปอบรม/ประชุม ({leaves.length} รายการทั้งหมด)</span>
@@ -1457,7 +1537,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
 
               {/* Dual Filter: Staff Search + Leave Type Filter */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-gray-200/80 space-y-2.5">
+              <div className="bg-slate-50 p-3 rounded-xl border border-gray-200/80 space-y-2.5 shrink-0">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-gray-400" />
@@ -1539,32 +1619,32 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
 
               {filteredLeaves.length === 0 ? (
-                <div className="py-10 text-center text-gray-400 text-xs">
+                <div className="flex-1 flex items-center justify-center py-10 text-center text-gray-400 text-xs">
                   {leaves.length === 0
                     ? 'ยังไม่มีประวัติการลา'
                     : 'ไม่พบรายการที่ตรงกับเงื่อนไขการค้นหา'}
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="flex-1 min-h-0 flex flex-col gap-2">
                   {!showAllLeaveHistory && leaveHistoryDisplay.showingUpcomingOnly && (
-                    <div className="text-[11px] text-amber-900 bg-amber-50/70 border border-amber-200/80 rounded-lg px-3 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[11px] text-amber-900 bg-amber-50/70 border border-amber-200/80 rounded-lg px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 shrink-0">
                       <span>
                         กำลังแสดง <strong>{leaveHistoryDisplay.rows.length} รายการที่กำลังจะถึงใกล้ที่สุด</strong> (จากวันลาล่วงหน้าทั้งหมด {leaveHistoryDisplay.upcomingCount} รายการ)
                       </span>
                       <span className="text-[10px] text-amber-700">สามารถดูรายการทั้งหมดในปฏิทินด้านล่างหรือกด &ldquo;ดูทั้งหมด&rdquo;</span>
                     </div>
                   )}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
+                  <div className="flex-1 min-h-0 overflow-auto border border-gray-100 rounded-xl">
+                    <table className="w-full text-left text-[11.5px]">
+                      <thead className="bg-slate-50 text-slate-700 font-semibold border-b sticky top-0 z-10">
                         <tr>
-                          <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ-สกุล</th>
-                          <th className="py-2.5 px-2 whitespace-nowrap">ตำแหน่ง</th>
-                          <th className="py-2.5 px-2 whitespace-nowrap">คลินิก</th>
-                          <th className="py-2.5 px-2 whitespace-nowrap">ประเภท</th>
-                          <th className="py-2.5 px-2 text-center whitespace-nowrap">ระยะเวลา</th>
-                          <th className="py-2.5 px-2 text-center whitespace-nowrap">วัน</th>
-                          <th className="py-2.5 px-2 text-center whitespace-nowrap">จัดการ</th>
+                          <th className="py-2 px-2.5 whitespace-nowrap">ชื่อ-สกุล</th>
+                          <th className="py-2 px-2 whitespace-nowrap">ตำแหน่ง</th>
+                          <th className="py-2 px-2 whitespace-nowrap">คลินิก</th>
+                          <th className="py-2 px-2 whitespace-nowrap">ประเภท</th>
+                          <th className="py-2 px-2 text-center whitespace-nowrap">ระยะเวลา</th>
+                          <th className="py-2 px-1.5 text-center whitespace-nowrap">วัน</th>
+                          <th className="py-2 px-1.5 text-center whitespace-nowrap">จัดการ</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -1633,6 +1713,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                         setEditingLeave({ ...lv });
                                         setEditLeaveReason('');
                                         setEditLeaveReasonError('');
+                                        setEditLeaveDuplicateError('');
                                       }}
                                       className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
                                       title="แก้ไขรายการและระบุเหตุผล (Admin)"
@@ -1669,7 +1750,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               {/* Leave Audit Log Section */}
               {auditLogs.filter((a) => a.action === 'แก้ไขวันลา' || a.action === 'ลบวันลา').length > 0 && (
-                <div className="pt-2 border-t border-gray-200">
+                <div className="pt-2 border-t border-gray-200 shrink-0">
                   <button
                     type="button"
                     onClick={() => setShowLeaveAuditLog((prev) => !prev)}
@@ -2175,6 +2256,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                         setEditingLeave({ ...lv });
                                         setEditLeaveReason('');
                                         setEditLeaveReasonError('');
+                                        setEditLeaveDuplicateError('');
                                       }}
                                       className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-500 hover:text-blue-600 cursor-pointer"
                                       title="แก้ไข"
@@ -2212,16 +2294,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       {/* --- SUB-TAB 2: OT MULTI-SELECT + IN-TIME OT + EXTERNAL SUBSTITUTE ENTRY --- */}
       {activeSubTab === 'ot' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Controls: 5 cols */}
-            <div className="lg:col-span-5">
+          <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 lg:items-stretch">
+            {/* Controls: 30% width (3/10 cols) */}
+            <div className="lg:col-span-3 flex flex-col min-w-0">
               <form
                 onSubmit={handleSaveBatchOTSubmit}
-                className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4"
+                className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-5 space-y-4 flex-1 flex flex-col justify-between"
               >
+                <div className="space-y-4">
                 <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2 border-b pb-2">
-                  <Users className="w-4 h-4 text-teal-600" />
-                  บันทึกเวรนอกเวลา & ปฏิบัติหน้าที่แทน (พร้อมกันหลายคน)
+                  <Users className="w-4 h-4 text-teal-600 shrink-0" />
+                  <span>บันทึกเวรนอกเวลา &amp; ปฏิบัติหน้าที่แทน</span>
                 </h3>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2402,6 +2485,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   </p>
                 )}
 
+                </div>
                 <button
                   type="submit"
                   disabled={totalOtSelectedCount === 0}
@@ -2413,10 +2497,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </form>
             </div>
 
-            {/* Staff Multi-Select Grid: 7 cols */}
-            <div className="lg:col-span-7">
-              <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3 h-full">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3">
+            {/* Staff Multi-Select Grid: 70% width (7/10 cols, equal height to left form) */}
+            <div className="lg:col-span-7 lg:relative min-w-0">
+              <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 flex flex-col gap-3 lg:absolute lg:inset-0">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 shrink-0">
                   <h3 className="text-xs font-bold text-gray-900">
                     คลิกเลือกเจ้าหน้าที่ OPD ที่จะขึ้นเวร ({activeStaff.length} คน)
                   </h3>
@@ -2433,7 +2517,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
 
                 {/* Staff Items List */}
-                <div className="max-h-[540px] overflow-y-auto space-y-1.5 pr-1">
+                <div className="flex-1 min-h-0 max-h-[540px] lg:max-h-none overflow-y-auto space-y-1.5 pr-1">
                   {activeStaff
                     .filter(
                       (s) =>
@@ -4114,6 +4198,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
             </div>
 
+            {editLeaveDuplicateError && (
+              <div className="p-2.5 rounded-xl bg-red-50 border border-red-300 text-xs text-red-900 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{editLeaveDuplicateError}</span>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2.5 border-t pt-3">
               <button
                 type="button"
@@ -4129,6 +4220,20 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     setEditLeaveReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
                     return;
                   }
+                  const conflict = findOverlappingLeaveConflict(
+                    editingLeave.staffName,
+                    editingLeave.leaveType,
+                    editingLeave.startDate,
+                    editingLeave.endDate,
+                    editingLeave.id
+                  );
+                  if (conflict) {
+                    setEditLeaveDuplicateError(
+                      `ไม่สามารถบันทึกได้: ${editingLeave.staffName} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
+                    );
+                    return;
+                  }
+                  setEditLeaveDuplicateError('');
                   onUpdateLeave(editingLeave, editLeaveReason.trim());
                   setEditingLeave(null);
                   setEditLeaveReason('');

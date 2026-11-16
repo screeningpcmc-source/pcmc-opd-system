@@ -900,12 +900,16 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     const monthLabel = `${THAI_MONTHS[Math.max(0, Math.min(11, mo - 1))]} ${yr + 543}`;
     const clinicLabel =
       selectedClinic === 'ALL'
-        ? excludeLasik
-          ? 'ภาพรวมทั้ง OPD (ไม่รวมศูนย์เลสิก)'
-          : 'ภาพรวมทั้ง OPD (ทุกคลินิก)'
-        : selectedClinic;
-    const shiftSuffix = selectedShift !== 'ALL' ? ` (${selectedShift})` : '';
-    const title = `แบบรวบรวมภาระงานผู้ป่วยนอก ห้องตรวจ ${clinicLabel}${shiftSuffix} ${monthLabel}`;
+        ? 'ภาพรวมทั้ง OPD'
+        : selectedClinic.replace(/\s*\([^)]*\)/g, '').trim();
+    const shiftSuffix =
+      selectedShift !== 'ALL'
+        ? ` ${selectedShift.replace(/\s*\([^)]*\)/g, '').trim()}`
+        : '';
+    const title = `แบบรวบรวมภาระงานผู้ป่วยนอก ห้องตรวจ ${clinicLabel}${shiftSuffix} ${monthLabel}`
+      .replace(/\s*\([^)]*\)/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
 
     const rnHours = stats.sumRN * 8;
     const auxHours = (stats.sumPN + stats.sumNA) * 8;
