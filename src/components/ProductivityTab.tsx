@@ -17,7 +17,11 @@ import {
   isPremiumGroupName,
   isPremiumPoolClinicName,
   isPremiumWorkloadRecord,
-  normalizeWorkloadRecord
+  normalizeWorkloadRecord,
+  isTrainingLeaveType,
+  parseLeavePeriodFromNote,
+  stripLeavePeriodFromNote,
+  parseOtWorkClinic
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate } from '../utils/thaiDate';
@@ -442,16 +446,19 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             return;
           }
 
-          const dedupKey = `${l.staffName}|${l.leaveType}|${unit}`;
+          const dedupKey = `${l.staffName}|${l.leaveType}|${unit}|${l.days}`;
           if (seenLeaveKeys.has(dedupKey)) return;
           seenLeaveKeys.add(dedupKey);
 
-          const extra = cleanAutoLeaveNote(l.note);
+          const isHalfDay = start === end && Number(l.days) === 0.5;
+          const periodLabel = isHalfDay ? parseLeavePeriodFromNote(l.note) : '';
+          const extra = cleanAutoLeaveNote(stripLeavePeriodFromNote(l.note));
           const prefix = selectedClinic === 'ALL' && unit ? `[${unit}] ` : '';
-          const isTraining = l.leaveType === 'ไปอบรม/ประชุม';
+          const isTraining = isTrainingLeaveType(l.leaveType);
+          const halfSuffix = isHalfDay ? ` (${periodLabel || 'ครึ่งวัน'} 0.5 วัน)` : '';
           const text = isTraining
             ? `${prefix}${l.staffName} ไปอบรม/ประชุม${extra ? ` (${extra})` : ''}`
-            : `${prefix}${l.staffName} ${l.leaveType}${extra ? ` (${extra})` : ''}`;
+            : `${prefix}${l.staffName} ${l.leaveType}${halfSuffix}${extra ? ` (${extra})` : ''}`;
 
           pushUniqueNote(row.notes, text, l.staffName, l.leaveType);
         });
@@ -473,25 +480,35 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           }
         }
 
+        const parsedWork = parseOtWorkClinic(o.workClinic);
         const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
-        const workUnit = normalizeClinicUnit(o.workClinic || '');
+        const workUnit = normalizeClinicUnit(parsedWork.clinic);
+        const fracTag =
+          parsedWork.amount === 0.5
+            ? ` (0.5 ${parsedWork.periodLabel || 'ครึ่งวัน'})`
+            : '';
 
         if (selectedClinic === 'ALL') {
           if (excludeLasik && homeUnit === 'ศูนย์เลสิก' && workUnit === 'ศูนย์เลสิก') return;
           if (homeUnit && workUnit && homeUnit !== workUnit) {
-            const k = `MOVE|${o.staffName}|${homeUnit}|${workUnit}`;
+            const k = `MOVE|${o.staffName}|${homeUnit}|${workUnit}|${parsedWork.periodLabel}`;
             if (seenOtKeys.has(k)) return;
             seenOtKeys.add(k);
             const tag = o.shift === 'OT ในเวลาราชการ 08:00-16:00' ? ' ขึ้นแทน' : ' ไปช่วย';
-            pushUniqueNote(row.notes, `${o.staffName}${tag} (${homeUnit} → ${o.workClinic})`, o.staffName, o.workClinic);
+            pushUniqueNote(
+              row.notes,
+              `${o.staffName}${tag} (${homeUnit} → ${parsedWork.clinic}${fracTag ? ` ${fracTag}` : ''})`,
+              o.staffName,
+              parsedWork.clinic
+            );
           } else if (o.isExternal || o.shift === 'OT ในเวลาราชการ 08:00-16:00') {
-            const k = `SUB|${o.staffName}|${workUnit}`;
+            const k = `SUB|${o.staffName}|${workUnit}|${parsedWork.periodLabel}`;
             if (seenOtKeys.has(k)) return;
             seenOtKeys.add(k);
             const src = o.affiliation || (homeUnit && homeUnit !== workUnit ? o.homeClinic : '');
             pushUniqueNote(
               row.notes,
-              `[${workUnit}] ${o.staffName} ขึ้นแทน${src ? ` (${src})` : ''}`,
+              `[${workUnit}] ${o.staffName} ขึ้นแทน${src ? ` (${src})` : ''}${fracTag}`,
               o.staffName,
               'ขึ้นแทน'
             );
@@ -499,20 +516,20 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           return;
         }
 
-        const isOutgoing = homeUnit === selectedClinic && workUnit !== selectedClinic && Boolean(o.workClinic);
+        const isOutgoing = homeUnit === selectedClinic && workUnit !== selectedClinic && Boolean(parsedWork.clinic);
         const isIncoming =
           workUnit === selectedClinic &&
           (homeUnit !== selectedClinic || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00');
 
         if (isOutgoing) {
-          const k = `OUT|${o.staffName}|${o.workClinic}`;
+          const k = `OUT|${o.staffName}|${parsedWork.clinic}|${parsedWork.periodLabel}`;
           if (seenOtKeys.has(k)) return;
           seenOtKeys.add(k);
-          pushUniqueNote(row.notes, `${o.staffName} ไปช่วย ${o.workClinic}`, o.staffName, 'ไปช่วย');
+          pushUniqueNote(row.notes, `${o.staffName} ไปช่วย ${parsedWork.clinic}${fracTag}`, o.staffName, 'ไปช่วย');
         }
 
         if (isIncoming) {
-          const k = `IN|${o.staffName}|${o.homeClinic || o.affiliation || ''}`;
+          const k = `IN|${o.staffName}|${o.homeClinic || o.affiliation || ''}|${parsedWork.periodLabel}`;
           if (seenOtKeys.has(k)) return;
           seenOtKeys.add(k);
           const isSubstitute = o.shift === 'OT ในเวลาราชการ 08:00-16:00' || Boolean(o.isExternal);
@@ -520,7 +537,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           const verb = isSubstitute ? 'ขึ้นแทน' : 'มาช่วย';
           pushUniqueNote(
             row.notes,
-            `${o.staffName} ${verb}${srcLabel ? ` (จาก ${srcLabel})` : ''}`,
+            `${o.staffName} ${verb}${srcLabel ? ` (จาก ${srcLabel})` : ''}${fracTag}`,
             o.staffName,
             verb
           );
@@ -541,7 +558,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     premiumSubClinics,
   ]);
 
-  // Daily Staffing Headcount Verification (Master Staff - Leaves/Training/Outgoing + Incoming vs Recorded RN+PN+NA)
+  // Daily Staffing Headcount Verification (Master Staff - Leaves/Outgoing + Incoming vs Recorded RN+PN+NA)
+  // NOTE: "ไปอบรม/ประชุม" is treated as normal working day (displayed for reference, NOT deducted)
   const staffingVerification = useMemo(() => {
     const isOutTimeOnlyFilter =
       selectedShift === 'นอกเวลาเย็น 16:00-20:00' || selectedShift === 'นอกเวลาวันหยุด 08:00-12:00';
@@ -554,8 +572,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       mode: 'IN_TIME' | 'OUT_TIME';
       baselineCount: number;
       baselineSummary: string;
-      absentList: { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' }[];
-      incomingList: { name: string; label: string }[];
+      absentList: { name: string; label: string; kind: 'leave' | 'training' | 'outgoing'; amount: number }[];
+      incomingList: { name: string; label: string; amount: number }[];
       expectedCount: number;
       recordedNursing: number;
       recordedRN: number;
@@ -592,21 +610,28 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           (o) =>
             o.date === g.date &&
             o.shift === selectedShift &&
-            normalizeClinicUnit(o.workClinic) === g.unit &&
+            normalizeClinicUnit(parseOtWorkClinic(o.workClinic).clinic) === g.unit &&
             isNursingRole(o.position)
         );
         const incomingList = Array.from(
           new Map(
-            otMatched.map((o) => [
-              o.staffName,
-              {
-                name: o.staffName,
-                label: `${o.staffName} (${o.position === 'PCA' ? 'NA' : o.position})`,
-              },
-            ])
+            otMatched.map((o) => {
+              const parsedWork = parseOtWorkClinic(o.workClinic);
+              const amt = parsedWork.amount;
+              return [
+                o.staffName,
+                {
+                  name: o.staffName,
+                  label: `${o.staffName} (${o.position === 'PCA' ? 'NA' : o.position}${
+                    amt === 0.5 ? ` 0.5 ${parsedWork.periodLabel || 'ครึ่งวัน'}` : ''
+                  })`,
+                  amount: amt,
+                },
+              ];
+            })
           ).values()
         );
-        const expected = incomingList.length;
+        const expected = Number(incomingList.reduce((s, x) => s + x.amount, 0).toFixed(1));
         const diff = Number((recorded - expected).toFixed(1));
         const status: VerificationItem['status'] =
           expected === 0 && recorded > 0
@@ -687,8 +712,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (baseNA > 0) baselineParts.push(`NA ${baseNA}`);
       const baselineSummary = baselineParts.length > 0 ? baselineParts.join(', ') : 'ไม่มีรายชื่อในเมนู 5';
 
-      // Absent from unit on date: Leaves + Training + Outgoing Cross-Cover
-      const absentByName = new Map<string, { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' }>();
+      // Absent from unit on date: Leaves + Outgoing Cross-Cover (Training is normal work -> amount: 0)
+      const absentMap = new Map<
+        string,
+        { name: string; label: string; kind: 'leave' | 'training' | 'outgoing'; amount: number }
+      >();
 
       leaves.forEach((l) => {
         const start = (l.startDate || '').trim();
@@ -698,13 +726,21 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         if (unit !== g.unit) return;
         if (!isNursingRole(l.position)) return;
         const name = (l.staffName || '').trim();
-        if (!name || absentByName.has(name)) return;
-        const isTraining = l.leaveType === 'ไปอบรม/ประชุม';
-        const extra = cleanAutoLeaveNote(l.note);
-        absentByName.set(name, {
+        if (!name) return;
+        const isTraining = isTrainingLeaveType(l.leaveType);
+        const isHalf = !isTraining && start === end && Number(l.days) === 0.5;
+        const pLabel = isHalf ? parseLeavePeriodFromNote(l.note) : '';
+        const amt = isTraining ? 0 : isHalf ? 0.5 : 1;
+        const extra = cleanAutoLeaveNote(stripLeavePeriodFromNote(l.note));
+        const keyId = `${isTraining ? 'TRN' : 'LV'}|${name}|${pLabel || 'FULL'}`;
+        if (absentMap.has(keyId)) return;
+        absentMap.set(keyId, {
           name,
-          label: `${name} (${l.leaveType}${extra ? `: ${extra}` : ''})`,
+          label: isTraining
+            ? `${name} (ไปอบรม/ประชุม - ทำงานปกติ${extra ? `: ${extra}` : ''})`
+            : `${name} (${l.leaveType}${isHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''}${extra ? `: ${extra}` : ''})`,
           kind: isTraining ? 'training' : 'leave',
+          amount: amt,
         });
       });
 
@@ -712,45 +748,57 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         if ((o.date || '').trim() !== g.date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
         if (!isNursingRole(o.position)) return;
+        const parsedWork = parseOtWorkClinic(o.workClinic);
         const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
-        const workUnit = normalizeClinicUnit(o.workClinic || '');
+        const workUnit = normalizeClinicUnit(parsedWork.clinic);
         if (homeUnit === g.unit && workUnit !== g.unit && workUnit) {
           const name = (o.staffName || '').trim();
-          if (name && !absentByName.has(name)) {
-            absentByName.set(name, {
+          const keyId = `OUT|${name}|${workUnit}|${parsedWork.periodLabel || 'FULL'}`;
+          if (name && !absentMap.has(keyId)) {
+            const pSuffix =
+              parsedWork.amount === 0.5 && parsedWork.periodLabel ? ` 0.5 ${parsedWork.periodLabel}` : '';
+            absentMap.set(keyId, {
               name,
-              label: `${name} (ไปช่วย ${o.workClinic})`,
+              label: `${name} (ไปช่วย ${parsedWork.clinic}${pSuffix})`,
               kind: 'outgoing',
+              amount: parsedWork.amount,
             });
           }
         }
       });
 
       // Incoming substitutes / cross-cover
-      const incomingByName = new Map<string, { name: string; label: string }>();
+      const incomingMap = new Map<string, { name: string; label: string; amount: number }>();
       otRecords.forEach((o) => {
         if ((o.date || '').trim() !== g.date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
         if (!isNursingRole(o.position)) return;
+        const parsedWork = parseOtWorkClinic(o.workClinic);
         const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
-        const workUnit = normalizeClinicUnit(o.workClinic || '');
+        const workUnit = normalizeClinicUnit(parsedWork.clinic);
         const isIncoming =
           workUnit === g.unit &&
           (homeUnit !== g.unit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00');
         if (!isIncoming) return;
         const name = (o.staffName || '').trim();
-        if (!name || incomingByName.has(name)) return;
+        const keyId = `IN|${name}|${parsedWork.periodLabel || 'FULL'}`;
+        if (!name || incomingMap.has(keyId)) return;
         const src = o.affiliation || (homeUnit && homeUnit !== g.unit ? o.homeClinic : '');
         const isSub = o.shift === 'OT ในเวลาราชการ 08:00-16:00' || Boolean(o.isExternal);
-        incomingByName.set(name, {
+        const pSuffix =
+          parsedWork.amount === 0.5 && parsedWork.periodLabel ? ` 0.5 ${parsedWork.periodLabel}` : '';
+        incomingMap.set(keyId, {
           name,
-          label: `${name} (${isSub ? 'ขึ้นแทน' : 'มาช่วย'}${src ? ` จาก ${src}` : ''})`,
+          label: `${name} (${isSub ? 'ขึ้นแทน' : 'มาช่วย'}${src ? ` จาก ${src}` : ''}${pSuffix})`,
+          amount: parsedWork.amount,
         });
       });
 
-      const absentList = Array.from(absentByName.values());
-      const incomingList = Array.from(incomingByName.values());
-      const expectedCount = Math.max(0, baselineCount - absentList.length + incomingList.length);
+      const absentList = Array.from(absentMap.values());
+      const incomingList = Array.from(incomingMap.values());
+      const absentAmount = Number(absentList.reduce((s, a) => s + a.amount, 0).toFixed(1));
+      const incomingAmount = Number(incomingList.reduce((s, i) => s + i.amount, 0).toFixed(1));
+      const expectedCount = Math.max(0, Number((baselineCount - absentAmount + incomingAmount).toFixed(1)));
       const diff = Number((recorded - expectedCount).toFixed(1));
 
       let status: VerificationItem['status'];
@@ -758,31 +806,31 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (baselineCount === 0) {
         status = 'no_baseline';
         message =
-          absentList.length > 0 || incomingList.length > 0
-            ? 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5 (พบข้อมูลลา/อบรม/ช่วยงานตามรายการ)'
+          absentAmount > 0 || incomingAmount > 0
+            ? 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5 (พบข้อมูลลา/ช่วยงานตามรายการ)'
             : 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5';
       } else if (Math.abs(diff) < 0.01) {
         status = 'match';
         message =
-          absentList.length > 0 || incomingList.length > 0
-            ? 'ตรงกัน (หักยอดลา/อบรม/ช่วยงานแล้วสอดคล้องกับยอดปฏิบัติงาน)'
+          absentAmount > 0 || incomingAmount > 0
+            ? 'ตรงกัน (หักยอดลา/ช่วยงานแล้วสอดคล้องกับยอดปฏิบัติงาน)'
             : 'ตรงกันตามอัตรากำลังประจำ';
       } else if (diff > 0) {
         status = 'mismatch_over';
-        if (absentList.length > 0 && Math.abs(diff - 0.5) < 0.01) {
+        if (absentAmount > 0 && Math.abs(diff - 0.5) < 0.01) {
           message =
-            'ต่าง +0.5 แรง (คาดว่ามีผู้มาขึ้นแทน/ช่วยครึ่งวัน 0.5 แรง — แนะนำบันทึกรายชื่อผู้ขึ้นแทนในเมนู 2)';
-        } else if (absentList.length > 0) {
-          message = `บันทึกสูงกว่าคาดการณ์ +${diff} แรง (มีรายชื่อลา/อบรม/ไปช่วย ${absentList.length} คน กรุณาตรวจสอบยอดคนหรือผู้ขึ้นแทน)`;
+            'ต่าง +0.5 แรง (คาดว่ามีผู้มาขึ้นแทน/ช่วยครึ่งวัน 0.5 แรง — สามารถบันทึกในเมนู 1 หรือ 2)';
+        } else if (absentAmount > 0) {
+          message = `บันทึกสูงกว่าคาดการณ์ +${diff} แรง (หักลา/ไปช่วย ${absentAmount} แรง กรุณาตรวจสอบยอดคนหรือผู้มาช่วย)`;
         } else {
-          message = `บันทึกสูงกว่ากำลังคนประจำ +${diff} แรง (ตรวจสอบว่ามีผู้มาช่วยงานหรือไม่)`;
+          message = `บันทึกสูงกว่ากำลังคนประจำ +${diff} แรง (ตรวจสอบว่ามีผู้มาช่วยงาน 0.5/1 แรงหรือไม่)`;
         }
       } else {
         status = 'mismatch_under';
         message =
-          absentList.length === 0
-            ? `บันทึกต่ำกว่ากำลังคนประจำ ${diff} แรง (ยังไม่มีรายชื่อลา / ไปอบรม / ไปช่วยห้องอื่นในวันนี้)`
-            : `บันทึกต่ำกว่าคาดการณ์ ${diff} แรง (กรุณาตรวจสอบรายชื่อลา/อบรมซ้ำ)`;
+          absentAmount === 0
+            ? `บันทึกต่ำกว่ากำลังคนประจำ ${diff} แรง (ยังไม่มีรายชื่อลา / ไปช่วยห้องอื่นในวันนี้)`
+            : `บันทึกต่ำกว่าคาดการณ์ ${diff} แรง (กรุณาตรวจสอบรายชื่อลา/ช่วยงานซ้ำ)`;
       }
 
       items.push({

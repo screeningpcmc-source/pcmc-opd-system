@@ -364,3 +364,88 @@ export const getEffectiveTotalPt = (
   return Math.max(total, adult + child);
 };
 
+export type HalfDayPeriod = '' | 'ครึ่งวันเช้า' | 'ครึ่งวันบ่าย';
+
+export const isTrainingLeaveType = (leaveType?: string): boolean =>
+  (leaveType || '').trim() === 'ไปอบรม/ประชุม';
+
+export function parseLeavePeriodFromNote(note?: string): HalfDayPeriod {
+  const txt = (note || '').trim();
+  if (!txt) return '';
+  if (/ครึ่งวันเช้า/.test(txt)) return 'ครึ่งวันเช้า';
+  if (/ครึ่งวันบ่าย/.test(txt)) return 'ครึ่งวันบ่าย';
+  return '';
+}
+
+export function stripLeavePeriodFromNote(note?: string): string {
+  return (note || '')
+    .replace(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]\s*/g, '')
+    .replace(/\((ครึ่งวันเช้า|ครึ่งวันบ่าย)\)\s*/g, '')
+    .trim();
+}
+
+export function formatLeaveNoteWithPeriod(note: string, days: number, periodLabel?: HalfDayPeriod): string {
+  const cleaned = stripLeavePeriodFromNote(note);
+  if (days === 0.5 && (periodLabel === 'ครึ่งวันเช้า' || periodLabel === 'ครึ่งวันบ่าย')) {
+    return cleaned ? `[${periodLabel}] ${cleaned}` : `[${periodLabel}]`;
+  }
+  return cleaned;
+}
+
+export function parseOtWorkClinic(raw?: string): {
+  clinic: string;
+  amount: number;
+  periodLabel: HalfDayPeriod;
+} {
+  const txt = (raw || '').trim();
+  if (!txt) return { clinic: '', amount: 1, periodLabel: '' };
+  const m = txt.match(/^(.*?)\s*\(0\.5\s*(ครึ่งวันเช้า|ครึ่งวันบ่าย|เช้า|บ่าย)\)\s*$/);
+  if (m) {
+    const clinic = m[1].trim();
+    const p: HalfDayPeriod = m[2].includes('บ่าย') ? 'ครึ่งวันบ่าย' : 'ครึ่งวันเช้า';
+    return { clinic, amount: 0.5, periodLabel: p };
+  }
+  return { clinic: txt, amount: 1, periodLabel: '' };
+}
+
+export function formatOtWorkClinicValue(
+  clinic: string,
+  amount: number = 1,
+  periodLabel?: HalfDayPeriod
+): string {
+  const clean = (clinic || '').trim();
+  if (!clean) return '';
+  if (amount === 0.5 && (periodLabel === 'ครึ่งวันเช้า' || periodLabel === 'ครึ่งวันบ่าย')) {
+    return `${clean} (0.5 ${periodLabel})`;
+  }
+  return clean;
+}
+
+export interface WorkloadLeavePayload {
+  staffName: string;
+  leaveType: LeaveType;
+  days?: number;
+  periodLabel?: HalfDayPeriod;
+  note: string;
+}
+
+export interface WorkloadCrossCoveragePayload {
+  direction?: 'outgoing' | 'incoming';
+  staffName: string;
+  position?: StaffPosition;
+  homeClinic?: string;
+  targetClinic: string;
+  amount?: number;
+  periodLabel?: HalfDayPeriod;
+  isExternal?: boolean;
+  affiliation?: string;
+  shift?: WorkShift;
+}
+
+export interface WorkloadTrainingPayload {
+  staffName: string;
+  topic: string;
+  note: string;
+}
+
+

@@ -19,7 +19,14 @@ import {
   LEAVE_TYPES,
   formatPositionLabel,
   getEffectiveTotalPt,
-  compareStaffByPositionAndStartDate
+  compareStaffByPositionAndStartDate,
+  HalfDayPeriod,
+  isTrainingLeaveType,
+  parseLeavePeriodFromNote,
+  parseOtWorkClinic,
+  WorkloadLeavePayload,
+  WorkloadCrossCoveragePayload,
+  WorkloadTrainingPayload,
 } from '../types';
 import {
   formatThaiShortDate,
@@ -53,8 +60,28 @@ import {
   Square,
   GraduationCap,
   CalendarOff,
-  AlertCircle
+  AlertCircle,
+  UserPlus
 } from 'lucide-react';
+
+interface LeaveSelectionDraft {
+  staffId: string;
+  leaveType: LeaveType;
+  days: 1 | 0.5;
+  periodLabel: HalfDayPeriod;
+  note: string;
+}
+
+interface CrossCoverageDraft {
+  tempId: string;
+  direction: 'outgoing' | 'incoming';
+  staffName: string;
+  position: StaffPosition;
+  otherClinic: string;
+  amount: 1 | 0.5;
+  periodLabel: HalfDayPeriod;
+  isExternal: boolean;
+}
 
 interface DailyWorkloadTabProps {
   workloads: DailyWorkload[];
@@ -67,15 +94,15 @@ interface DailyWorkloadTabProps {
   leaveTypes?: string[];
   onSaveWorkload: (
     entry: DailyWorkload, 
-    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
-    crossCoverageData?: { staffName: string; targetClinic: string } | null,
-    trainingData?: { staffName: string; topic: string; note: string }[] | null
+    leaveData?: WorkloadLeavePayload[] | null,
+    crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
+    trainingData?: WorkloadTrainingPayload[] | null
   ) => void;
   onSaveBatchWorkloads?: (
     entries: DailyWorkload[],
-    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
-    crossCoverageData?: { staffName: string; targetClinic: string } | null,
-    trainingData?: { staffName: string; topic: string; note: string }[] | null
+    leaveData?: WorkloadLeavePayload[] | null,
+    crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
+    trainingData?: WorkloadTrainingPayload[] | null
   ) => void;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
   onDeleteWorkload: (id: string, reason: string) => void;
@@ -137,10 +164,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
   // Section 4: Leave / Training-Meeting / Cross-Coverage
   const [hasStaffLeave, setHasStaffLeave] = useState<boolean>(false);
-  const [selectedLeaveStaffIds, setSelectedLeaveStaffIds] = useState<string[]>([]);
+  const [selectedLeaveItems, setSelectedLeaveItems] = useState<LeaveSelectionDraft[]>([]);
   const [leaveSearch, setLeaveSearch] = useState<string>('');
-  const [leaveType, setLeaveType] = useState<LeaveType>('ลาป่วย');
-  const [leaveNote, setLeaveNote] = useState<string>('');
 
   const [hasTraining, setHasTraining] = useState<boolean>(false);
   const [selectedTrainingStaffIds, setSelectedTrainingStaffIds] = useState<string[]>([]);
@@ -149,9 +174,15 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [trainingNote, setTrainingNote] = useState<string>('');
 
   const [hasCrossCover, setHasCrossCover] = useState<boolean>(false);
+  const [crossDirection, setCrossDirection] = useState<'outgoing' | 'incoming'>('outgoing');
+  const [crossIncomingSource, setCrossIncomingSource] = useState<'opd' | 'external'>('opd');
   const [crossStaffSearch, setCrossStaffSearch] = useState<string>('');
   const [crossStaffName, setCrossStaffName] = useState<string>('');
-  const [crossTargetClinic, setCrossTargetClinic] = useState<string>('');
+  const [crossExtPosition, setCrossExtPosition] = useState<StaffPosition>('RN');
+  const [crossOtherClinic, setCrossOtherClinic] = useState<string>('');
+  const [crossAmount, setCrossAmount] = useState<1 | 0.5>(1);
+  const [crossPeriod, setCrossPeriod] = useState<HalfDayPeriod>('');
+  const [crossItems, setCrossItems] = useState<CrossCoverageDraft[]>([]);
 
   // ศูนย์ปัญญาภิรมย์ sub-department inputs
   const [premiumInputs, setPremiumInputs] = useState<
@@ -159,15 +190,53 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   >({});
 
   const regularLeaveOptions = useMemo(() => {
-    const filtered = leaveTypes.filter(lt => lt !== 'ไปอบรม/ประชุม');
+    const filtered = leaveTypes.filter(lt => !isTrainingLeaveType(lt));
     return filtered.length > 0 ? filtered : ['ลาป่วย', 'ลากิจ', 'ลาพักผ่อน'];
   }, [leaveTypes]);
 
-  useEffect(() => {
-    if (regularLeaveOptions.length > 0 && !regularLeaveOptions.includes(leaveType)) {
-      setLeaveType(regularLeaveOptions[0]);
+  const effectiveCrossItems = useMemo(() => {
+    if (!hasCrossCover) return [];
+    const list = [...crossItems];
+    const draftName = crossStaffName.trim();
+    const draftClinic = crossOtherClinic.trim();
+    if (draftName && draftClinic) {
+      const alreadyAdded = list.some(
+        x =>
+          x.direction === crossDirection &&
+          x.staffName === draftName &&
+          x.otherClinic === draftClinic &&
+          x.periodLabel === crossPeriod
+      );
+      if (!alreadyAdded) {
+        const st = staffList.find(s => s.name === draftName);
+        list.push({
+          tempId: 'DRAFT-ACTIVE',
+          direction: crossDirection,
+          staffName: draftName,
+          position:
+            crossDirection === 'incoming' && crossIncomingSource === 'external'
+              ? crossExtPosition
+              : st?.position || 'RN',
+          otherClinic: draftClinic,
+          amount: crossAmount,
+          periodLabel: crossAmount === 0.5 ? (crossPeriod || 'ครึ่งวันเช้า') : '',
+          isExternal: crossDirection === 'incoming' && crossIncomingSource === 'external',
+        });
+      }
     }
-  }, [regularLeaveOptions, leaveType]);
+    return list;
+  }, [
+    hasCrossCover,
+    crossItems,
+    crossDirection,
+    crossIncomingSource,
+    crossStaffName,
+    crossExtPosition,
+    crossOtherClinic,
+    crossAmount,
+    crossPeriod,
+    staffList,
+  ]);
 
   // Shift & Clinics logic (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at bottom)
   const isOutTime = shift !== 'ในเวลา 08:00-16:00';
@@ -323,7 +392,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   );
 
   // Live 3-Point Verification across ALL 6 positions:
-  // (1) Working staff entered == (3) Full department roster - (2) Department-matched leaves/training/cross-cover + incoming substitutes
+  // (1) Working staff entered == (3) Full department roster - (2) Leaves & Outgoing Cross-Cover (0.5 / 1.0) + Incoming Cross-Cover/Substitute
+  // IMPORTANT BUSINESS RULE: "ไปอบรม/ประชุม" counts as normal workday (NOT leave / NOT subtracted)
   const dayStaffingCheck = useMemo(() => {
     const normalizeUnit = (c?: string) => {
       const trimmed = (c || '').trim();
@@ -378,14 +448,22 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       nursingPositions.includes(normalizePos(s.position))
     ).length;
 
-    const absentMap = new Map<string, { name: string; pos: StaffPosition; detail: string }>();
-    const incomingMap = new Map<string, { name: string; pos: StaffPosition; detail: string }>();
+    const absents: { name: string; pos: StaffPosition; amount: number; detail: string }[] = [];
+    const incomings: { name: string; pos: StaffPosition; amount: number; detail: string }[] = [];
+    const trainings: { name: string; pos: StaffPosition; detail: string }[] = [];
     const nonDeptSelections: string[] = [];
+    const conflictErrors: string[] = [];
+
+    const savedLeaveAmtByName = new Map<string, number>();
+    const savedLeavePeriodsByName = new Map<string, Set<HalfDayPeriod>>();
+    const trainingNameSet = new Set<string>();
+    const absentTrackKeys = new Set<string>();
+    const incomingTrackKeys = new Set<string>();
 
     const needsStrictValidation = !isOutTime && !(isPremiumClinic && existingPremiumPool);
 
     if (needsStrictValidation) {
-      // Saved leaves overlapping date for this department
+      // Saved leaves & training overlapping date for this department
       leaves.forEach(l => {
         const sDate = (l.startDate || '').trim();
         const eDate = (l.endDate || l.startDate || '').trim();
@@ -393,34 +471,80 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         const unit = normalizeUnit(l.clinic || staffUnitMap.get((l.staffName || '').trim()) || '');
         if (unit !== targetUnit) return;
         const name = (l.staffName || '').trim();
-        if (!name || absentMap.has(name)) return;
-        absentMap.set(name, {
+        if (!name) return;
+
+        if (isTrainingLeaveType(l.leaveType)) {
+          if (!trainingNameSet.has(name)) {
+            trainingNameSet.add(name);
+            trainings.push({
+              name,
+              pos: normalizePos(l.position),
+              detail: `${name} (ไปอบรม/ประชุม - ทำงานปกติ)`,
+            });
+          }
+          return;
+        }
+
+        const isSingleDayHalf = sDate === eDate && Number(l.days) === 0.5;
+        const amt = isSingleDayHalf ? 0.5 : 1;
+        const pLabel = isSingleDayHalf ? parseLeavePeriodFromNote(l.note) : '';
+        const tKey = `LV|${name}|${pLabel || 'FULL'}`;
+        if (absentTrackKeys.has(tKey)) return;
+        absentTrackKeys.add(tKey);
+
+        savedLeaveAmtByName.set(name, Math.min(1, (savedLeaveAmtByName.get(name) || 0) + amt));
+        if (!savedLeavePeriodsByName.has(name)) savedLeavePeriodsByName.set(name, new Set());
+        savedLeavePeriodsByName.get(name)!.add(pLabel);
+
+        absents.push({
           name,
           pos: normalizePos(l.position),
-          detail: `${name} (${l.leaveType})`,
+          amount: amt,
+          detail: `${name} (${l.leaveType}${isSingleDayHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''})`,
         });
       });
 
-      // Selected in Section 4 Block 1: Leave
+      // Selected in Section 4 Block 1: Per-person Leave
       if (hasStaffLeave) {
-        selectedLeaveStaffIds.forEach(id => {
-          const st = staffList.find(s => s.staffId === id);
+        selectedLeaveItems.forEach(item => {
+          const st = staffList.find(s => s.staffId === item.staffId);
           if (!st) return;
           if (normalizeUnit(st.homeClinic) !== targetUnit) {
             nonDeptSelections.push(`${st.name} (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
             return;
           }
-          if (!absentMap.has(st.name)) {
-            absentMap.set(st.name, {
+          const existingSavedAmt = savedLeaveAmtByName.get(st.name) || 0;
+          const existingPeriods = savedLeavePeriodsByName.get(st.name);
+          const itemPeriod: HalfDayPeriod =
+            item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '';
+
+          if (existingSavedAmt >= 1) {
+            conflictErrors.push(`${st.name} มีประวัติลาเต็มวันบันทึกไว้แล้วในวันนี้ (1 คนลาได้ 1 รายการ/วัน)`);
+            return;
+          }
+          if (existingSavedAmt + item.days > 1) {
+            conflictErrors.push(`${st.name} มีวันลาบันทึกไว้แล้ว 0.5 วัน ไม่สามารถเพิ่มลาเต็มวันซ้ำได้`);
+            return;
+          }
+          if (existingPeriods && itemPeriod && existingPeriods.has(itemPeriod)) {
+            conflictErrors.push(`${st.name} มีประวัติ${itemPeriod}บันทึกไว้แล้วในวันนี้`);
+            return;
+          }
+
+          const tKey = `LV|${st.name}|${itemPeriod || 'FULL'}`;
+          if (!absentTrackKeys.has(tKey)) {
+            absentTrackKeys.add(tKey);
+            absents.push({
               name: st.name,
               pos: normalizePos(st.position),
-              detail: `${st.name} (${leaveType})`,
+              amount: item.days,
+              detail: `${st.name} (${item.leaveType}${item.days === 0.5 ? ` 0.5 ${itemPeriod}` : ''})`,
             });
           }
         });
       }
 
-      // Selected in Section 4 Block 2: Training / Meeting
+      // Selected in Section 4 Block 2: Training / Meeting (Normal workday - NOT subtracted)
       if (hasTraining) {
         selectedTrainingStaffIds.forEach(id => {
           const st = staffList.find(s => s.staffId === id);
@@ -429,11 +553,18 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             nonDeptSelections.push(`${st.name} ไปอบรม/ประชุม (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
             return;
           }
-          if (!absentMap.has(st.name)) {
-            absentMap.set(st.name, {
+          const leaveSum = absents
+            .filter(a => a.name === st.name && a.detail && !a.detail.includes('ไปช่วย'))
+            .reduce((s, a) => s + a.amount, 0);
+          if (leaveSum >= 1) {
+            conflictErrors.push(`${st.name} ถูกระบุลาเต็มวันแล้ว ไม่สามารถเลือกไปอบรม/ประชุมเต็มวันซ้ำได้`);
+          }
+          if (!trainingNameSet.has(st.name)) {
+            trainingNameSet.add(st.name);
+            trainings.push({
               name: st.name,
               pos: normalizePos(st.position),
-              detail: `${st.name} (ไปอบรม/ประชุม)`,
+              detail: `${st.name} (ไปอบรม/ประชุม - ทำงานปกติ)`,
             });
           }
         });
@@ -443,15 +574,22 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       otRecords.forEach(o => {
         if (o.date !== date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
+        const parsedWork = parseOtWorkClinic(o.workClinic);
         const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get((o.staffName || '').trim()) || '');
-        const wUnit = normalizeUnit(o.workClinic || '');
+        const wUnit = normalizeUnit(parsedWork.clinic);
         const pos = normalizePos(o.position);
+        const amt = parsedWork.amount;
+        const pSuffix = amt === 0.5 && parsedWork.periodLabel ? ` 0.5 ${parsedWork.periodLabel}` : '';
+
         if (hUnit === targetUnit && wUnit !== targetUnit && wUnit) {
-          if (!absentMap.has(o.staffName)) {
-            absentMap.set(o.staffName, {
+          const tKey = `OUT|${o.staffName}|${wUnit}|${parsedWork.periodLabel || 'FULL'}`;
+          if (!absentTrackKeys.has(tKey)) {
+            absentTrackKeys.add(tKey);
+            absents.push({
               name: o.staffName,
               pos,
-              detail: `${o.staffName} (ไปช่วย ${o.workClinic})`,
+              amount: amt,
+              detail: `${o.staffName} (ไปช่วย ${parsedWork.clinic}${pSuffix})`,
             });
           }
         }
@@ -459,38 +597,69 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           wUnit === targetUnit &&
           (hUnit !== targetUnit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00')
         ) {
-          if (!incomingMap.has(o.staffName)) {
+          const tKey = `IN|${o.staffName}|${parsedWork.periodLabel || 'FULL'}`;
+          if (!incomingTrackKeys.has(tKey)) {
+            incomingTrackKeys.add(tKey);
             const src = o.affiliation || (hUnit !== targetUnit ? o.homeClinic : '');
-            incomingMap.set(o.staffName, {
+            incomings.push({
               name: o.staffName,
               pos,
+              amount: amt,
               detail: `${o.staffName} (${
                 o.shift === 'OT ในเวลาราชการ 08:00-16:00' || o.isExternal ? 'ขึ้นแทน' : 'มาช่วย'
-              }${src ? ` จาก ${src}` : ''})`,
+              }${src ? ` จาก ${src}` : ''}${pSuffix})`,
             });
           }
         }
       });
 
-      // Selected in Section 4 Block 3: Cross-Cover
-      if (hasCrossCover && crossStaffName && crossTargetClinic) {
-        const st = staffList.find(s => s.name === crossStaffName);
-        if (st) {
+      // Selected in Section 4 Block 3: Outgoing & Incoming Cross-Cover (0.5 or 1.0)
+      effectiveCrossItems.forEach(item => {
+        const amt = item.amount === 0.5 ? 0.5 : 1;
+        const pSuffix = amt === 0.5 && item.periodLabel ? ` 0.5 ${item.periodLabel}` : '';
+        if (item.direction === 'outgoing') {
+          const st = staffList.find(s => s.name === item.staffName);
+          if (!st) return;
           if (normalizeUnit(st.homeClinic) !== targetUnit) {
             nonDeptSelections.push(`${st.name} ไปช่วยห้องอื่น (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
-          } else if (normalizeUnit(crossTargetClinic) !== targetUnit && !absentMap.has(st.name)) {
-            absentMap.set(st.name, {
-              name: st.name,
-              pos: normalizePos(st.position),
-              detail: `${st.name} (ไปช่วย ${crossTargetClinic})`,
+            return;
+          }
+          const destUnit = normalizeUnit(item.otherClinic);
+          if (destUnit && destUnit !== targetUnit) {
+            const tKey = `OUT|${st.name}|${destUnit}|${item.periodLabel || 'FULL'}`;
+            if (!absentTrackKeys.has(tKey)) {
+              absentTrackKeys.add(tKey);
+              absents.push({
+                name: st.name,
+                pos: normalizePos(st.position),
+                amount: amt,
+                detail: `${st.name} (ไปช่วย ${item.otherClinic}${pSuffix})`,
+              });
+            }
+          }
+        } else {
+          // Incoming helper to current unit
+          const srcUnit = normalizeUnit(item.otherClinic);
+          if (!item.isExternal && srcUnit === targetUnit) {
+            conflictErrors.push(`${item.staffName} เป็นสมาชิกแผนก ${clinic} อยู่แล้ว กรุณาเลือกผู้มาช่วยจากแผนกอื่น`);
+            return;
+          }
+          const tKey = `IN|${item.staffName}|${item.periodLabel || 'FULL'}`;
+          if (!incomingTrackKeys.has(tKey)) {
+            incomingTrackKeys.add(tKey);
+            incomings.push({
+              name: item.staffName,
+              pos: normalizePos(item.position),
+              amount: amt,
+              detail: `${item.staffName} (${item.isExternal ? 'ขึ้นแทน' : 'มาช่วย'} จาก ${item.otherClinic}${pSuffix})`,
             });
           }
         }
-      }
+      });
     }
 
-    const absents = Array.from(absentMap.values());
-    const incomings = Array.from(incomingMap.values());
+    const totalAbsentAll = Number(absents.reduce((s, a) => s + a.amount, 0).toFixed(1));
+    const totalIncomingAll = Number(incomings.reduce((s, i) => s + i.amount, 0).toFixed(1));
 
     const enteredByPos: Record<StaffPosition, number> = {
       HN: Number(hn) || 0,
@@ -515,9 +684,19 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     const positionRows = ALL_POSITIONS.map(pos => {
       const full = baselineStaff.filter(s => normalizePos(s.position) === pos).length;
       const working = enteredByPos[pos] || 0;
-      const absent = absents.filter(a => a.pos === pos).length;
-      const incoming = incomings.filter(i => i.pos === pos).length;
-      const expectedWorking = Math.max(0, full - absent + incoming);
+      const absent = Number(
+        absents
+          .filter(a => a.pos === pos)
+          .reduce((s, a) => s + a.amount, 0)
+          .toFixed(1)
+      );
+      const incoming = Number(
+        incomings
+          .filter(i => i.pos === pos)
+          .reduce((s, i) => s + i.amount, 0)
+          .toFixed(1)
+      );
+      const expectedWorking = Math.max(0, Number((full - absent + incoming).toFixed(1)));
       const accounted = Number((working + absent - incoming).toFixed(1));
       const diff = Number((accounted - full).toFixed(1));
       const isBalanced = Math.abs(diff) < 0.001;
@@ -526,13 +705,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       if (!isBalanced) {
         if (diff < 0) {
           const lack = Math.abs(diff);
-          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ช่วยงาน (${absent})${
-            incoming > 0 ? ` − มาแทน (${incoming})` : ''
-          } = ${accounted} คน (ต้องบันทึกผู้ลา/อบรม/ไปช่วยในแผนกเพิ่ม ${lack} คน หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/ไปช่วย (${absent})${
+            incoming > 0 ? ` − มาช่วย (${incoming})` : ''
+          } = ${accounted} คน (ต้องระบุผู้ลาหรือไปช่วยห้องอื่นเพิ่ม ${lack} แรง หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
         } else {
-          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ช่วยงาน (${absent})${
-            incoming > 0 ? ` − มาแทน (${incoming})` : ''
-          } = ${accounted} คน (เกินจำนวนเต็ม ${diff} คน — ต้องไม่ลา/ลดยอดลา ${diff} คน หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/ไปช่วย (${absent})${
+            incoming > 0 ? ` − มาช่วย (${incoming})` : ''
+          } = ${accounted} คน (เกินจำนวนเต็ม +${diff} แรง — หากมีคนจากห้องอื่น/ภายนอกมาช่วย ${diff} แรง ให้เพิ่มในหัวข้อ 'ไปช่วย/รับคนมาช่วย' หรือลดยอดลา/ปรับปฏิบัติงานเป็น ${expectedWorking})`;
         }
       }
 
@@ -565,18 +744,25 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     const expectedClerk = getExpected('Clerk');
     const expectedServiceWorker = getExpected('Service Worker');
 
-    const expectedTotalNursing = expectedRN + expectedPN + expectedNA;
+    const expectedTotalNursing = Number((expectedRN + expectedPN + expectedNA).toFixed(1));
     const enteredTotalNursing = Number((rn + pn + na).toFixed(1));
-    const expectedTotalAll = Math.max(0, baseTotalAll - absents.length + incomings.length);
+    const expectedTotalAll = Math.max(
+      0,
+      Number((baseTotalAll - totalAbsentAll + totalIncomingAll).toFixed(1))
+    );
     const enteredTotalAll = Number((hn + rn + pn + na + clerk + serviceWorker).toFixed(1));
 
     const isStrictActive = needsStrictValidation && baseTotalAll > 0;
     const allPositionsBalanced = positionRows.every(r => r.isBalanced);
     const hasNonDeptIssue = needsStrictValidation && nonDeptSelections.length > 0;
+    const hasConflictIssue = needsStrictValidation && conflictErrors.length > 0;
 
     const validationErrors: string[] = [];
     if (hasNonDeptIssue) {
       validationErrors.push(`พบรายชื่อที่เลือกไม่ได้สังกัดแผนก ${clinic}: ${nonDeptSelections.join(', ')}`);
+    }
+    if (hasConflictIssue) {
+      validationErrors.push(...conflictErrors);
     }
     if (isStrictActive) {
       positionRows.forEach(r => {
@@ -586,7 +772,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       });
     }
 
-    const canSave3Points = !hasNonDeptIssue && (!isStrictActive || allPositionsBalanced);
+    const canSave3Points =
+      !hasNonDeptIssue && !hasConflictIssue && (!isStrictActive || allPositionsBalanced);
 
     return {
       isOutTime,
@@ -596,6 +783,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       baseTotalAll,
       absents,
       incomings,
+      trainings,
+      totalAbsentAll,
+      totalIncomingAll,
       nonDeptSelections,
       positionRows,
       activePositionRows,
@@ -612,7 +802,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       diff: Number((enteredTotalAll - expectedTotalAll).toFixed(1)),
       canSave3Points,
       validationErrors,
-      isMatch: baseTotalAll > 0 && allPositionsBalanced && !hasNonDeptIssue,
+      isMatch: baseTotalAll > 0 && allPositionsBalanced && !hasNonDeptIssue && !hasConflictIssue,
     };
   }, [
     date,
@@ -630,13 +820,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     clerk,
     serviceWorker,
     hasStaffLeave,
-    selectedLeaveStaffIds,
-    leaveType,
+    selectedLeaveItems,
     hasTraining,
     selectedTrainingStaffIds,
-    hasCrossCover,
-    crossStaffName,
-    crossTargetClinic,
+    effectiveCrossItems,
     premiumSubClinics,
   ]);
 
@@ -665,24 +852,26 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
     if (!dayStaffingCheck.canSave3Points) {
       setFormError(
-        `ไม่สามารถบันทึกภาระงานได้ — ข้อมูล 3 จุด (ปฏิบัติงานจริง + วันลา/อบรม/ช่วยงานในแผนก + จำนวนเต็มประจำแผนก) ไม่ตรงกัน: ${dayStaffingCheck.validationErrors.join(' | ')}`
+        `ไม่สามารถบันทึกภาระงานได้ — ข้อมูล 3 จุด (ปฏิบัติงานจริง + วันลา/ช่วยงานในแผนก + จำนวนเต็มประจำแผนก) ไม่ตรงกัน: ${dayStaffingCheck.validationErrors.join(' | ')}`
       );
       return;
     }
 
-    let leaveData = null;
-    if (hasStaffLeave && selectedLeaveStaffIds.length > 0) {
-      leaveData = selectedLeaveStaffIds.map(staffId => {
-        const staff = staffList.find(s => s.staffId === staffId);
+    let leaveData: WorkloadLeavePayload[] | null = null;
+    if (hasStaffLeave && selectedLeaveItems.length > 0) {
+      leaveData = selectedLeaveItems.map(item => {
+        const staff = staffList.find(s => s.staffId === item.staffId);
         return {
-          staffName: staff?.name || staffId,
-          leaveType,
-          note: leaveNote || `บันทึกอัตโนมัติจากห้องตรวจ ${clinic}`,
+          staffName: staff?.name || item.staffId,
+          leaveType: item.leaveType,
+          days: item.days,
+          periodLabel: item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '',
+          note: item.note.trim() || `บันทึกอัตโนมัติจากห้องตรวจ ${clinic}`,
         };
       });
     }
 
-    let trainingData = null;
+    let trainingData: WorkloadTrainingPayload[] | null = null;
     if (hasTraining && selectedTrainingStaffIds.length > 0) {
       trainingData = selectedTrainingStaffIds.map(staffId => {
         const staff = staffList.find(s => s.staffId === staffId);
@@ -694,12 +883,37 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       });
     }
 
-    let crossCoverageData = null;
-    if (hasCrossCover && crossStaffName && crossTargetClinic) {
-      crossCoverageData = {
-        staffName: crossStaffName,
-        targetClinic: crossTargetClinic,
-      };
+    let crossCoverageData: WorkloadCrossCoveragePayload[] | null = null;
+    if (hasCrossCover && effectiveCrossItems.length > 0) {
+      crossCoverageData = effectiveCrossItems.map(item => {
+        if (item.direction === 'outgoing') {
+          const st = staffList.find(s => s.name === item.staffName);
+          return {
+            direction: 'outgoing',
+            staffName: item.staffName,
+            position: st?.position || item.position,
+            homeClinic: st?.homeClinic || clinic,
+            targetClinic: item.otherClinic,
+            amount: item.amount,
+            periodLabel: item.amount === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '',
+            isExternal: false,
+            shift,
+          };
+        }
+        const st = staffList.find(s => s.name === item.staffName);
+        return {
+          direction: 'incoming',
+          staffName: item.staffName,
+          position: item.isExternal ? item.position : st?.position || item.position,
+          homeClinic: item.otherClinic,
+          targetClinic: clinic,
+          amount: item.amount,
+          periodLabel: item.amount === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '',
+          isExternal: item.isExternal,
+          affiliation: item.isExternal ? item.otherClinic : undefined,
+          shift: item.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : shift,
+        };
+      });
     }
 
     if (isPremiumClinic) {
@@ -795,9 +1009,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setPremiumInputs({});
       setNote('');
       setHasStaffLeave(false);
-      setSelectedLeaveStaffIds([]);
+      setSelectedLeaveItems([]);
       setLeaveSearch('');
-      setLeaveNote('');
       setHasTraining(false);
       setSelectedTrainingStaffIds([]);
       setTrainingSearch('');
@@ -806,7 +1019,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setHasCrossCover(false);
       setCrossStaffSearch('');
       setCrossStaffName('');
-      setCrossTargetClinic('');
+      setCrossOtherClinic('');
+      setCrossAmount(1);
+      setCrossPeriod('');
+      setCrossItems([]);
       return;
     }
 
@@ -847,9 +1063,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setAdmit(0);
     setNote('');
     setHasStaffLeave(false);
-    setSelectedLeaveStaffIds([]);
+    setSelectedLeaveItems([]);
     setLeaveSearch('');
-    setLeaveNote('');
     setHasTraining(false);
     setSelectedTrainingStaffIds([]);
     setTrainingSearch('');
@@ -858,7 +1073,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setHasCrossCover(false);
     setCrossStaffSearch('');
     setCrossStaffName('');
-    setCrossTargetClinic('');
+    setCrossOtherClinic('');
+    setCrossAmount(1);
+    setCrossPeriod('');
+    setCrossItems([]);
   };
 
   // Filter workloads for selected date
@@ -1337,16 +1555,16 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       <div>
                         <div className="font-bold">
                           ตรวจเช็กความสัมพันธ์ 3 จุด แผนก {clinic}: ประจำทั้งหมด {dayStaffingCheck.baseTotalAll} คน
-                          {dayStaffingCheck.absents.length > 0 && ` − ลา/อบรม/ไปช่วย ${dayStaffingCheck.absents.length} คน`}
-                          {dayStaffingCheck.incomings.length > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.incomings.length} คน`}
-                          {` = คาดการณ์ปฏิบัติงาน ${dayStaffingCheck.expectedTotalAll} คน`}
+                          {dayStaffingCheck.totalAbsentAll > 0 && ` − ลา/ไปช่วย ${dayStaffingCheck.totalAbsentAll} แรง`}
+                          {dayStaffingCheck.totalIncomingAll > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.totalIncomingAll} แรง`}
+                          {` = คาดการณ์ปฏิบัติงาน ${dayStaffingCheck.expectedTotalAll} แรง`}
                           <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${
                             dayStaffingCheck.canSave3Points ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
                           }`}>
                             {dayStaffingCheck.canSave3Points ? 'ตรงกันครบทุกตำแหน่ง (บันทึกได้)' : 'ไม่ตรงจำนวนเต็ม (ยังบันทึกไม่ได้)'}
                           </span>
                         </div>
-                        {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0) && (
+                        {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0 || dayStaffingCheck.trainings.length > 0) && (
                           <div className="text-[10.5px] opacity-90 flex flex-wrap gap-1.5 pt-1">
                             {dayStaffingCheck.absents.map((a, idx) => (
                               <span key={`ab-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-amber-200 text-amber-950 font-medium">
@@ -1356,6 +1574,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                             {dayStaffingCheck.incomings.map((inc, idx) => (
                               <span key={`inc-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-emerald-200 text-emerald-900 font-medium">
                                 {inc.detail}
+                              </span>
+                            ))}
+                            {dayStaffingCheck.trainings.map((tr, idx) => (
+                              <span key={`tr-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-cyan-200 text-cyan-900 font-medium">
+                                {tr.detail}
                               </span>
                             ))}
                           </div>
@@ -1394,7 +1617,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                           </span>
                         </div>
                         <div className="text-[10px] text-gray-600 mt-0.5">
-                          เต็ม <strong>{r.full}</strong> | ทำจริง <strong>{r.working}</strong> | ลา/อบรม <strong>{r.absent}</strong>
+                          เต็ม <strong>{r.full}</strong> | ทำจริง <strong>{r.working}</strong> | ลา/ช่วยงาน <strong>{r.absent}</strong>
                           {r.incoming > 0 ? ` | แทน +${r.incoming}` : ''}
                         </div>
                       </div>
@@ -1642,9 +1865,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   >
                     <CalendarOff className="w-3.5 h-3.5" />
                     <span>มีเจ้าหน้าที่ลา</span>
-                    {selectedLeaveStaffIds.length > 0 && (
+                    {selectedLeaveItems.length > 0 && (
                       <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasStaffLeave ? 'bg-white/25 text-white' : 'bg-amber-100 text-amber-800'}`}>
-                        {selectedLeaveStaffIds.length}
+                        {selectedLeaveItems.length}
                       </span>
                     )}
                   </button>
@@ -1659,7 +1882,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     }`}
                   >
                     <GraduationCap className="w-3.5 h-3.5" />
-                    <span>ไปอบรม/ประชุม</span>
+                    <span>ไปอบรม/ประชุม (ทำงานปกติ)</span>
                     {selectedTrainingStaffIds.length > 0 && (
                       <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasTraining ? 'bg-white/25 text-white' : 'bg-cyan-100 text-cyan-800'}`}>
                         {selectedTrainingStaffIds.length}
@@ -1677,48 +1900,33 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     }`}
                   >
                     <ArrowRightLeft className="w-3.5 h-3.5" />
-                    <span>ไปช่วยห้องอื่น</span>
+                    <span>ไปช่วย/รับคนมาช่วย (0.5/1 แรง)</span>
+                    {effectiveCrossItems.length > 0 && (
+                      <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasCrossCover ? 'bg-white/25 text-white' : 'bg-emerald-100 text-emerald-800'}`}>
+                        {effectiveCrossItems.length}
+                      </span>
+                    )}
                   </button>
                 </div>
               </div>
 
-              {/* Block 1: Staff Leave (Multi-select + Type-to-search) */}
+              {/* Block 1: Staff Leave (Per-person Leave Type + Full/Half Morning/Afternoon) */}
               {hasStaffLeave && (
                 <div className="bg-white rounded-xl border border-amber-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
-                  <div className="flex items-center justify-between border-b border-amber-100 pb-2">
-                    <span className="font-bold text-amber-950 flex items-center gap-1.5">
-                      <CalendarOff className="w-4 h-4 text-amber-600" />
-                      1. รายชื่อเจ้าหน้าที่ที่ลาวันนี้ (สมาชิกแผนก {clinic})
-                    </span>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100 pb-2">
+                    <div>
+                      <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                        <CalendarOff className="w-4 h-4 text-amber-600" />
+                        1. รายชื่อเจ้าหน้าที่ที่ลาวันนี้ (สมาชิกแผนก {clinic})
+                      </span>
+                      <span className="text-[10.5px] text-amber-700">
+                        เจ้าหน้าที่ 1 คนเลือกการลาได้ 1 ประเภท พร้อมระบุเต็มวัน หรือ ครึ่งวันเช้า/บ่าย (0.5 แรง) แยกรายบุคคล
+                      </span>
+                    </div>
                     <span className="text-[11px] font-semibold text-amber-700">
-                      เลือกแล้ว {selectedLeaveStaffIds.length} คน
+                      เลือกแล้ว {selectedLeaveItems.length} คน
                     </span>
                   </div>
-
-                  {/* Selected Chips */}
-                  {selectedLeaveStaffIds.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {selectedLeaveStaffIds.map(id => {
-                        const s = staffList.find(st => st.staffId === id);
-                        if (!s) return null;
-                        return (
-                          <span
-                            key={id}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-[11px]"
-                          >
-                            <span>{s.name} ({formatPositionLabel(s.position)})</span>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedLeaveStaffIds(prev => prev.filter(x => x !== id))}
-                              className="text-amber-600 hover:text-red-600 cursor-pointer"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
 
                   {/* Search Input */}
                   <div className="relative">
@@ -1741,7 +1949,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     )}
                   </div>
 
-                  {/* Clean Scrollable Picker (scoped to current clinic staff when available) */}
+                  {/* Searchable Staff Picker (1 person max 1 leave entry) */}
                   <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
                     {(clinicStaff.length > 0 ? clinicStaff : activeStaffAll)
                       .filter(s => {
@@ -1755,31 +1963,71 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         );
                       })
                       .map(s => {
-                        const checked = selectedLeaveStaffIds.includes(s.staffId);
+                        const checked = selectedLeaveItems.some(it => it.staffId === s.staffId);
+                        const existingSavedLeaves = leaves.filter(l => {
+                          if (isTrainingLeaveType(l.leaveType)) return false;
+                          const sDate = (l.startDate || '').trim();
+                          const eDate = (l.endDate || l.startDate || '').trim();
+                          return l.staffName === s.name && sDate && date >= sDate && date <= eDate;
+                        });
+                        const savedDaysTotal = existingSavedLeaves.reduce(
+                          (sum, l) => sum + (l.startDate === l.endDate && Number(l.days) === 0.5 ? 0.5 : 1),
+                          0
+                        );
+                        const isBlockedFull = savedDaysTotal >= 1;
+
                         return (
                           <div
                             key={s.staffId}
                             onClick={() => {
-                              setSelectedLeaveStaffIds(prev =>
-                                checked ? prev.filter(id => id !== s.staffId) : [...prev, s.staffId]
-                              );
+                              if (isBlockedFull && !checked) return;
+                              setSelectedLeaveItems(prev => {
+                                if (checked) {
+                                  return prev.filter(it => it.staffId !== s.staffId);
+                                }
+                                const existingPeriod = existingSavedLeaves[0]
+                                  ? parseLeavePeriodFromNote(existingSavedLeaves[0].note)
+                                  : '';
+                                const defaultHalf = existingSavedLeaves.length > 0;
+                                const defaultPeriod: HalfDayPeriod = defaultHalf
+                                  ? existingPeriod === 'ครึ่งวันเช้า'
+                                    ? 'ครึ่งวันบ่าย'
+                                    : 'ครึ่งวันเช้า'
+                                  : '';
+                                return [
+                                  ...prev,
+                                  {
+                                    staffId: s.staffId,
+                                    leaveType: regularLeaveOptions[0] || 'ลาป่วย',
+                                    days: defaultHalf ? 0.5 : 1,
+                                    periodLabel: defaultPeriod,
+                                    note: '',
+                                  },
+                                ];
+                              });
                             }}
-                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-all ${
-                              checked
-                                ? 'bg-amber-50/90 border-amber-300 text-amber-950 font-semibold'
-                                : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700'
+                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border transition-all ${
+                              isBlockedFull && !checked
+                                ? 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed'
+                                : checked
+                                  ? 'bg-amber-50/90 border-amber-300 text-amber-950 font-semibold cursor-pointer'
+                                  : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700 cursor-pointer'
                             }`}
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
                               {checked ? (
                                 <CheckSquare className="w-4 h-4 text-amber-600 shrink-0" />
                               ) : (
                                 <Square className="w-4 h-4 text-gray-300 shrink-0" />
                               )}
-                              <span>{s.name}</span>
-                              <span className="text-[10px] text-gray-400">({s.homeClinic})</span>
+                              <span className="truncate">{s.name}</span>
+                              {savedDaysTotal > 0 && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold shrink-0">
+                                  {savedDaysTotal >= 1 ? 'ลาเต็มวันแล้ว' : 'มีลา 0.5 วันแล้ว'}
+                                </span>
+                              )}
                             </div>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold shrink-0">
                               {formatPositionLabel(s.position)}
                             </span>
                           </div>
@@ -1787,41 +2035,139 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       })}
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-                    <div>
-                      <label className="block font-semibold text-gray-700 mb-1">ประเภทการลา</label>
-                      <select
-                        value={leaveType}
-                        onChange={(e) => setLeaveType(e.target.value as LeaveType)}
-                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
-                      >
-                        {regularLeaveOptions.map(lt => (
-                          <option key={lt} value={lt}>{lt}</option>
-                        ))}
-                      </select>
+                  {/* Per-Person Leave Configuration Cards */}
+                  {selectedLeaveItems.length > 0 && (
+                    <div className="space-y-2 pt-1">
+                      <div className="text-[11px] font-bold text-amber-900">
+                        กำหนดประเภทการลาและช่วงเวลารายบุคคล ({selectedLeaveItems.length} คน):
+                      </div>
+                      {selectedLeaveItems.map(item => {
+                        const s = staffList.find(st => st.staffId === item.staffId);
+                        if (!s) return null;
+                        const periodSelectValue =
+                          item.days === 1
+                            ? 'FULL'
+                            : item.periodLabel === 'ครึ่งวันบ่าย'
+                              ? 'HALF_PM'
+                              : 'HALF_AM';
+                        return (
+                          <div
+                            key={item.staffId}
+                            className="p-2.5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-bold text-amber-950 truncate">{s.name}</span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-amber-200 text-amber-800 font-semibold shrink-0">
+                                  {formatPositionLabel(s.position)}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedLeaveItems(prev =>
+                                    prev.filter(x => x.staffId !== item.staffId)
+                                  )
+                                }
+                                className="text-amber-600 hover:text-red-600 p-0.5 cursor-pointer"
+                                title="นำรายชื่อออก"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[10.5px] font-semibold text-gray-700 mb-0.5">
+                                  ประเภทการลา
+                                </label>
+                                <select
+                                  value={item.leaveType}
+                                  onChange={(e) =>
+                                    setSelectedLeaveItems(prev =>
+                                      prev.map(x =>
+                                        x.staffId === item.staffId
+                                          ? { ...x, leaveType: e.target.value as LeaveType }
+                                          : x
+                                      )
+                                    )
+                                  }
+                                  className="w-full rounded-lg border border-amber-200 py-1 px-2 text-xs bg-white font-medium"
+                                >
+                                  {regularLeaveOptions.map(lt => (
+                                    <option key={lt} value={lt}>{lt}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10.5px] font-semibold text-gray-700 mb-0.5">
+                                  ช่วงเวลา / จำนวนแรง
+                                </label>
+                                <select
+                                  value={periodSelectValue}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setSelectedLeaveItems(prev =>
+                                      prev.map(x => {
+                                        if (x.staffId !== item.staffId) return x;
+                                        if (v === 'HALF_AM') {
+                                          return { ...x, days: 0.5, periodLabel: 'ครึ่งวันเช้า' };
+                                        }
+                                        if (v === 'HALF_PM') {
+                                          return { ...x, days: 0.5, periodLabel: 'ครึ่งวันบ่าย' };
+                                        }
+                                        return { ...x, days: 1, periodLabel: '' };
+                                      })
+                                    );
+                                  }}
+                                  className="w-full rounded-lg border border-amber-200 py-1 px-2 text-xs bg-white font-medium"
+                                >
+                                  <option value="FULL">เต็มวัน (1.0 วัน)</option>
+                                  <option value="HALF_AM">ครึ่งวันเช้า (0.5 วัน)</option>
+                                  <option value="HALF_PM">ครึ่งวันบ่าย (0.5 วัน)</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10.5px] font-semibold text-gray-700 mb-0.5">
+                                  หมายเหตุเฉพาะบุคคล
+                                </label>
+                                <input
+                                  type="text"
+                                  value={item.note}
+                                  onChange={(e) =>
+                                    setSelectedLeaveItems(prev =>
+                                      prev.map(x =>
+                                        x.staffId === item.staffId
+                                          ? { ...x, note: e.target.value }
+                                          : x
+                                      )
+                                    )
+                                  }
+                                  placeholder="เช่น มีไข้, กิจธุระส่วนตัว"
+                                  className="w-full rounded-lg border border-amber-200 py-1 px-2 text-xs bg-white"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div>
-                      <label className="block font-semibold text-gray-700 mb-1">หมายเหตุการลา</label>
-                      <input
-                        type="text"
-                        value={leaveNote}
-                        onChange={(e) => setLeaveNote(e.target.value)}
-                        placeholder="เช่น มีไข้หวัด, กิจธุระส่วนตัว"
-                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs"
-                      />
-                    </div>
-                  </div>
+                  )}
                 </div>
               )}
 
-              {/* Block 2: Training / Meeting (Multi-select + Type-to-search) */}
+              {/* Block 2: Training / Meeting (Normal workday - NOT leave) */}
               {hasTraining && (
                 <div className="bg-white rounded-xl border border-cyan-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
-                  <div className="flex items-center justify-between border-b border-cyan-100 pb-2">
-                    <span className="font-bold text-cyan-950 flex items-center gap-1.5">
-                      <GraduationCap className="w-4 h-4 text-cyan-600" />
-                      2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (สมาชิกแผนก {clinic})
-                    </span>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-100 pb-2">
+                    <div>
+                      <span className="font-bold text-cyan-950 flex items-center gap-1.5">
+                        <GraduationCap className="w-4 h-4 text-cyan-600" />
+                        2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (สมาชิกแผนก {clinic})
+                      </span>
+                      <span className="text-[10.5px] text-cyan-700 font-medium">
+                        การไปอบรม/ประชุม ถือเป็นวันทำงานตามปกติ (ไม่นับเป็นวันลาและไม่หักยอดกำลังคน)
+                      </span>
+                    </div>
                     <span className="text-[11px] font-semibold text-cyan-700">
                       เลือกแล้ว {selectedTrainingStaffIds.length} คน
                     </span>
@@ -1944,58 +2290,337 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               )}
 
-              {/* Block 3: Cross-Coverage input block */}
+              {/* Block 3: Outgoing & Incoming Cross-Coverage (Supports 0.5 Morning/Afternoon & 1.0 Full Day) */}
               {hasCrossCover && (
-                <div className="bg-white rounded-xl border border-emerald-200/90 p-3.5 space-y-2.5 shadow-2xs text-xs">
-                  <div className="font-bold text-emerald-950 flex items-center gap-1.5 border-b border-emerald-100 pb-2">
-                    <ArrowRightLeft className="w-4 h-4 text-emerald-600" />
-                    <span>3. เจ้าหน้าที่ไปช่วยปฏิบัติงานห้องตรวจอื่น</span>
+                <div className="bg-white rounded-xl border border-emerald-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-100 pb-2">
+                    <div className="font-bold text-emerald-950 flex items-center gap-1.5">
+                      <ArrowRightLeft className="w-4 h-4 text-emerald-600" />
+                      <span>3. การช่วยงานข้ามห้องตรวจ (รองรับ 0.5 ครึ่งวันเช้า/บ่าย และ 1.0 เต็มวัน)</span>
+                    </div>
+                    <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50/50 p-0.5 text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCrossDirection('outgoing');
+                          setCrossStaffName('');
+                          setCrossOtherClinic('');
+                          setCrossStaffSearch('');
+                        }}
+                        className={`px-2.5 py-1 rounded-md cursor-pointer transition-all ${
+                          crossDirection === 'outgoing'
+                            ? 'bg-emerald-700 text-white shadow-2xs'
+                            : 'text-emerald-900 hover:bg-white'
+                        }`}
+                      >
+                        ส่งคนไปช่วยห้องอื่น (−แรง)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCrossDirection('incoming');
+                          setCrossStaffName('');
+                          setCrossOtherClinic('');
+                          setCrossStaffSearch('');
+                        }}
+                        className={`px-2.5 py-1 rounded-md cursor-pointer transition-all ${
+                          crossDirection === 'incoming'
+                            ? 'bg-indigo-700 text-white shadow-2xs'
+                            : 'text-indigo-900 hover:bg-white'
+                        }`}
+                      >
+                        มีคนจากหน่วยอื่นมาช่วย (+แรง)
+                      </button>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <label className="block font-semibold text-gray-700">เจ้าหน้าที่ไปช่วยงาน</label>
-                      <div className="relative">
-                        <Search className="w-3 h-3 text-gray-400 absolute left-2.5 top-2" />
+
+                  {crossDirection === 'incoming' && (
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className="font-semibold text-gray-700">แหล่งที่มาของผู้มาช่วยงาน:</span>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer">
                         <input
-                          type="text"
-                          value={crossStaffSearch}
-                          onChange={(e) => setCrossStaffSearch(e.target.value)}
-                          placeholder="พิมพ์กรองชื่อเจ้าหน้าที่..."
-                          className="w-full rounded-lg border border-gray-200 bg-slate-50/70 pl-7 pr-2 py-1 text-[11px]"
+                          type="radio"
+                          checked={crossIncomingSource === 'opd'}
+                          onChange={() => {
+                            setCrossIncomingSource('opd');
+                            setCrossStaffName('');
+                            setCrossOtherClinic('');
+                          }}
                         />
-                      </div>
-                      <select
-                        value={crossStaffName}
-                        onChange={(e) => setCrossStaffName(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
-                      >
-                        <option value="">-- เลือกเจ้าหน้าที่ --</option>
-                        {(clinicStaff.length > 0 ? clinicStaff : activeStaffAll)
-                          .filter(s => {
-                            const q = crossStaffSearch.toLowerCase().trim();
-                            return !q || s.name.toLowerCase().includes(q) || s.homeClinic.toLowerCase().includes(q);
-                          })
-                          .map(s => (
-                            <option key={s.staffId} value={s.name}>
-                              {s.name} ({formatPositionLabel(s.position)} - {s.homeClinic})
-                            </option>
-                          ))}
-                      </select>
+                        <span>บุคลากร OPD จากแผนกอื่น</span>
+                      </label>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          checked={crossIncomingSource === 'external'}
+                          onChange={() => {
+                            setCrossIncomingSource('external');
+                            setCrossStaffName('');
+                            setCrossOtherClinic('');
+                          }}
+                        />
+                        <span>เจ้าหน้าที่เฉพาะกิจจากนอก OPD (เช่น ER/Ward/Float)</span>
+                      </label>
                     </div>
-                    <div>
-                      <label className="block font-semibold text-gray-700 mb-1">ห้องตรวจที่ไปปฏิบัติงาน</label>
-                      <select
-                        value={crossTargetClinic}
-                        onChange={(e) => setCrossTargetClinic(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white mt-7"
-                      >
-                        <option value="">-- เลือกห้องตรวจเป้าหมาย --</option>
-                        {allOpdClinics.filter(c => c !== clinic).map(c => (
-                          <option key={c} value={c}>{c}</option>
-                        ))}
-                      </select>
-                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {crossDirection === 'incoming' && crossIncomingSource === 'external' ? (
+                      <>
+                        <div>
+                          <label className="block font-semibold text-gray-700 mb-1">ชื่อ-สกุล ผู้มาช่วย</label>
+                          <input
+                            type="text"
+                            value={crossStaffName}
+                            onChange={(e) => setCrossStaffName(e.target.value)}
+                            placeholder="ระบุชื่อ-สกุล"
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-gray-700 mb-1">ตำแหน่ง</label>
+                          <select
+                            value={crossExtPosition}
+                            onChange={(e) => setCrossExtPosition(e.target.value as StaffPosition)}
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                          >
+                            {ALL_POSITIONS.map(p => (
+                              <option key={p} value={p}>{formatPositionLabel(p)}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-gray-700 mb-1">หน่วยงานต้นทาง</label>
+                          <input
+                            type="text"
+                            value={crossOtherClinic}
+                            onChange={(e) => setCrossOtherClinic(e.target.value)}
+                            placeholder="เช่น ER, ICU, Ward 5"
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="space-y-1">
+                          <label className="block font-semibold text-gray-700">
+                            {crossDirection === 'outgoing' ? 'เจ้าหน้าที่ไปช่วยงาน' : 'เจ้าหน้าที่จากห้องอื่นที่มาช่วย'}
+                          </label>
+                          <div className="relative">
+                            <Search className="w-3 h-3 text-gray-400 absolute left-2.5 top-2" />
+                            <input
+                              type="text"
+                              value={crossStaffSearch}
+                              onChange={(e) => setCrossStaffSearch(e.target.value)}
+                              placeholder="พิมพ์กรองชื่อ..."
+                              className="w-full rounded-lg border border-gray-200 bg-slate-50/70 pl-7 pr-2 py-1 text-[11px]"
+                            />
+                          </div>
+                          <select
+                            value={crossStaffName}
+                            onChange={(e) => {
+                              const nextName = e.target.value;
+                              setCrossStaffName(nextName);
+                              if (crossDirection === 'incoming') {
+                                const st = staffList.find(s => s.name === nextName);
+                                if (st) setCrossOtherClinic(st.homeClinic);
+                              }
+                            }}
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
+                          >
+                            <option value="">-- เลือกเจ้าหน้าที่ --</option>
+                            {(crossDirection === 'outgoing'
+                              ? clinicStaff.length > 0
+                                ? clinicStaff
+                                : activeStaffAll
+                              : activeStaffAll.filter(s => s.homeClinic !== clinic)
+                            )
+                              .filter(s => {
+                                const q = crossStaffSearch.toLowerCase().trim();
+                                return !q || s.name.toLowerCase().includes(q) || s.homeClinic.toLowerCase().includes(q);
+                              })
+                              .map(s => (
+                                <option key={s.staffId} value={s.name}>
+                                  {s.name} ({formatPositionLabel(s.position)} - {s.homeClinic})
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-gray-700 mb-1">
+                            {crossDirection === 'outgoing' ? 'ห้องตรวจเป้าหมายที่ไปช่วย' : 'แผนกต้นทางของผู้มาช่วย'}
+                          </label>
+                          <select
+                            value={crossOtherClinic}
+                            onChange={(e) => setCrossOtherClinic(e.target.value)}
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white mt-7"
+                          >
+                            <option value="">-- เลือกห้องตรวจ --</option>
+                            {allOpdClinics.filter(c => c !== clinic).map(c => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-gray-700 mb-1">
+                            จำนวนแรง & ช่วงเวลา
+                          </label>
+                          <select
+                            value={
+                              crossAmount === 1
+                                ? 'FULL'
+                                : crossPeriod === 'ครึ่งวันบ่าย'
+                                  ? 'HALF_PM'
+                                  : 'HALF_AM'
+                            }
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (v === 'HALF_AM') {
+                                setCrossAmount(0.5);
+                                setCrossPeriod('ครึ่งวันเช้า');
+                              } else if (v === 'HALF_PM') {
+                                setCrossAmount(0.5);
+                                setCrossPeriod('ครึ่งวันบ่าย');
+                              } else {
+                                setCrossAmount(1);
+                                setCrossPeriod('');
+                              }
+                            }}
+                            className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white mt-7 font-medium"
+                          >
+                            <option value="FULL">เต็มวัน (1.0 แรง)</option>
+                            <option value="HALF_AM">ครึ่งวันเช้า (0.5 แรง)</option>
+                            <option value="HALF_PM">ครึ่งวันบ่าย (0.5 แรง)</option>
+                          </select>
+                        </div>
+                      </>
+                    )}
                   </div>
+
+                  {crossDirection === 'incoming' && crossIncomingSource === 'external' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block font-semibold text-gray-700 mb-1">
+                          จำนวนแรง & ช่วงเวลาที่มาช่วย
+                        </label>
+                        <select
+                          value={
+                            crossAmount === 1
+                              ? 'FULL'
+                              : crossPeriod === 'ครึ่งวันบ่าย'
+                                ? 'HALF_PM'
+                                : 'HALF_AM'
+                          }
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === 'HALF_AM') {
+                              setCrossAmount(0.5);
+                              setCrossPeriod('ครึ่งวันเช้า');
+                            } else if (v === 'HALF_PM') {
+                              setCrossAmount(0.5);
+                              setCrossPeriod('ครึ่งวันบ่าย');
+                            } else {
+                              setCrossAmount(1);
+                              setCrossPeriod('');
+                            }
+                          }}
+                          className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white font-medium"
+                        >
+                          <option value="FULL">เต็มวัน (1.0 แรง)</option>
+                          <option value="HALF_AM">ครึ่งวันเช้า (0.5 แรง)</option>
+                          <option value="HALF_PM">ครึ่งวันบ่าย (0.5 แรง)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <span className="text-[10.5px] text-gray-500">
+                      สามารถเพิ่มได้หลายคน (เช่น ส่งไปช่วย 0.5 แรง หรือรับคนมาช่วย 0.5 แรง)
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!crossStaffName.trim() || !crossOtherClinic.trim()}
+                      onClick={() => {
+                        const cleanName = crossStaffName.trim();
+                        const cleanClinic = crossOtherClinic.trim();
+                        if (!cleanName || !cleanClinic) return;
+                        const st = staffList.find(s => s.name === cleanName);
+                        const resolvedPos: StaffPosition =
+                          crossDirection === 'incoming' && crossIncomingSource === 'external'
+                            ? crossExtPosition
+                            : st?.position || 'RN';
+                        const resolvedPeriod: HalfDayPeriod =
+                          crossAmount === 0.5 ? (crossPeriod || 'ครึ่งวันเช้า') : '';
+                        setCrossItems(prev => [
+                          ...prev,
+                          {
+                            tempId: `CC-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                            direction: crossDirection,
+                            staffName: cleanName,
+                            position: resolvedPos,
+                            otherClinic: cleanClinic,
+                            amount: crossAmount,
+                            periodLabel: resolvedPeriod,
+                            isExternal: crossDirection === 'incoming' && crossIncomingSource === 'external',
+                          },
+                        ]);
+                        setCrossStaffName('');
+                        setCrossOtherClinic('');
+                        setCrossStaffSearch('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-[11px] font-bold cursor-pointer"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>เพิ่มรายการช่วยงานเข้าชุดนี้</span>
+                    </button>
+                  </div>
+
+                  {effectiveCrossItems.length > 0 && (
+                    <div className="pt-2 border-t border-emerald-100 space-y-1.5">
+                      <div className="text-[11px] font-bold text-emerald-950">
+                        รายการช่วยงานที่ระบุไว้ ({effectiveCrossItems.length} รายการ):
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {effectiveCrossItems.map(item => (
+                          <span
+                            key={item.tempId}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold ${
+                              item.direction === 'outgoing'
+                                ? 'bg-amber-50 border-amber-200 text-amber-950'
+                                : 'bg-indigo-50 border-indigo-200 text-indigo-950'
+                            }`}
+                          >
+                            <span>
+                              {item.direction === 'outgoing'
+                                ? `${item.staffName} → ไปช่วย ${item.otherClinic} (−${item.amount}${
+                                    item.amount === 0.5 && item.periodLabel ? ` ${item.periodLabel}` : ''
+                                  })`
+                                : `${item.staffName} ← มาช่วยจาก ${item.otherClinic} (+${item.amount}${
+                                    item.amount === 0.5 && item.periodLabel ? ` ${item.periodLabel}` : ''
+                                  })`}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (item.tempId === 'DRAFT-ACTIVE') {
+                                  setCrossStaffName('');
+                                  setCrossOtherClinic('');
+                                } else {
+                                  setCrossItems(prev => prev.filter(x => x.tempId !== item.tempId));
+                                }
+                              }}
+                              className="text-gray-500 hover:text-red-600 cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -19,6 +19,13 @@ import {
   PREMIUM_CLINIC_GROUP,
   LEGACY_PREMIUM_CLINIC_GROUP,
   compareStaffByPositionAndStartDate,
+  isTrainingLeaveType,
+  parseLeavePeriodFromNote,
+  stripLeavePeriodFromNote,
+  formatLeaveNoteWithPeriod,
+  parseOtWorkClinic,
+  formatOtWorkClinicValue,
+  HalfDayPeriod,
 } from '../types';
 import {
   CalendarClock,
@@ -41,24 +48,100 @@ import {
   Save,
   X,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   AlertCircle,
   BadgePlus,
   ImageDown,
   Printer,
   History,
+  List,
 } from 'lucide-react';
 import {
   formatThaiLeaveRange,
   formatThaiShortDate,
   formatThaiDateTime,
   splitThaiName,
+  THAI_MONTHS,
+  THAI_SHORT_MONTHS,
 } from '../utils/thaiDate';
 import {
   calculateGovernmentLeaveStats,
   countGovernmentWorkdaysInRange,
+  getHolidaysForYear,
 } from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
+
+const THAI_CALENDAR_WEEKDAYS = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+
+function parseIsoParts(iso: string): { y: number; m: number; d: number } {
+  const match = (iso || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!match) {
+    const now = new Date();
+    return { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
+  }
+  return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
+}
+
+function toIsoDate(y: number, m: number, d: number): string {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    dt.getUTCDate()
+  ).padStart(2, '0')}`;
+}
+
+function addDaysToIso(iso: string, delta: number): string {
+  const { y, m, d } = parseIsoParts(iso);
+  return toIsoDate(y, m, d + delta);
+}
+
+function addMonthsToIso(iso: string, deltaMonths: number): string {
+  const { y, m, d } = parseIsoParts(iso);
+  const targetFirst = new Date(Date.UTC(y, m - 1 + deltaMonths, 1));
+  const ty = targetFirst.getUTCFullYear();
+  const tm = targetFirst.getUTCMonth() + 1;
+  const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
+  return toIsoDate(ty, tm, Math.min(d, lastDay));
+}
+
+function getWeekIsoDates(anchorIso: string): string[] {
+  const { y, m, d } = parseIsoParts(anchorIso);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const sunday = addDaysToIso(anchorIso, -dow);
+  return Array.from({ length: 7 }, (_, i) => addDaysToIso(sunday, i));
+}
+
+function getMonthGridCells(anchorIso: string): { date: string; inMonth: boolean; dayNum: number }[] {
+  const { y, m } = parseIsoParts(anchorIso);
+  const firstDow = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const totalCells = firstDow + daysInMonth > 35 ? 42 : 35;
+  const startIso = toIsoDate(y, m, 1 - firstDow);
+  return Array.from({ length: totalCells }, (_, idx) => {
+    const cellIso = addDaysToIso(startIso, idx);
+    const parts = parseIsoParts(cellIso);
+    return {
+      date: cellIso,
+      inMonth: parts.y === y && parts.m === m,
+      dayNum: parts.d,
+    };
+  });
+}
+
+function formatThaiMonthHeader(anchorIso: string): string {
+  const { y, m } = parseIsoParts(anchorIso);
+  return `${THAI_MONTHS[Math.max(0, Math.min(11, m - 1))]} ${y + 543}`;
+}
+
+function formatThaiWeekRangeHeader(weekDates: string[]): string {
+  if (weekDates.length === 0) return '';
+  const first = parseIsoParts(weekDates[0]);
+  const last = parseIsoParts(weekDates[weekDates.length - 1]);
+  const m1 = THAI_SHORT_MONTHS[first.m - 1] || '';
+  const m2 = THAI_SHORT_MONTHS[last.m - 1] || '';
+  return `${first.d} ${m1} ${first.y + 543} – ${last.d} ${m2} ${last.y + 543}`;
+}
 
 interface LeaveAndOTTabProps {
   staffList: StaffMember[];
@@ -147,6 +230,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
   const [leaveType, setLeaveType] = useState<LeaveType>(leaveTypes[0] || 'ลาพักผ่อน');
   const [leaveDays, setLeaveDays] = useState<number>(1);
+  const [leaveHalfPeriod, setLeaveHalfPeriod] = useState<HalfDayPeriod>('');
   const [leaveNote, setLeaveNote] = useState<string>('');
 
   useEffect(() => {
@@ -155,9 +239,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
   }, [leaveTypes, leaveType]);
 
-  // Dual Filter for Leave History (Search staff name + Filter leave type)
+  // Dual Filter for Leave History + Upcoming 5-7 toggle + Leave Calendar State
   const [leaveSearchStaff, setLeaveSearchStaff] = useState<string>('');
   const [leaveFilterType, setLeaveFilterType] = useState<string>('ALL');
+  const [showAllLeaveHistory, setShowAllLeaveHistory] = useState<boolean>(false);
+  const [leaveCalView, setLeaveCalView] = useState<'month' | 'week' | 'day'>('month');
+  const [leaveCalAnchor, setLeaveCalAnchor] = useState<string>(todayStr);
+  const [leaveCalStaff, setLeaveCalStaff] = useState<string>('ALL');
+  const [leaveCalType, setLeaveCalType] = useState<string>('ALL');
+
   const [editingLeave, setEditingLeave] = useState<LeaveRecord | null>(null);
   const [editLeaveReason, setEditLeaveReason] = useState<string>('');
   const [editLeaveReasonError, setEditLeaveReasonError] = useState<string>('');
@@ -201,8 +291,37 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     });
   }, [leaves, leaveSearchStaff, leaveFilterType]);
 
+  // Prioritize upcoming 5-7 nearest leaves by default; user can toggle to see full list
+  const leaveHistoryDisplay = useMemo(() => {
+    const upcoming = filteredLeaves
+      .filter((lv) => (lv.endDate || lv.startDate || '') >= todayStr)
+      .sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
+    const past = filteredLeaves
+      .filter((lv) => (lv.endDate || lv.startDate || '') < todayStr)
+      .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+
+    const hasUpcoming = upcoming.length > 0;
+    const defaultSlice = hasUpcoming ? upcoming.slice(0, 7) : past.slice(0, 7);
+    const rows = showAllLeaveHistory ? filteredLeaves : defaultSlice;
+    return {
+      rows,
+      upcomingCount: upcoming.length,
+      showingUpcomingOnly: !showAllLeaveHistory && hasUpcoming,
+      isTruncated: !showAllLeaveHistory && filteredLeaves.length > defaultSlice.length,
+    };
+  }, [filteredLeaves, todayStr, showAllLeaveHistory]);
+
+  // Business rule: "การไปอบรม/ประชุมไม่นับเป็นวันลา ให้ถือเป็นวันทำงานตามปกติ"
   const totalFilteredLeaveDays = useMemo(() => {
-    return filteredLeaves.reduce((sum, l) => sum + (Number(l.days) || 0), 0);
+    return filteredLeaves
+      .filter((l) => !isTrainingLeaveType(l.leaveType))
+      .reduce((sum, l) => sum + (Number(l.days) || 0), 0);
+  }, [filteredLeaves]);
+
+  const totalFilteredTrainingDays = useMemo(() => {
+    return filteredLeaves
+      .filter((l) => isTrainingLeaveType(l.leaveType))
+      .reduce((sum, l) => sum + (Number(l.days) || 0), 0);
   }, [filteredLeaves]);
 
   const leaveDayStats = useMemo(() => {
@@ -211,7 +330,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
   useEffect(() => {
     setLeaveDays(leaveDayStats.workDays);
-  }, [leaveDayStats.workDays]);
+    if (leaveStartDate !== leaveEndDate) {
+      setLeaveHalfPeriod('');
+    }
+  }, [leaveDayStats.workDays, leaveStartDate, leaveEndDate]);
 
   const handleStartDateChange = (d: string) => {
     setLeaveStartDate(d);
@@ -243,7 +365,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [extError, setExtError] = useState<string>('');
   const [externalOtStaff, setExternalOtStaff] = useState<ExternalOtDraft[]>([]);
 
-  // OT History search & edit/delete modal with mandatory reason
+  // OT Calendar & History search + edit/delete modal with mandatory reason
+  const [otCalView, setOtCalView] = useState<'month' | 'week' | 'day' | 'list'>('month');
+  const [otCalAnchor, setOtCalAnchor] = useState<string>(todayStr);
+  const [otCalStaff, setOtCalStaff] = useState<string>('ALL');
+  const [otCalClinic, setOtCalClinic] = useState<string>('ALL');
   const [otHistorySearch, setOtHistorySearch] = useState<string>('');
   const [editingOT, setEditingOT] = useState<OTAttendance | null>(null);
   const [editOtReason, setEditOtReason] = useState<string>('');
@@ -265,18 +391,71 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
   const totalOtSelectedCount = selectedStaffIds.length + externalOtStaff.length;
 
+  const leaveCalendarStaffOptions = useMemo(() => {
+    const set = new Set<string>();
+    activeStaff.forEach((s) => set.add(s.name));
+    leaves.forEach((l) => {
+      if (l.staffName) set.add(l.staffName);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
+  }, [activeStaff, leaves]);
+
+  const otCalendarStaffOptions = useMemo(() => {
+    const set = new Set<string>();
+    activeStaff.forEach((s) => set.add(s.name));
+    otRecords.forEach((o) => {
+      if (o.staffName) set.add(o.staffName);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
+  }, [activeStaff, otRecords]);
+
   const filteredOtRecords = useMemo(() => {
     const q = otHistorySearch.toLowerCase().trim();
-    if (!q) return otRecords;
-    return otRecords.filter(
-      (o) =>
+    return otRecords.filter((o) => {
+      if (otCalStaff !== 'ALL' && o.staffName !== otCalStaff) return false;
+      const parsedWork = parseOtWorkClinic(o.workClinic);
+      if (otCalClinic !== 'ALL' && parsedWork.clinic !== otCalClinic) return false;
+      if (!q) return true;
+      return (
         o.staffName.toLowerCase().includes(q) ||
         o.workClinic.toLowerCase().includes(q) ||
         (o.affiliation || o.homeClinic).toLowerCase().includes(q) ||
         o.shift.toLowerCase().includes(q) ||
         o.date.includes(q)
-    );
-  }, [otRecords, otHistorySearch]);
+      );
+    });
+  }, [otRecords, otCalStaff, otCalClinic, otHistorySearch]);
+
+  const calendarHolidayMap = useMemo(() => {
+    const lYear = parseIsoParts(leaveCalAnchor).y;
+    const map = new Map(getHolidaysForYear(lYear, customHolidays));
+    if (lYear - 1 >= 2020) {
+      getHolidaysForYear(lYear - 1, customHolidays).forEach((v, k) => map.set(k, v));
+    }
+    getHolidaysForYear(lYear + 1, customHolidays).forEach((v, k) => map.set(k, v));
+    return map;
+  }, [leaveCalAnchor, customHolidays]);
+
+  const filteredLeaveCalendarRecords = useMemo(() => {
+    return leaves.filter((lv) => {
+      if (leaveCalStaff !== 'ALL' && lv.staffName !== leaveCalStaff) return false;
+      if (leaveCalType !== 'ALL' && lv.leaveType !== leaveCalType) return false;
+      return true;
+    });
+  }, [leaves, leaveCalStaff, leaveCalType]);
+
+  const getLeavesOnCalendarDate = (dateIso: string): LeaveRecord[] => {
+    const { y, m, d } = parseIsoParts(dateIso);
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    const isNonWorkday = dow === 0 || dow === 6 || calendarHolidayMap.has(dateIso);
+    return filteredLeaveCalendarRecords.filter((lv) => {
+      const s = (lv.startDate || '').trim();
+      const e = (lv.endDate || s).trim();
+      if (!s || dateIso < s || dateIso > e) return false;
+      if (s !== e && isNonWorkday) return false;
+      return true;
+    });
+  };
 
   // --- Sub-Tab 3: Fiscal Summary Filter States ---
   const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(2570);
@@ -301,6 +480,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
     setLeaveFormError('');
 
+    const formattedNote = formatLeaveNoteWithPeriod(leaveNote, numericDays, leaveHalfPeriod);
+
     const newLeave: LeaveRecord = {
       id: `LV-${Date.now()}`,
       startDate: leaveStartDate,
@@ -310,11 +491,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       clinic: staff.homeClinic,
       leaveType,
       days: numericDays,
-      note: leaveNote,
+      note: formattedNote,
     };
 
     onSaveLeave(newLeave);
     setLeaveNote('');
+    setLeaveHalfPeriod('');
     setLeaveStaffId('');
     setLeaveStaffQuery('');
   };
@@ -477,12 +659,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         const otCount = staffOts.length;
         const otClinics = Array.from(new Set(staffOts.map((o) => o.workClinic)));
 
-        const staffLeaves = leaves.filter((l) => {
+        const staffLeavesAll = leaves.filter((l) => {
           const lStart = l.startDate || '';
           const lEnd = l.endDate || lStart;
           return l.staffName === staff.name && lStart <= monthEnd && lEnd >= monthStart;
         });
-        const leaveDays = staffLeaves.reduce((sum, l) => {
+        // Business rule: "ไปอบรม/ประชุม" counts as normal workday, NOT leave
+        const actualLeaves = staffLeavesAll.filter((l) => !isTrainingLeaveType(l.leaveType));
+        const leaveDays = actualLeaves.reduce((sum, l) => {
           const lStart = l.startDate || '';
           const lEnd = l.endDate || lStart;
           if (lStart >= monthStart && lEnd <= monthEnd) {
@@ -494,7 +678,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           return sum + countGovernmentWorkdaysInRange(overlapStart, overlapEnd, customHolidays);
         }, 0);
         const leaveTypes = Array.from(
-          new Set(staffLeaves.map((l) => `${l.leaveType} (${l.days} วัน)`))
+          new Set(
+            staffLeavesAll.map((l) =>
+              isTrainingLeaveType(l.leaveType)
+                ? `ไปอบรม/ประชุม (${l.days} วัน - ทำงานปกติ)`
+                : `${l.leaveType} (${l.days} วัน)`
+            )
+          )
         );
 
         let inTimeDays = 0;
@@ -624,7 +814,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           const d = item.monthDetails[m.key];
           if (shiftFilter === 'IN_TIME') return d?.inTime || 0;
           if (shiftFilter === 'OT') return d?.ot || 0;
-          return `${d?.total || 0} (ใน:${d?.inTime || 0}/OT:${d?.ot || 0})`;
+          return `${d?.inTime || 0}/${d?.ot || 0}`;
         }),
         item.totalInTime,
         item.totalOT,
@@ -708,16 +898,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const coreTypesSet = new Set(coreCols.map((c) => c.type));
     const extraTypes = new Set<string>();
     leaveTypes.forEach((lt) => {
-      if (!coreTypesSet.has(lt)) extraTypes.add(lt);
+      if (!coreTypesSet.has(lt) && !isTrainingLeaveType(lt)) extraTypes.add(lt);
     });
     leaves.forEach((lv) => {
-      if (lv.leaveType && !coreTypesSet.has(lv.leaveType)) extraTypes.add(lv.leaveType);
+      if (lv.leaveType && !coreTypesSet.has(lv.leaveType) && !isTrainingLeaveType(lv.leaveType)) {
+        extraTypes.add(lv.leaveType);
+      }
     });
 
     const formatShortCol = (t: string) => {
       if (t === 'ลาบวช') return 'บวช';
       if (t === 'ลาศึกษาต่อ') return 'ศึกษาต่อ';
-      if (t === 'ไปอบรม/ประชุม') return 'อบรม/ประชุม';
       return t;
     };
 
@@ -741,7 +932,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       }
     });
 
+    // Exclude "ไปอบรม/ประชุม" from leave report (training counts as normal workday, NOT leave)
     const periodLeaves = leaves.filter((lv) => {
+      if (isTrainingLeaveType(lv.leaveType)) return false;
       const startYm = (lv.startDate || '').slice(0, 7);
       const endYm = (lv.endDate || lv.startDate || '').slice(0, 7);
       if (allowedYearMonths.has(startYm) || allowedYearMonths.has(endYm)) return true;
@@ -972,7 +1165,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
       {/* --- SUB-TAB 1: LEAVE ENTRY --- */}
       {activeSubTab === 'leave' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-5">
             <form
               onSubmit={handleSaveLeaveSubmit}
@@ -1080,7 +1274,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  ประเภทการลา (สิทธิ์การลา) <span className="text-red-500">*</span>
+                  ประเภทการลา / ปฏิบัติราชการ <span className="text-red-500">*</span>
                 </label>
                 <select
                   value={leaveType}
@@ -1090,16 +1284,21 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 >
                   {leaveTypes.map((lt) => (
                     <option key={lt} value={lt}>
-                      {lt}
+                      {isTrainingLeaveType(lt) ? `${lt} (ทำงานปกติ ไม่นับเป็นวันลา)` : lt}
                     </option>
                   ))}
                 </select>
+                {isTrainingLeaveType(leaveType) && (
+                  <p className="mt-1.5 text-[11px] text-cyan-800 bg-cyan-50 border border-cyan-200 rounded-lg px-2.5 py-1.5">
+                    การไปอบรม/ประชุม <strong>ไม่นับเป็นวันลา</strong> ให้ถือเป็นวันทำงานตามปกติ (ไม่หักกำลังคนในตารางและไม่นับรวมในรายงานวันลา)
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    วันที่เริ่มต้นลา (พ.ศ.) <span className="text-red-500">*</span>
+                    วันที่เริ่มต้น (พ.ศ.) <span className="text-red-500">*</span>
                   </label>
                   <ThaiDateInput
                     value={leaveStartDate}
@@ -1109,7 +1308,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    วันที่สิ้นสุดลา (พ.ศ.) <span className="text-red-500">*</span>
+                    วันที่สิ้นสุด (พ.ศ.) <span className="text-red-500">*</span>
                   </label>
                   <ThaiDateInput
                     value={leaveEndDate}
@@ -1121,14 +1320,70 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  จำนวนวันลา (นับเฉพาะวันราชการ - คำนวณอัตโนมัติ)
+                  จำนวนวัน (นับเฉพาะวันราชการ - คำนวณอัตโนมัติ)
                 </label>
+
+                {leaveStartDate === leaveEndDate && (
+                  <div className="grid grid-cols-3 gap-1.5 mb-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLeaveDays(1);
+                        setLeaveHalfPeriod('');
+                      }}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                        leaveDays === 1 && !leaveHalfPeriod
+                          ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'
+                      }`}
+                    >
+                      เต็มวัน (1.0)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLeaveDays(0.5);
+                        setLeaveHalfPeriod('ครึ่งวันเช้า');
+                      }}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                        leaveDays === 0.5 && leaveHalfPeriod === 'ครึ่งวันเช้า'
+                          ? 'bg-indigo-600 text-white border-indigo-700 shadow-2xs'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-indigo-50'
+                      }`}
+                    >
+                      ครึ่งวันเช้า (0.5)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLeaveDays(0.5);
+                        setLeaveHalfPeriod('ครึ่งวันบ่าย');
+                      }}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                        leaveDays === 0.5 && leaveHalfPeriod === 'ครึ่งวันบ่าย'
+                          ? 'bg-indigo-600 text-white border-indigo-700 shadow-2xs'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-indigo-50'
+                      }`}
+                    >
+                      ครึ่งวันบ่าย (0.5)
+                    </button>
+                  </div>
+                )}
+
                 <input
                   type="number"
                   min="0"
                   step="0.5"
                   value={leaveDays}
-                  onChange={(e) => setLeaveDays(Math.max(0, Number(e.target.value) || 0))}
+                  onChange={(e) => {
+                    const nextVal = Math.max(0, Number(e.target.value) || 0);
+                    setLeaveDays(nextVal);
+                    if (nextVal === 0.5 && leaveStartDate === leaveEndDate) {
+                      if (!leaveHalfPeriod) setLeaveHalfPeriod('ครึ่งวันเช้า');
+                    } else {
+                      setLeaveHalfPeriod('');
+                    }
+                  }}
                   className="w-full text-sm font-bold text-center rounded-lg border-gray-300 bg-amber-50/50 py-1.5 px-3 border text-amber-900"
                 />
                 <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/80 p-2.5 text-[11px] space-y-1">
@@ -1239,29 +1494,47 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   </div>
                 </div>
 
-                {/* Filter Summary Badge */}
+                {/* Filter Summary Badge + Upcoming 5-7 Toggle */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-gray-200/60 text-xs">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-gray-600 font-medium">ผลการกรอง:</span>
                     <span className="bg-amber-100 text-amber-900 font-extrabold px-2.5 py-0.5 rounded-lg border border-amber-300 text-xs">
                       รวมวันลาที่เลือก: {totalFilteredLeaveDays} วัน
                     </span>
+                    {totalFilteredTrainingDays > 0 && (
+                      <span className="bg-cyan-50 text-cyan-800 font-bold px-2.5 py-0.5 rounded-lg border border-cyan-200 text-xs">
+                        ไปอบรม/ประชุม: {totalFilteredTrainingDays} วัน (ทำงานปกติ ไม่นับวันลา)
+                      </span>
+                    )}
                     <span className="text-gray-500 text-[11px]">
-                      ({filteredLeaves.length} รายการที่ตรงเงื่อนไข)
+                      (แสดง {leaveHistoryDisplay.rows.length} จาก {filteredLeaves.length} รายการ)
                     </span>
                   </div>
-                  {(leaveSearchStaff || leaveFilterType !== 'ALL') && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLeaveSearchStaff('');
-                        setLeaveFilterType('ALL');
-                      }}
-                      className="text-amber-800 hover:underline font-semibold text-[11px] cursor-pointer"
-                    >
-                      ล้างตัวกรองทั้งหมด
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2.5">
+                    {(leaveHistoryDisplay.isTruncated || showAllLeaveHistory) && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllLeaveHistory((prev) => !prev)}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-900 hover:bg-amber-50 font-bold text-[11px] cursor-pointer"
+                      >
+                        {showAllLeaveHistory
+                          ? 'แสดงเฉพาะ 7 รายการที่ใกล้ถึง'
+                          : `ดูทั้งหมด (${filteredLeaves.length} รายการ)`}
+                      </button>
+                    )}
+                    {(leaveSearchStaff || leaveFilterType !== 'ALL') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLeaveSearchStaff('');
+                          setLeaveFilterType('ALL');
+                        }}
+                        className="text-amber-800 hover:underline font-semibold text-[11px] cursor-pointer"
+                      >
+                        ล้างตัวกรองทั้งหมด
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -1272,103 +1545,125 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     : 'ไม่พบรายการที่ตรงกับเงื่อนไขการค้นหา'}
                 </div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
-                      <tr>
-                        <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ-สกุล</th>
-                        <th className="py-2.5 px-2 whitespace-nowrap">ตำแหน่ง</th>
-                        <th className="py-2.5 px-2 whitespace-nowrap">คลินิก</th>
-                        <th className="py-2.5 px-2 whitespace-nowrap">ประเภทลา</th>
-                        <th className="py-2.5 px-2 text-center whitespace-nowrap">ระยะเวลา</th>
-                        <th className="py-2.5 px-2 text-center whitespace-nowrap">วัน</th>
-                        <th className="py-2.5 px-2 text-center whitespace-nowrap">จัดการ</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {filteredLeaves.map((lv) => {
-                        const isTraining = lv.leaveType === 'ไปอบรม/ประชุม';
-                        return (
-                          <tr key={lv.id} className="hover:bg-slate-50/80">
-                            <td className="py-2 px-3 whitespace-nowrap">
-                              <div className="font-semibold text-gray-900 whitespace-nowrap">{lv.staffName}</div>
-                              {lv.note && (
-                                <div className="text-[10px] text-gray-500 truncate max-w-[200px]" title={lv.note}>
-                                  {lv.note}
-                                </div>
-                              )}
-                              {lv.lastEditReason && (
-                                <div
-                                  className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
-                                  title={`แก้ไขโดย ${lv.lastEditedBy || 'Admin'} เมื่อ ${lv.lastEditedAt ? formatThaiDateTime(lv.lastEditedAt) : '-'}`}
-                                >
-                                  แก้ไข: {lv.lastEditReason}
-                                  {lv.lastEditedAt ? ` • ${formatThaiDateTime(lv.lastEditedAt)}` : ''}
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-2 px-2 text-gray-600 whitespace-nowrap">
-                              {formatPositionLabel(lv.position)}
-                            </td>
-                            <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{lv.clinic}</td>
-                            <td className="py-2 px-2 whitespace-nowrap">
-                              <span
-                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border whitespace-nowrap ${
-                                  isTraining
-                                    ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
-                                    : 'bg-amber-50 text-amber-800 border-amber-200'
-                                }`}
-                              >
-                                {lv.leaveType}
-                              </span>
-                            </td>
-                            <td className="py-2 px-2 text-center text-[11px] text-gray-600 whitespace-nowrap">
-                              {lv.startDate === lv.endDate
-                                ? formatThaiShortDate(lv.startDate)
-                                : `${formatThaiShortDate(lv.startDate)} ถึง ${formatThaiShortDate(lv.endDate)}`}
-                            </td>
-                            <td className="py-2 px-2 text-center font-bold text-gray-800">
-                              {lv.days}
-                            </td>
-                            <td className="py-2 px-2 text-center">
-                              <div className="flex items-center justify-center gap-1">
-                                {isAdmin && onUpdateLeave && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingLeave({ ...lv });
-                                      setEditLeaveReason('');
-                                      setEditLeaveReasonError('');
-                                    }}
-                                    className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
-                                    title="แก้ไขรายการและระบุเหตุผล (Admin)"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5" />
-                                  </button>
+                <div className="space-y-2">
+                  {!showAllLeaveHistory && leaveHistoryDisplay.showingUpcomingOnly && (
+                    <div className="text-[11px] text-amber-900 bg-amber-50/70 border border-amber-200/80 rounded-lg px-3 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <span>
+                        กำลังแสดง <strong>{leaveHistoryDisplay.rows.length} รายการที่กำลังจะถึงใกล้ที่สุด</strong> (จากวันลาล่วงหน้าทั้งหมด {leaveHistoryDisplay.upcomingCount} รายการ)
+                      </span>
+                      <span className="text-[10px] text-amber-700">สามารถดูรายการทั้งหมดในปฏิทินด้านล่างหรือกด &ldquo;ดูทั้งหมด&rdquo;</span>
+                    </div>
+                  )}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
+                        <tr>
+                          <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ-สกุล</th>
+                          <th className="py-2.5 px-2 whitespace-nowrap">ตำแหน่ง</th>
+                          <th className="py-2.5 px-2 whitespace-nowrap">คลินิก</th>
+                          <th className="py-2.5 px-2 whitespace-nowrap">ประเภท</th>
+                          <th className="py-2.5 px-2 text-center whitespace-nowrap">ระยะเวลา</th>
+                          <th className="py-2.5 px-2 text-center whitespace-nowrap">วัน</th>
+                          <th className="py-2.5 px-2 text-center whitespace-nowrap">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {leaveHistoryDisplay.rows.map((lv) => {
+                          const isTraining = isTrainingLeaveType(lv.leaveType);
+                          const halfPeriod = parseLeavePeriodFromNote(lv.note);
+                          const cleanNote = stripLeavePeriodFromNote(lv.note);
+                          return (
+                            <tr key={lv.id} className="hover:bg-slate-50/80">
+                              <td className="py-2 px-3 whitespace-nowrap">
+                                <div className="font-semibold text-gray-900 whitespace-nowrap">{lv.staffName}</div>
+                                {cleanNote && (
+                                  <div className="text-[10px] text-gray-500 truncate max-w-[200px]" title={cleanNote}>
+                                    {cleanNote}
+                                  </div>
                                 )}
-                                {isAdmin ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setDeletingLeave(lv);
-                                      setDeleteLeaveReason('');
-                                      setDeleteLeaveReasonError('');
-                                    }}
-                                    className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
-                                    title="ลบรายการและบันทึกเหตุผล (Admin)"
+                                {lv.lastEditReason && (
+                                  <div
+                                    className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
+                                    title={`แก้ไขโดย ${lv.lastEditedBy || 'Admin'} เมื่อ ${lv.lastEditedAt ? formatThaiDateTime(lv.lastEditedAt) : '-'}`}
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                ) : (
-                                  <span className="text-gray-300 text-[10px]">-</span>
+                                    แก้ไข: {lv.lastEditReason}
+                                    {lv.lastEditedAt ? ` • ${formatThaiDateTime(lv.lastEditedAt)}` : ''}
+                                  </div>
                                 )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              </td>
+                              <td className="py-2 px-2 text-gray-600 whitespace-nowrap">
+                                {formatPositionLabel(lv.position)}
+                              </td>
+                              <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{lv.clinic}</td>
+                              <td className="py-2 px-2 whitespace-nowrap">
+                                <div className="flex flex-col items-start gap-0.5">
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border whitespace-nowrap ${
+                                      isTraining
+                                        ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                                        : 'bg-amber-50 text-amber-800 border-amber-200'
+                                    }`}
+                                  >
+                                    {lv.leaveType}
+                                  </span>
+                                  {isTraining && (
+                                    <span className="text-[9px] text-cyan-700 font-medium">ทำงานปกติ</span>
+                                  )}
+                                  {lv.days === 0.5 && halfPeriod && (
+                                    <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                      {halfPeriod}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-2 px-2 text-center text-[11px] text-gray-600 whitespace-nowrap">
+                                {lv.startDate === lv.endDate
+                                  ? formatThaiShortDate(lv.startDate)
+                                  : `${formatThaiShortDate(lv.startDate)} ถึง ${formatThaiShortDate(lv.endDate)}`}
+                              </td>
+                              <td className="py-2 px-2 text-center font-bold text-gray-800">
+                                {lv.days}
+                              </td>
+                              <td className="py-2 px-2 text-center">
+                                <div className="flex items-center justify-center gap-1">
+                                  {isAdmin && onUpdateLeave && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingLeave({ ...lv });
+                                        setEditLeaveReason('');
+                                        setEditLeaveReasonError('');
+                                      }}
+                                      className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
+                                      title="แก้ไขรายการและระบุเหตุผล (Admin)"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {isAdmin ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeletingLeave(lv);
+                                        setDeleteLeaveReason('');
+                                        setDeleteLeaveReasonError('');
+                                      }}
+                                      className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
+                                      title="ลบรายการและบันทึกเหตุผล (Admin)"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  ) : (
+                                    <span className="text-gray-300 text-[10px]">-</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -1430,6 +1725,487 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               )}
             </div>
           </div>
+          </div>
+
+          {/* Interactive Leave Calendar Section (Bottom of Sub-Tab 1) */}
+          {(() => {
+            const leaveWeekDates = getWeekIsoDates(leaveCalAnchor);
+            const leaveMonthCells = getMonthGridCells(leaveCalAnchor);
+            const selectedDayLeaves = getLeavesOnCalendarDate(leaveCalAnchor);
+            const periodLabel =
+              leaveCalView === 'month'
+                ? formatThaiMonthHeader(leaveCalAnchor)
+                : leaveCalView === 'week'
+                  ? formatThaiWeekRangeHeader(leaveWeekDates)
+                  : formatThaiShortDate(leaveCalAnchor);
+
+            return (
+              <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b pb-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-amber-600" />
+                      <span>ปฏิทินวันลาและไปอบรม/ประชุมของบุคลากร</span>
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      คลิกเลือกดูแบบรายเดือน รายสัปดาห์ หรือรายวัน พร้อมตัวกรองรายบุคคลและประเภทการลา
+                    </p>
+                  </div>
+
+                  {/* View Mode Switcher */}
+                  <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 self-start">
+                    {(
+                      [
+                        { id: 'month', label: 'รายเดือน' },
+                        { id: 'week', label: 'รายสัปดาห์' },
+                        { id: 'day', label: 'รายวัน' },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setLeaveCalView(tab.id)}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                          leaveCalView === tab.id
+                            ? 'bg-amber-600 text-white shadow-2xs'
+                            : 'text-gray-600 hover:text-amber-800'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Controls: Date Nav + Staff Filter + Leave Type Filter */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-50/90 border border-slate-200/80 rounded-xl p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (leaveCalView === 'month') setLeaveCalAnchor((p) => addMonthsToIso(p, -1));
+                        else if (leaveCalView === 'week') setLeaveCalAnchor((p) => addDaysToIso(p, -7));
+                        else setLeaveCalAnchor((p) => addDaysToIso(p, -1));
+                      }}
+                      className="p-1.5 rounded-lg border border-gray-300 bg-white hover:bg-amber-50 text-gray-700 cursor-pointer"
+                      title="ก่อนหน้า"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLeaveCalAnchor(todayStr)}
+                      className="px-2.5 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-amber-50 text-xs font-bold text-gray-800 cursor-pointer"
+                    >
+                      วันนี้
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (leaveCalView === 'month') setLeaveCalAnchor((p) => addMonthsToIso(p, 1));
+                        else if (leaveCalView === 'week') setLeaveCalAnchor((p) => addDaysToIso(p, 7));
+                        else setLeaveCalAnchor((p) => addDaysToIso(p, 1));
+                      }}
+                      className="p-1.5 rounded-lg border border-gray-300 bg-white hover:bg-amber-50 text-gray-700 cursor-pointer"
+                      title="ถัดไป"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <span className="text-xs sm:text-sm font-extrabold text-gray-900 px-2">
+                      {periodLabel}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={leaveCalStaff}
+                      onChange={(e) => setLeaveCalStaff(e.target.value)}
+                      className="text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium text-gray-800 max-w-[220px]"
+                    >
+                      <option value="ALL">-- ดูเจ้าหน้าที่ทุกคน ({leaveCalendarStaffOptions.length}) --</option>
+                      {leaveCalendarStaffOptions.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={leaveCalType}
+                      onChange={(e) => setLeaveCalType(e.target.value)}
+                      className="text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium text-gray-800"
+                    >
+                      <option value="ALL">-- ทุกประเภทการลา / อบรม --</option>
+                      {leaveTypes.map((lt) => (
+                        <option key={lt} value={lt}>
+                          {lt}
+                        </option>
+                      ))}
+                    </select>
+
+                    {(leaveCalStaff !== 'ALL' || leaveCalType !== 'ALL') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLeaveCalStaff('ALL');
+                          setLeaveCalType('ALL');
+                        }}
+                        className="text-xs font-bold text-amber-800 hover:underline px-1 cursor-pointer"
+                      >
+                        ล้างตัวกรอง
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Calendar Views */}
+                {leaveCalView === 'month' && (
+                  <div className="space-y-4">
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[700px] border border-gray-200 rounded-xl overflow-hidden">
+                        <div className="grid grid-cols-7 bg-slate-100 border-b border-gray-200 text-center text-[11px] font-bold text-slate-700">
+                          {THAI_CALENDAR_WEEKDAYS.map((wd, idx) => (
+                            <div
+                              key={wd}
+                              className={`py-2 ${idx === 0 || idx === 6 ? 'text-rose-700 bg-rose-50/40' : ''}`}
+                            >
+                              {wd}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-7 divide-x divide-y divide-gray-200 bg-white">
+                          {leaveMonthCells.map((cell) => {
+                            const dayItems = getLeavesOnCalendarDate(cell.date);
+                            const holidayName = calendarHolidayMap.get(cell.date)?.name;
+                            const isSelected = cell.date === leaveCalAnchor;
+                            const isToday = cell.date === todayStr;
+                            return (
+                              <div
+                                key={cell.date}
+                                onClick={() => setLeaveCalAnchor(cell.date)}
+                                className={`min-h-[92px] p-1.5 cursor-pointer transition-colors flex flex-col gap-1 ${
+                                  !cell.inMonth
+                                    ? 'bg-slate-50/70 text-gray-400'
+                                    : isSelected
+                                      ? 'bg-amber-50/80 ring-2 ring-inset ring-amber-500'
+                                      : holidayName
+                                        ? 'bg-rose-50/30 hover:bg-rose-50/50'
+                                        : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1">
+                                  <span
+                                    className={`text-[11px] font-bold w-6 h-6 inline-flex items-center justify-center rounded-full ${
+                                      isToday
+                                        ? 'bg-amber-600 text-white'
+                                        : isSelected
+                                          ? 'bg-amber-200 text-amber-950'
+                                          : 'text-gray-700'
+                                    }`}
+                                  >
+                                    {cell.dayNum}
+                                  </span>
+                                  {dayItems.length > 0 && (
+                                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
+                                      {dayItems.length}
+                                    </span>
+                                  )}
+                                </div>
+                                {holidayName && (
+                                  <div className="text-[9px] font-semibold text-rose-700 truncate" title={holidayName}>
+                                    {holidayName}
+                                  </div>
+                                )}
+                                <div className="space-y-0.5">
+                                  {dayItems.slice(0, 3).map((lv) => {
+                                    const isTrain = isTrainingLeaveType(lv.leaveType);
+                                    const p = parseLeavePeriodFromNote(lv.note);
+                                    return (
+                                      <div
+                                        key={`${cell.date}-${lv.id}`}
+                                        className={`text-[10px] px-1.5 py-0.5 rounded border truncate font-medium ${
+                                          isTrain
+                                            ? 'bg-cyan-50 text-cyan-900 border-cyan-200'
+                                            : 'bg-amber-50 text-amber-900 border-amber-200'
+                                        }`}
+                                        title={`${lv.staffName} • ${lv.leaveType}${lv.days === 0.5 && p ? ` (${p})` : ''}`}
+                                      >
+                                        {lv.staffName.split(' ')[0]} • {lv.leaveType}
+                                        {lv.days === 0.5 ? ` (${p === 'ครึ่งวันบ่าย' ? 'บ่าย' : 'เช้า'})` : ''}
+                                      </div>
+                                    );
+                                  })}
+                                  {dayItems.length > 3 && (
+                                    <div className="text-[10px] font-bold text-amber-800 pl-1">
+                                      +{dayItems.length - 3} รายการ
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Selected Day Quick Detail Strip */}
+                    <div className="p-3.5 rounded-xl bg-amber-50/50 border border-amber-200/80 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs font-bold text-amber-950">
+                          รายละเอียดวันที่ {formatThaiShortDate(leaveCalAnchor)}
+                          {calendarHolidayMap.has(leaveCalAnchor) && (
+                            <span className="ml-2 text-[11px] text-rose-700 font-semibold">
+                              ({calendarHolidayMap.get(leaveCalAnchor)?.name})
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setLeaveCalView('day')}
+                          className="text-[11px] font-bold text-amber-800 hover:underline cursor-pointer"
+                        >
+                          เปิดดูแบบรายวัน →
+                        </button>
+                      </div>
+                      {selectedDayLeaves.length === 0 ? (
+                        <div className="text-xs text-gray-500">ไม่มีรายการลาหรือไปอบรมในวันที่เลือก</div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {selectedDayLeaves.map((lv) => {
+                            const isTrain = isTrainingLeaveType(lv.leaveType);
+                            const period = parseLeavePeriodFromNote(lv.note);
+                            const cleanNote = stripLeavePeriodFromNote(lv.note);
+                            return (
+                              <div
+                                key={lv.id}
+                                className="flex items-start justify-between gap-2 bg-white p-2.5 rounded-lg border border-gray-200 text-xs"
+                              >
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="font-bold text-gray-900 truncate">{lv.staffName}</div>
+                                  <div className="text-[11px] text-gray-600">
+                                    {formatPositionLabel(lv.position)} • {lv.clinic}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                                        isTrain
+                                          ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                                      }`}
+                                    >
+                                      {lv.leaveType} {lv.days} วัน
+                                    </span>
+                                    {lv.days === 0.5 && period && (
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                                        {period}
+                                      </span>
+                                    )}
+                                    {cleanNote && (
+                                      <span className="text-[10px] text-gray-500 truncate max-w-[200px]">
+                                        ({cleanNote})
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                {isAdmin && (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {onUpdateLeave && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingLeave({ ...lv });
+                                          setEditLeaveReason('');
+                                          setEditLeaveReasonError('');
+                                        }}
+                                        className="p-1 text-gray-400 hover:text-blue-600 cursor-pointer"
+                                        title="แก้ไข"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeletingLeave(lv);
+                                        setDeleteLeaveReason('');
+                                        setDeleteLeaveReasonError('');
+                                      }}
+                                      className="p-1 text-gray-400 hover:text-red-500 cursor-pointer"
+                                      title="ลบ"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {leaveCalView === 'week' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2.5">
+                    {leaveWeekDates.map((dIso, idx) => {
+                      const dayItems = getLeavesOnCalendarDate(dIso);
+                      const holidayName = calendarHolidayMap.get(dIso)?.name;
+                      const isToday = dIso === todayStr;
+                      const isSelected = dIso === leaveCalAnchor;
+                      return (
+                        <div
+                          key={dIso}
+                          onClick={() => setLeaveCalAnchor(dIso)}
+                          className={`rounded-xl border p-2.5 min-h-[180px] flex flex-col gap-2 cursor-pointer transition-all ${
+                            isSelected
+                              ? 'border-amber-500 bg-amber-50/40 ring-1 ring-amber-400'
+                              : 'border-gray-200 bg-white hover:border-amber-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between border-b pb-1.5">
+                            <span className="text-[11px] font-bold text-gray-700">
+                              {THAI_CALENDAR_WEEKDAYS[idx]} {parseIsoParts(dIso).d}
+                            </span>
+                            {isToday && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-600 text-white">
+                                วันนี้
+                              </span>
+                            )}
+                          </div>
+                          {holidayName && (
+                            <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded">
+                              {holidayName}
+                            </div>
+                          )}
+                          <div className="space-y-1.5 flex-1">
+                            {dayItems.length === 0 ? (
+                              <div className="text-[10px] text-gray-400 italic py-2">ไม่มีรายการ</div>
+                            ) : (
+                              dayItems.map((lv) => {
+                                const isTrain = isTrainingLeaveType(lv.leaveType);
+                                const period = parseLeavePeriodFromNote(lv.note);
+                                return (
+                                  <div
+                                    key={`${dIso}-${lv.id}`}
+                                    className={`p-1.5 rounded-lg border text-[10px] space-y-0.5 ${
+                                      isTrain
+                                        ? 'bg-cyan-50/90 border-cyan-200 text-cyan-950'
+                                        : 'bg-amber-50/90 border-amber-200 text-amber-950'
+                                    }`}
+                                  >
+                                    <div className="font-bold truncate">{lv.staffName}</div>
+                                    <div className="text-[9px] opacity-80 truncate">{lv.clinic}</div>
+                                    <div className="font-semibold">
+                                      {lv.leaveType}
+                                      {lv.days === 0.5 && period ? ` (${period})` : ''}
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {leaveCalView === 'day' && (
+                  <div className="space-y-2.5">
+                    {calendarHolidayMap.has(leaveCalAnchor) && (
+                      <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs font-semibold text-rose-800">
+                        วันหยุดราชการ/นักขัตฤกษ์: {calendarHolidayMap.get(leaveCalAnchor)?.name}
+                      </div>
+                    )}
+                    {selectedDayLeaves.length === 0 ? (
+                      <div className="py-10 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                        ไม่มีข้อมูลการลาหรือไปอบรมในวันที่ {formatThaiShortDate(leaveCalAnchor)}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {selectedDayLeaves.map((lv) => {
+                          const isTrain = isTrainingLeaveType(lv.leaveType);
+                          const period = parseLeavePeriodFromNote(lv.note);
+                          const cleanNote = stripLeavePeriodFromNote(lv.note);
+                          return (
+                            <div
+                              key={lv.id}
+                              className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 ${
+                                isTrain ? 'bg-cyan-50/40 border-cyan-200' : 'bg-amber-50/40 border-amber-200'
+                              }`}
+                            >
+                              <div className="space-y-1 min-w-0">
+                                <div className="text-xs font-bold text-gray-900">{lv.staffName}</div>
+                                <div className="text-[11px] text-gray-600">
+                                  {formatPositionLabel(lv.position)} • คลินิก: {lv.clinic}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                      isTrain
+                                        ? 'bg-cyan-100 text-cyan-900 border-cyan-300'
+                                        : 'bg-amber-100 text-amber-900 border-amber-300'
+                                    }`}
+                                  >
+                                    {lv.leaveType} ({lv.days} วัน)
+                                  </span>
+                                  {lv.days === 0.5 && period && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                                      {period}
+                                    </span>
+                                  )}
+                                  {isTrain && (
+                                    <span className="text-[10px] font-semibold text-cyan-800">
+                                      ทำงานปกติ (ไม่นับวันลา)
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-gray-600">
+                                  ช่วงวันที่: {formatThaiLeaveRange(lv.startDate, lv.endDate)}
+                                  {cleanNote ? ` • หมายเหตุ: ${cleanNote}` : ''}
+                                </div>
+                              </div>
+                              {isAdmin && (
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {onUpdateLeave && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingLeave({ ...lv });
+                                        setEditLeaveReason('');
+                                        setEditLeaveReasonError('');
+                                      }}
+                                      className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-500 hover:text-blue-600 cursor-pointer"
+                                      title="แก้ไข"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeletingLeave(lv);
+                                      setDeleteLeaveReason('');
+                                      setDeleteLeaveReasonError('');
+                                    }}
+                                    className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-500 hover:text-red-500 cursor-pointer"
+                                    title="ลบ"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1715,130 +2491,598 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
           </div>
 
-          {/* OT & Substitute Attendance History Table */}
-          <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-teal-700" />
-                <h3 className="text-xs sm:text-sm font-bold text-gray-900">
-                  รายการบันทึกเวรนอกเวลา & ปฏิบัติหน้าที่แทน ({otRecords.length} รายการ)
-                </h3>
-              </div>
-              <div className="relative w-full sm:w-64">
-                <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2.5" />
-                <input
-                  type="text"
-                  value={otHistorySearch}
-                  onChange={(e) => setOtHistorySearch(e.target.value)}
-                  placeholder="ค้นหาชื่อ, สังกัด, คลินิก, วันที่..."
-                  className="w-full text-xs rounded-lg border border-gray-300 pl-8 pr-3 py-1.5 bg-white"
-                />
-              </div>
-            </div>
+          {/* OT & Substitute Attendance Calendar + List Section */}
+          {(() => {
+            const otWeekDates = getWeekIsoDates(otCalAnchor);
+            const otMonthCells = getMonthGridCells(otCalAnchor);
+            const otDayItems = filteredOtRecords.filter((o) => o.date === otCalAnchor);
+            const otPeriodLabel =
+              otCalView === 'month'
+                ? formatThaiMonthHeader(otCalAnchor)
+                : otCalView === 'week'
+                  ? formatThaiWeekRangeHeader(otWeekDates)
+                  : formatThaiShortDate(otCalAnchor);
 
-            {filteredOtRecords.length === 0 ? (
-              <div className="py-8 text-center text-xs text-gray-400">
-                ยังไม่มีประวัติการบันทึกเวรนอกเวลาหรือปฏิบัติหน้าที่แทน
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
-                    <tr>
-                      <th className="py-2.5 px-3">วันที่</th>
-                      <th className="py-2.5 px-2">กะเวลา / ประเภท OT</th>
-                      <th className="py-2.5 px-3">ชื่อ-สกุล</th>
-                      <th className="py-2.5 px-2">ตำแหน่ง</th>
-                      <th className="py-2.5 px-2">สังกัด / หน่วยงานต้นทาง</th>
-                      <th className="py-2.5 px-2">ห้องตรวจที่ปฏิบัติงาน</th>
-                      <th className="py-2.5 px-2 text-center">จัดการ</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {filteredOtRecords.map((o) => {
-                      const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
-                      const origin = o.affiliation || o.homeClinic;
-                      return (
-                        <tr key={o.id} className="hover:bg-slate-50/80">
-                          <td className="py-2 px-3 text-gray-700 font-medium whitespace-nowrap">
-                            {formatThaiShortDate(o.date)}
-                          </td>
-                          <td className="py-2 px-2">
-                            <span
-                              className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border ${
-                                isInTimeOT
-                                  ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
-                                  : 'bg-purple-50 text-purple-800 border-purple-200'
-                              }`}
+            return (
+              <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b pb-3">
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-gray-900 flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-teal-700" />
+                      <span>
+                        ปฏิทินและรายการบันทึกเวรนอกเวลา &amp; ปฏิบัติหน้าที่แทน ({filteredOtRecords.length} / {otRecords.length} รายการ)
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      สลับดูแบบปฏิทินรายเดือน รายสัปดาห์ รายวัน หรือตารางรายการ พร้อมกรองรายบุคคลและคลินิก
+                    </p>
+                  </div>
+
+                  <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 self-start">
+                    {(
+                      [
+                        { id: 'month', label: 'รายเดือน' },
+                        { id: 'week', label: 'รายสัปดาห์' },
+                        { id: 'day', label: 'รายวัน' },
+                        { id: 'list', label: 'รายการตาราง' },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setOtCalView(tab.id)}
+                        className={`px-2.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 ${
+                          otCalView === tab.id
+                            ? 'bg-teal-700 text-white shadow-2xs'
+                            : 'text-gray-600 hover:text-teal-800'
+                        }`}
+                      >
+                        {tab.id === 'list' && <List className="w-3.5 h-3.5" />}
+                        <span>{tab.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Controls: Date Navigation (in Calendar views) + Individual Staff + Clinic + Search */}
+                <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 bg-slate-50/90 border border-slate-200/80 rounded-xl p-3">
+                  {otCalView !== 'list' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (otCalView === 'month') setOtCalAnchor((p) => addMonthsToIso(p, -1));
+                          else if (otCalView === 'week') setOtCalAnchor((p) => addDaysToIso(p, -7));
+                          else setOtCalAnchor((p) => addDaysToIso(p, -1));
+                        }}
+                        className="p-1.5 rounded-lg border border-gray-300 bg-white hover:bg-teal-50 text-gray-700 cursor-pointer"
+                        title="ก่อนหน้า"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOtCalAnchor(todayStr)}
+                        className="px-2.5 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-teal-50 text-xs font-bold text-gray-800 cursor-pointer"
+                      >
+                        วันนี้
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (otCalView === 'month') setOtCalAnchor((p) => addMonthsToIso(p, 1));
+                          else if (otCalView === 'week') setOtCalAnchor((p) => addDaysToIso(p, 7));
+                          else setOtCalAnchor((p) => addDaysToIso(p, 1));
+                        }}
+                        className="p-1.5 rounded-lg border border-gray-300 bg-white hover:bg-teal-50 text-gray-700 cursor-pointer"
+                        title="ถัดไป"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                      <span className="text-xs sm:text-sm font-extrabold text-teal-950 px-2">
+                        {otPeriodLabel}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="text-xs font-bold text-teal-900">
+                      มุมมองตารางรายการทั้งหมด ({filteredOtRecords.length} รายการ)
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={otCalStaff}
+                      onChange={(e) => setOtCalStaff(e.target.value)}
+                      className="text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium text-gray-800 max-w-[200px]"
+                    >
+                      <option value="ALL">-- ดูเจ้าหน้าที่ทุกคน ({otCalendarStaffOptions.length}) --</option>
+                      {otCalendarStaffOptions.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={otCalClinic}
+                      onChange={(e) => setOtCalClinic(e.target.value)}
+                      className="text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium text-gray-800"
+                    >
+                      <option value="ALL">-- ทุกคลินิกที่ปฏิบัติงาน --</option>
+                      {allClinics.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="relative w-full sm:w-52">
+                      <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2" />
+                      <input
+                        type="text"
+                        value={otHistorySearch}
+                        onChange={(e) => setOtHistorySearch(e.target.value)}
+                        placeholder="ค้นหาชื่อ, สังกัด, กะ..."
+                        className="w-full text-xs rounded-lg border border-gray-300 pl-8 pr-3 py-1.5 bg-white"
+                      />
+                    </div>
+
+                    {(otCalStaff !== 'ALL' || otCalClinic !== 'ALL' || otHistorySearch) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOtCalStaff('ALL');
+                          setOtCalClinic('ALL');
+                          setOtHistorySearch('');
+                        }}
+                        className="text-xs font-bold text-teal-800 hover:underline px-1 cursor-pointer"
+                      >
+                        ล้างตัวกรอง
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* VIEW 1: MONTH CALENDAR */}
+                {otCalView === 'month' && (
+                  <div className="space-y-4">
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[700px] border border-gray-200 rounded-xl overflow-hidden">
+                        <div className="grid grid-cols-7 bg-slate-100 border-b border-gray-200 text-center text-[11px] font-bold text-slate-700">
+                          {THAI_CALENDAR_WEEKDAYS.map((wd, idx) => (
+                            <div
+                              key={wd}
+                              className={`py-2 ${idx === 0 || idx === 6 ? 'text-purple-800 bg-purple-50/40' : ''}`}
                             >
-                              {o.shift}
-                            </span>
-                          </td>
-                          <td className="py-2 px-3">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="font-semibold text-gray-900">{o.staffName}</span>
-                              {o.isExternal && (
-                                <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
-                                  เฉพาะกิจนอก OPD
-                                </span>
-                              )}
+                              {wd}
                             </div>
-                            {o.lastEditReason && (
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-7 divide-x divide-y divide-gray-200 bg-white">
+                          {otMonthCells.map((cell) => {
+                            const dayOts = filteredOtRecords.filter((o) => o.date === cell.date);
+                            const isSelected = cell.date === otCalAnchor;
+                            const isToday = cell.date === todayStr;
+                            return (
                               <div
-                                className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
-                                title={`แก้ไขโดย ${o.lastEditedBy || 'Admin'} เมื่อ ${o.lastEditedAt ? formatThaiDateTime(o.lastEditedAt) : '-'}`}
+                                key={cell.date}
+                                onClick={() => setOtCalAnchor(cell.date)}
+                                className={`min-h-[92px] p-1.5 cursor-pointer transition-colors flex flex-col gap-1 ${
+                                  !cell.inMonth
+                                    ? 'bg-slate-50/70 text-gray-400'
+                                    : isSelected
+                                      ? 'bg-teal-50/80 ring-2 ring-inset ring-teal-600'
+                                      : 'hover:bg-slate-50'
+                                }`}
                               >
-                                แก้ไข: {o.lastEditReason}
-                                {o.lastEditedAt ? ` • ${formatThaiDateTime(o.lastEditedAt)}` : ''}
+                                <div className="flex items-center justify-between gap-1">
+                                  <span
+                                    className={`text-[11px] font-bold w-6 h-6 inline-flex items-center justify-center rounded-full ${
+                                      isToday
+                                        ? 'bg-teal-700 text-white'
+                                        : isSelected
+                                          ? 'bg-teal-200 text-teal-950'
+                                          : 'text-gray-700'
+                                    }`}
+                                  >
+                                    {cell.dayNum}
+                                  </span>
+                                  {dayOts.length > 0 && (
+                                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-100 text-teal-900">
+                                      {dayOts.length} เวร
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="space-y-0.5">
+                                  {dayOts.slice(0, 3).map((o) => {
+                                    const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
+                                    const parsedWork = parseOtWorkClinic(o.workClinic);
+                                    return (
+                                      <div
+                                        key={o.id}
+                                        className={`text-[10px] px-1.5 py-0.5 rounded border truncate font-medium ${
+                                          isInTimeOT
+                                            ? 'bg-cyan-50 text-cyan-900 border-cyan-200'
+                                            : 'bg-purple-50 text-purple-900 border-purple-200'
+                                        }`}
+                                        title={`${o.staffName} • ${o.shift} • ${o.workClinic}`}
+                                      >
+                                        {o.staffName.split(' ')[0]} → {parsedWork.clinic}
+                                        {parsedWork.amount === 0.5 ? ' (0.5)' : ''}
+                                      </div>
+                                    );
+                                  })}
+                                  {dayOts.length > 3 && (
+                                    <div className="text-[10px] font-bold text-teal-800 pl-1">
+                                      +{dayOts.length - 3} รายการ
+                                    </div>
+                                  )}
+                                </div>
                               </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Selected Day Quick Detail Strip */}
+                    <div className="p-3.5 rounded-xl bg-teal-50/50 border border-teal-200/80 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs font-bold text-teal-950">
+                          รายการเวรนอกเวลา/ช่วยงาน วันที่ {formatThaiShortDate(otCalAnchor)} ({otDayItems.length} รายการ)
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setOtCalView('day')}
+                          className="text-[11px] font-bold text-teal-800 hover:underline cursor-pointer"
+                        >
+                          เปิดดูแบบรายวัน →
+                        </button>
+                      </div>
+                      {otDayItems.length === 0 ? (
+                        <div className="text-xs text-gray-500">ไม่มีรายการเวรในวันที่เลือก</div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {otDayItems.map((o) => {
+                            const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
+                            const origin = o.affiliation || o.homeClinic;
+                            const parsedWork = parseOtWorkClinic(o.workClinic);
+                            return (
+                              <div
+                                key={o.id}
+                                className="flex items-start justify-between gap-2 bg-white p-2.5 rounded-lg border border-gray-200 text-xs"
+                              >
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-bold text-gray-900">{o.staffName}</span>
+                                    {o.isExternal && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-100 text-indigo-800">
+                                        เฉพาะกิจ
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[11px] text-gray-600">
+                                    {formatPositionLabel(o.position)} • ต้นสังกัด: {origin}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                                        isInTimeOT
+                                          ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                                          : 'bg-purple-50 text-purple-800 border-purple-200'
+                                      }`}
+                                    >
+                                      {o.shift}
+                                    </span>
+                                    <span className="font-bold text-teal-800 text-[11px]">
+                                      → {parsedWork.clinic}
+                                      {parsedWork.amount === 0.5 && parsedWork.periodLabel
+                                        ? ` (0.5 ${parsedWork.periodLabel})`
+                                        : ''}
+                                    </span>
+                                  </div>
+                                </div>
+                                {isAdmin && (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {onUpdateOT && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingOT({ ...o });
+                                          setEditOtReason('');
+                                          setEditOtReasonError('');
+                                        }}
+                                        className="p-1 text-gray-400 hover:text-blue-600 cursor-pointer"
+                                        title="แก้ไข"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDeletingOT(o);
+                                        setDeleteOtReason('');
+                                        setDeleteOtReasonError('');
+                                      }}
+                                      className="p-1 text-gray-400 hover:text-red-500 cursor-pointer"
+                                      title="ลบ"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* VIEW 2: WEEK BOARD */}
+                {otCalView === 'week' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2.5">
+                    {otWeekDates.map((dIso, idx) => {
+                      const dayOts = filteredOtRecords.filter((o) => o.date === dIso);
+                      const isToday = dIso === todayStr;
+                      const isSelected = dIso === otCalAnchor;
+                      return (
+                        <div
+                          key={dIso}
+                          onClick={() => setOtCalAnchor(dIso)}
+                          className={`rounded-xl border p-2.5 min-h-[190px] flex flex-col gap-2 cursor-pointer transition-all ${
+                            isSelected
+                              ? 'border-teal-600 bg-teal-50/40 ring-1 ring-teal-500'
+                              : 'border-gray-200 bg-white hover:border-teal-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between border-b pb-1.5">
+                            <span className="text-[11px] font-bold text-gray-700">
+                              {THAI_CALENDAR_WEEKDAYS[idx]} {parseIsoParts(dIso).d}
+                            </span>
+                            {isToday && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-teal-700 text-white">
+                                วันนี้
+                              </span>
                             )}
-                          </td>
-                          <td className="py-2 px-2 text-gray-600">
-                            {formatPositionLabel(o.position)}
-                          </td>
-                          <td className="py-2 px-2 text-gray-600">{origin}</td>
-                          <td className="py-2 px-2 font-semibold text-teal-800">{o.workClinic}</td>
-                          <td className="py-2 px-2 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              {isAdmin && onUpdateOT && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingOT({ ...o });
-                                    setEditOtReason('');
-                                    setEditOtReasonError('');
-                                  }}
-                                  className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
-                                  title="แก้ไขรายการและระบุเหตุผล (Admin)"
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                              {isAdmin ? (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setDeletingOT(o);
-                                    setDeleteOtReason('');
-                                    setDeleteOtReasonError('');
-                                  }}
-                                  className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
-                                  title="ลบรายการและบันทึกเหตุผล (Admin)"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              ) : (
-                                <span className="text-gray-300 text-[10px]">-</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
+                          </div>
+                          <div className="space-y-1.5 flex-1">
+                            {dayOts.length === 0 ? (
+                              <div className="text-[10px] text-gray-400 italic py-2">ไม่มีเวร</div>
+                            ) : (
+                              dayOts.map((o) => {
+                                const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
+                                const parsedWork = parseOtWorkClinic(o.workClinic);
+                                return (
+                                  <div
+                                    key={o.id}
+                                    className={`p-1.5 rounded-lg border text-[10px] space-y-0.5 ${
+                                      isInTimeOT
+                                        ? 'bg-cyan-50/90 border-cyan-200 text-cyan-950'
+                                        : 'bg-purple-50/90 border-purple-200 text-purple-950'
+                                    }`}
+                                  >
+                                    <div className="font-bold truncate">{o.staffName}</div>
+                                    <div className="text-[9px] opacity-80 truncate">{o.shift}</div>
+                                    <div className="font-bold text-teal-900 truncate">
+                                      → {parsedWork.clinic}
+                                      {parsedWork.amount === 0.5 ? ` (0.5)` : ''}
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  </div>
+                )}
+
+                {/* VIEW 3: DAY ROSTER */}
+                {otCalView === 'day' && (
+                  <div>
+                    {otDayItems.length === 0 ? (
+                      <div className="py-10 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                        ไม่มีข้อมูลเวรนอกเวลาหรือปฏิบัติหน้าที่แทนในวันที่ {formatThaiShortDate(otCalAnchor)}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {otDayItems.map((o) => {
+                          const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
+                          const origin = o.affiliation || o.homeClinic;
+                          const parsedWork = parseOtWorkClinic(o.workClinic);
+                          return (
+                            <div
+                              key={o.id}
+                              className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 ${
+                                isInTimeOT ? 'bg-cyan-50/30 border-cyan-200' : 'bg-purple-50/30 border-purple-200'
+                              }`}
+                            >
+                              <div className="space-y-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-xs font-bold text-gray-900">{o.staffName}</span>
+                                  {o.isExternal && (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                                      เฉพาะกิจนอก OPD
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-gray-600">
+                                  {formatPositionLabel(o.position)} • สังกัด: {origin}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                      isInTimeOT
+                                        ? 'bg-cyan-100 text-cyan-900 border-cyan-300'
+                                        : 'bg-purple-100 text-purple-900 border-purple-300'
+                                    }`}
+                                  >
+                                    {o.shift}
+                                  </span>
+                                  <span className="text-xs font-extrabold text-teal-800">
+                                    ปฏิบัติงาน: {parsedWork.clinic}
+                                    {parsedWork.amount === 0.5 && parsedWork.periodLabel
+                                      ? ` (0.5 ${parsedWork.periodLabel})`
+                                      : ''}
+                                  </span>
+                                </div>
+                              </div>
+                              {isAdmin && (
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {onUpdateOT && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingOT({ ...o });
+                                        setEditOtReason('');
+                                        setEditOtReasonError('');
+                                      }}
+                                      className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-500 hover:text-blue-600 cursor-pointer"
+                                      title="แก้ไข"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeletingOT(o);
+                                      setDeleteOtReason('');
+                                      setDeleteOtReasonError('');
+                                    }}
+                                    className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-500 hover:text-red-500 cursor-pointer"
+                                    title="ลบ"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* VIEW 4: FULL TABLE LIST */}
+                {otCalView === 'list' && (
+                  filteredOtRecords.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-gray-400">
+                      ยังไม่มีประวัติการบันทึกเวรนอกเวลาหรือปฏิบัติหน้าที่แทน
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
+                          <tr>
+                            <th className="py-2.5 px-3">วันที่</th>
+                            <th className="py-2.5 px-2">กะเวลา / ประเภท OT</th>
+                            <th className="py-2.5 px-3">ชื่อ-สกุล</th>
+                            <th className="py-2.5 px-2">ตำแหน่ง</th>
+                            <th className="py-2.5 px-2">สังกัด / หน่วยงานต้นทาง</th>
+                            <th className="py-2.5 px-2">ห้องตรวจที่ปฏิบัติงาน</th>
+                            <th className="py-2.5 px-2 text-center">จัดการ</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {filteredOtRecords.map((o) => {
+                            const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
+                            const origin = o.affiliation || o.homeClinic;
+                            const parsedWork = parseOtWorkClinic(o.workClinic);
+                            return (
+                              <tr key={o.id} className="hover:bg-slate-50/80">
+                                <td className="py-2 px-3 text-gray-700 font-medium whitespace-nowrap">
+                                  {formatThaiShortDate(o.date)}
+                                </td>
+                                <td className="py-2 px-2">
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                                      isInTimeOT
+                                        ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                                        : 'bg-purple-50 text-purple-800 border-purple-200'
+                                    }`}
+                                  >
+                                    {o.shift}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-semibold text-gray-900">{o.staffName}</span>
+                                    {o.isExternal && (
+                                      <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                                        เฉพาะกิจนอก OPD
+                                      </span>
+                                    )}
+                                  </div>
+                                  {o.lastEditReason && (
+                                    <div
+                                      className="text-[10px] text-blue-700 bg-blue-50/80 border border-blue-100 rounded px-1.5 py-0.5 mt-1 inline-block"
+                                      title={`แก้ไขโดย ${o.lastEditedBy || 'Admin'} เมื่อ ${o.lastEditedAt ? formatThaiDateTime(o.lastEditedAt) : '-'}`}
+                                    >
+                                      แก้ไข: {o.lastEditReason}
+                                      {o.lastEditedAt ? ` • ${formatThaiDateTime(o.lastEditedAt)}` : ''}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-gray-600">
+                                  {formatPositionLabel(o.position)}
+                                </td>
+                                <td className="py-2 px-2 text-gray-600">{origin}</td>
+                                <td className="py-2 px-2 font-semibold text-teal-800">
+                                  {parsedWork.clinic}
+                                  {parsedWork.amount === 0.5 && parsedWork.periodLabel && (
+                                    <span className="ml-1.5 inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                      0.5 {parsedWork.periodLabel}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    {isAdmin && onUpdateOT && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingOT({ ...o });
+                                          setEditOtReason('');
+                                          setEditOtReasonError('');
+                                        }}
+                                        className="text-gray-400 hover:text-blue-600 p-1 cursor-pointer"
+                                        title="แก้ไขรายการและระบุเหตุผล (Admin)"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    {isAdmin ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setDeletingOT(o);
+                                          setDeleteOtReason('');
+                                          setDeleteOtReasonError('');
+                                        }}
+                                        className="text-gray-400 hover:text-red-500 p-1 cursor-pointer"
+                                        title="ลบรายการและบันทึกเหตุผล (Admin)"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    ) : (
+                                      <span className="text-gray-300 text-[10px]">-</span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )
+                )}
 
             {/* OT Audit Log Section */}
             {auditLogs.filter((a) => a.action === 'แก้ไขเวร OT' || a.action === 'ลบเวร OT').length > 0 && (
@@ -1896,7 +3140,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 )}
               </div>
             )}
-          </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2145,7 +3391,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 {summaryKpis.totalLeaves}{' '}
                 <span className="text-xs font-normal text-amber-600">วัน</span>
               </div>
-              <span className="text-[10px] text-amber-500">ลาป่วย/ลากิจ/ลาพักผ่อน/อบรม</span>
+              <span className="text-[10px] text-amber-500">ลาป่วย/ลากิจ/ลาพักผ่อน (ไม่รวมอบรม)</span>
             </div>
           </div>
 
@@ -2153,8 +3399,16 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           {summaryReportMode !== 'LEAVE_REPORT' && (
             <div className={printTarget === 'LEAVE_REPORT' ? 'no-print' : ''}>
               {monthFilter === 'ALL' ? (
-            <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
-              <table className="w-full text-left text-xs print:text-[8px] print-fit-table">
+            <div className="space-y-1.5">
+              {shiftFilter === 'ALL' && (
+                <div className="no-print text-[11px] text-teal-800 bg-teal-50/70 border border-teal-200/70 rounded-lg px-3 py-1.5 flex items-center justify-between">
+                  <span>
+                    รูปแบบตัวเลขในตาราง 12 เดือน: <strong>วันทำงานในเวลา / เวรนอกเวลา (OT)</strong> (เช่น 18.5/0 หมายถึง ในเวลา 18.5 วัน / OT 0 เวร)
+                  </span>
+                </div>
+              )}
+              <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
+                <table className="w-full text-left text-xs print:text-[8px] print-fit-table">
                 <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px] print:text-[8px]">
                   <tr>
                     <th className="py-2.5 px-3 whitespace-nowrap print:w-[82px] print:px-1 print:py-1">ชื่อ - นามสกุล</th>
@@ -2251,22 +3505,20 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 : shiftFilter === 'OT'
                                   ? ot
                                   : inTime + ot;
+                            const hasAnyWork = shiftFilter === 'ALL' ? inTime > 0 || ot > 0 : val > 0;
 
                             return (
                               <td
                                 key={m.key}
                                 className={`py-2 px-1.5 text-center text-[11px] print:text-[7.5px] print:px-0.5 print:py-1 ${
-                                  val > 0 ? 'font-bold text-teal-950' : 'text-gray-300'
+                                  hasAnyWork ? 'font-bold text-teal-950' : 'text-gray-300'
                                 }`}
                                 title={`ในเวลา: ${inTime} วัน, OT: ${ot} เวร, ลา: ${detail?.leaves || 0} วัน`}
                               >
-                                {val > 0 ? (
+                                {hasAnyWork ? (
                                   shiftFilter === 'ALL' ? (
-                                    <span className="inline-flex flex-col items-center">
-                                      <span>{val}</span>
-                                      <span className="text-[9px] print:text-[6.5px] font-normal text-gray-400">
-                                        {inTime}/{ot}
-                                      </span>
+                                    <span className="font-bold text-teal-950 whitespace-nowrap">
+                                      {inTime}/{ot}
                                     </span>
                                   ) : (
                                     val
@@ -2300,6 +3552,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   )}
                 </tbody>
               </table>
+            </div>
             </div>
           ) : (
             /* VIEW B: Monthly Detailed Table */
@@ -2736,13 +3989,72 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     step="0.5"
                     min="0.5"
                     value={editingLeave.days}
-                    onChange={(e) =>
-                      setEditingLeave({ ...editingLeave, days: Number(e.target.value) || 1 })
-                    }
+                    onChange={(e) => {
+                      const nextDays = Number(e.target.value) || 1;
+                      const currentPeriod = parseLeavePeriodFromNote(editingLeave.note);
+                      setEditingLeave({
+                        ...editingLeave,
+                        days: nextDays,
+                        note:
+                          nextDays === 0.5 && editingLeave.startDate === editingLeave.endDate
+                            ? formatLeaveNoteWithPeriod(
+                                editingLeave.note || '',
+                                0.5,
+                                currentPeriod || 'ครึ่งวันเช้า'
+                              )
+                            : stripLeavePeriodFromNote(editingLeave.note),
+                      });
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-bold"
                   />
                 </div>
               </div>
+
+              {editingLeave.startDate === editingLeave.endDate && (
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">
+                    ช่วงเวลาการลา (สำหรับลาวันเดียว)
+                  </label>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(
+                      [
+                        { label: 'เต็มวัน (1.0)', days: 1, period: '' as HalfDayPeriod },
+                        { label: 'ครึ่งวันเช้า (0.5)', days: 0.5, period: 'ครึ่งวันเช้า' as HalfDayPeriod },
+                        { label: 'ครึ่งวันบ่าย (0.5)', days: 0.5, period: 'ครึ่งวันบ่าย' as HalfDayPeriod },
+                      ] as const
+                    ).map((opt) => {
+                      const currentPeriod = parseLeavePeriodFromNote(editingLeave.note);
+                      const isActive =
+                        editingLeave.days === opt.days &&
+                        (opt.days === 1 ? !currentPeriod : currentPeriod === opt.period);
+                      return (
+                        <button
+                          key={opt.label}
+                          type="button"
+                          onClick={() =>
+                            setEditingLeave({
+                              ...editingLeave,
+                              days: opt.days,
+                              note: formatLeaveNoteWithPeriod(
+                                editingLeave.note || '',
+                                opt.days,
+                                opt.period
+                              ),
+                            })
+                          }
+                          className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                            isActive
+                              ? 'bg-amber-600 text-white border-amber-700'
+                              : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-gray-700 mb-1">หมายเหตุการลา</label>
@@ -3026,22 +4338,71 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">
-                  ห้องตรวจที่ปฏิบัติงาน
-                </label>
-                <select
-                  value={editingOT.workClinic}
-                  onChange={(e) => setEditingOT({ ...editingOT, workClinic: e.target.value })}
-                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
-                >
-                  {allClinics.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {(() => {
+                const parsedWork = parseOtWorkClinic(editingOT.workClinic);
+                return (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">
+                        ห้องตรวจที่ปฏิบัติงาน
+                      </label>
+                      <select
+                        value={parsedWork.clinic}
+                        onChange={(e) =>
+                          setEditingOT({
+                            ...editingOT,
+                            workClinic: formatOtWorkClinicValue(
+                              e.target.value,
+                              parsedWork.amount,
+                              parsedWork.periodLabel
+                            ),
+                          })
+                        }
+                        className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
+                      >
+                        {allClinics.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">
+                        สัดส่วนแรง / ช่วงเวลา
+                      </label>
+                      <select
+                        value={
+                          parsedWork.amount === 0.5
+                            ? parsedWork.periodLabel === 'ครึ่งวันบ่าย'
+                              ? '0.5-PM'
+                              : '0.5-AM'
+                            : '1'
+                        }
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          const nextAmt = v === '1' ? 1 : 0.5;
+                          const nextPeriod: HalfDayPeriod =
+                            v === '0.5-AM' ? 'ครึ่งวันเช้า' : v === '0.5-PM' ? 'ครึ่งวันบ่าย' : '';
+                          setEditingOT({
+                            ...editingOT,
+                            workClinic: formatOtWorkClinicValue(
+                              parsedWork.clinic,
+                              nextAmt,
+                              nextPeriod
+                            ),
+                          });
+                        }}
+                        className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs bg-white"
+                      >
+                        <option value="1">เต็มเวร / เต็มวัน (1.0)</option>
+                        <option value="0.5-AM">0.5 แรง — ครึ่งวันเช้า</option>
+                        <option value="0.5-PM">0.5 แรง — ครึ่งวันบ่าย</option>
+                      </select>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Mandatory Edit Reason */}
               <div className="p-3 rounded-xl bg-teal-50/70 border border-teal-200 space-y-2">

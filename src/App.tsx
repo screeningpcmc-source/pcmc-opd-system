@@ -20,7 +20,12 @@ import {
   OUT_TIME_CLINICS,
   DEFAULT_PREMIUM_SUB_CLINICS,
   PREMIUM_CLINIC_GROUP,
-  getEffectiveTotalPt
+  getEffectiveTotalPt,
+  WorkloadLeavePayload,
+  WorkloadCrossCoveragePayload,
+  WorkloadTrainingPayload,
+  formatLeaveNoteWithPeriod,
+  formatOtWorkClinicValue
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -741,9 +746,9 @@ export default function App() {
   // Handler: Save Daily Workload
   const handleSaveWorkload = async (
     entry: DailyWorkload,
-    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
-    crossCoverageData?: { staffName: string; targetClinic: string } | null,
-    trainingData?: { staffName: string; topic: string; note: string }[] | null
+    leaveData?: WorkloadLeavePayload[] | null,
+    crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
+    trainingData?: WorkloadTrainingPayload[] | null
   ) => {
     const newLeaveEntries: LeaveRecord[] = [];
     const newOtEntries: OTAttendance[] = [];
@@ -751,6 +756,8 @@ export default function App() {
     if (leaveData) {
       leaveData.forEach((ld, idx) => {
         const staff = db.staff.find(s => s.name === ld.staffName);
+        const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
+        const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
         newLeaveEntries.push({
           id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
           startDate: entry.date,
@@ -759,8 +766,8 @@ export default function App() {
           position: staff ? staff.position : 'RN',
           clinic: staff ? staff.homeClinic : entry.clinic,
           leaveType: ld.leaveType,
-          days: 1,
-          note: ld.note,
+          days: numericDays,
+          note: formattedNote,
         });
       });
     }
@@ -782,18 +789,35 @@ export default function App() {
       });
     }
 
-    if (crossCoverageData) {
-      const staff = db.staff.find(s => s.name === crossCoverageData.staffName);
+    const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
+      ? crossCoverageData
+      : crossCoverageData
+        ? [crossCoverageData]
+        : [];
+
+    crossList.forEach((cc, idx) => {
+      if (!cc.staffName || !cc.targetClinic) return;
+      const staff = db.staff.find(s => s.name === cc.staffName);
+      const amount = cc.amount === 0.5 ? 0.5 : 1;
+      const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
+      const resolvedHome =
+        cc.homeClinic ||
+        (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : entry.clinic));
+      const resolvedShift =
+        cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : entry.shift);
       newOtEntries.push({
-        id: `OT-CROSS-${Date.now()}`,
+        id: `OT-CROSS-${Date.now()}-${idx}`,
         date: entry.date,
-        shift: entry.shift,
-        staffName: crossCoverageData.staffName,
-        position: staff ? staff.position : 'RN',
-        homeClinic: staff ? staff.homeClinic : entry.clinic,
-        workClinic: crossCoverageData.targetClinic,
+        shift: resolvedShift,
+        staffName: cc.staffName,
+        position: cc.position || (staff ? staff.position : 'RN'),
+        homeClinic: resolvedHome,
+        workClinic: workClinicVal,
+        ...(cc.isExternal
+          ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
+          : {}),
       });
-    }
+    });
 
     clearWorkloadTombstone(entry);
     enqueuePendingOutboxWorkloads([entry]);
@@ -863,9 +887,9 @@ export default function App() {
   // Handler: Save Batch Daily Workloads (used by คลินิกพิเศษ PREMIUM Pooled Staffing Model)
   const handleSaveBatchWorkloads = async (
     entries: DailyWorkload[],
-    leaveData?: { staffName: string; leaveType: LeaveType; note: string }[] | null,
-    crossCoverageData?: { staffName: string; targetClinic: string } | null,
-    trainingData?: { staffName: string; topic: string; note: string }[] | null
+    leaveData?: WorkloadLeavePayload[] | null,
+    crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
+    trainingData?: WorkloadTrainingPayload[] | null
   ) => {
     if (!entries || entries.length === 0) return;
     const primaryEntry = entries[0];
@@ -875,6 +899,8 @@ export default function App() {
     if (leaveData) {
       leaveData.forEach((ld, idx) => {
         const staff = db.staff.find(s => s.name === ld.staffName);
+        const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
+        const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
         newLeaveEntries.push({
           id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
           startDate: primaryEntry.date,
@@ -883,8 +909,8 @@ export default function App() {
           position: staff ? staff.position : 'RN',
           clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
           leaveType: ld.leaveType,
-          days: 1,
-          note: ld.note,
+          days: numericDays,
+          note: formattedNote,
         });
       });
     }
@@ -906,18 +932,35 @@ export default function App() {
       });
     }
 
-    if (crossCoverageData) {
-      const staff = db.staff.find(s => s.name === crossCoverageData.staffName);
+    const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
+      ? crossCoverageData
+      : crossCoverageData
+        ? [crossCoverageData]
+        : [];
+
+    crossList.forEach((cc, idx) => {
+      if (!cc.staffName || !cc.targetClinic) return;
+      const staff = db.staff.find(s => s.name === cc.staffName);
+      const amount = cc.amount === 0.5 ? 0.5 : 1;
+      const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
+      const resolvedHome =
+        cc.homeClinic ||
+        (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP));
+      const resolvedShift =
+        cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : primaryEntry.shift);
       newOtEntries.push({
-        id: `OT-CROSS-${Date.now()}`,
+        id: `OT-CROSS-${Date.now()}-${idx}`,
         date: primaryEntry.date,
-        shift: primaryEntry.shift,
-        staffName: crossCoverageData.staffName,
-        position: staff ? staff.position : 'RN',
-        homeClinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
-        workClinic: crossCoverageData.targetClinic,
+        shift: resolvedShift,
+        staffName: cc.staffName,
+        position: cc.position || (staff ? staff.position : 'RN'),
+        homeClinic: resolvedHome,
+        workClinic: workClinicVal,
+        ...(cc.isExternal
+          ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
+          : {}),
       });
-    }
+    });
 
     entries.forEach(clearWorkloadTombstone);
     enqueuePendingOutboxWorkloads(entries);
