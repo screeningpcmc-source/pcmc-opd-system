@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { 
   DailyWorkload, 
   SystemSettings, 
@@ -15,6 +15,8 @@ import {
   normalizeWorkloadRecord
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
+import { THAI_MONTHS } from '../utils/thaiDate';
+import { exportElementAsJpeg } from '../utils/exportImage';
 import { 
   BarChart3, 
   PieChart, 
@@ -28,7 +30,10 @@ import {
   Sliders, 
   Sparkles,
   ArrowRight,
-  Star
+  Star,
+  Printer,
+  ImageDown,
+  FileSpreadsheet
 } from 'lucide-react';
 
 interface ProductivityTabProps {
@@ -53,6 +58,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [selectedShift, setSelectedShift] = useState<string>('ALL');
   const [selectedClinic, setSelectedClinic] = useState<string>('ALL');
   const [excludeLasik, setExcludeLasik] = useState<boolean>(true); // Default exclude LASIK as per standard OPD nursing formula
+  const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
+  const reportSheetRef = useRef<HTMLDivElement | null>(null);
 
   // Combine unique clinics list (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at top)
   const allClinicsList = useMemo(() => {
@@ -267,10 +274,135 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return list.sort((a, b) => b.totalPt - a.totalPt);
   }, [filteredWorkloads, settings, premiumSubClinics]);
 
+  // Daily grouped rows for the official PDF-style monthly report
+  const dailyReportRows = useMemo(() => {
+    const byDate = new Map<
+      string,
+      {
+        date: string;
+        day: number;
+        hn: number;
+        rn: number;
+        pn: number;
+        na: number;
+        pt: number;
+        notes: string[];
+      }
+    >();
+
+    filteredWorkloads.forEach((w) => {
+      const dateStr = (w.date || '').trim();
+      if (!dateStr) return;
+      const dayNum = Number(dateStr.split('-')[2]) || 0;
+      if (!byDate.has(dateStr)) {
+        byDate.set(dateStr, {
+          date: dateStr,
+          day: dayNum,
+          hn: 0,
+          rn: 0,
+          pn: 0,
+          na: 0,
+          pt: 0,
+          notes: [],
+        });
+      }
+      const row = byDate.get(dateStr)!;
+      row.hn += w.hn || 0;
+      row.rn += w.rn || 0;
+      row.pn += w.pn || 0;
+      row.na += w.na !== undefined ? w.na : (w.pca || 0);
+      row.pt += getEffectiveTotalPt(w);
+      const cleanNote = (w.note || '').trim();
+      if (cleanNote && !row.notes.includes(cleanNote)) {
+        row.notes.push(cleanNote);
+      }
+    });
+
+    return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [filteredWorkloads]);
+
+  const actualWorkingDays = dailyReportRows.length;
+
+  const officialReportMeta = useMemo(() => {
+    const [yrStr, moStr] = selectedMonth.split('-');
+    const yr = Number(yrStr) || new Date().getFullYear();
+    const mo = Number(moStr) || new Date().getMonth() + 1;
+    const monthLabel = `${THAI_MONTHS[Math.max(0, Math.min(11, mo - 1))]} ${yr + 543}`;
+    const clinicLabel =
+      selectedClinic === 'ALL'
+        ? excludeLasik
+          ? 'ภาพรวมทั้ง OPD (ไม่รวมศูนย์เลสิก)'
+          : 'ภาพรวมทั้ง OPD (ทุกคลินิก)'
+        : selectedClinic;
+    const shiftSuffix = selectedShift !== 'ALL' ? ` (${selectedShift})` : '';
+    const title = `แบบรวบรวมภาระงานผู้ป่วยนอก ห้องตรวจ ${clinicLabel}${shiftSuffix} ${monthLabel}`;
+
+    const rnHours = stats.sumRN * 8;
+    const auxHours = (stats.sumPN + stats.sumNA) * 8;
+    const totalHours = stats.totalNursingStaff * 8;
+    const rnPct = stats.totalNursingStaff > 0 ? (stats.sumRN / stats.totalNursingStaff) * 100 : 0;
+    const auxPct = stats.totalNursingStaff > 0 ? ((stats.sumPN + stats.sumNA) / stats.totalNursingStaff) * 100 : 0;
+
+    const nhppdFormulaVal = stats.isScreeningOnly
+      ? stats.screeningNhppd
+      : stats.hasScreeningRecords && selectedClinic === 'ALL'
+      ? Number(stats.effectiveNhppd.toFixed(2))
+      : stats.generalNhppd;
+
+    const fmtStaff = (n: number) =>
+      n === 0 ? '' : Number.isInteger(n) ? String(n) : Number(n.toFixed(1)).toString();
+    const fmtSum = (n: number) =>
+      Number.isInteger(n) ? String(n) : Number(n.toFixed(1)).toString();
+    const fmtPct = (n: number) =>
+      Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1);
+
+    const minTableRows = dailyReportRows.length > 0 ? Math.max(dailyReportRows.length + 2, 16) : 14;
+    const blankRowCount = Math.max(0, minTableRows - dailyReportRows.length);
+
+    return {
+      monthLabel,
+      clinicLabel,
+      title,
+      rnHours,
+      auxHours,
+      totalHours,
+      rnPct,
+      auxPct,
+      nhppdFormulaVal,
+      fmtStaff,
+      fmtSum,
+      fmtPct,
+      blankRowCount,
+    };
+  }, [selectedMonth, selectedClinic, selectedShift, excludeLasik, stats, dailyReportRows.length]);
+
+  const handlePrintOfficialReport = () => {
+    window.print();
+  };
+
+  const handleExportOfficialJpeg = async () => {
+    if (!reportSheetRef.current) return;
+    setIsExportingJpeg(true);
+    try {
+      const clinicSlug =
+        selectedClinic === 'ALL'
+          ? 'OPD_ALL'
+          : selectedClinic.replace(/[^\wก-ฮะ-์]+/g, '_');
+      await exportElementAsJpeg(
+        reportSheetRef.current,
+        `OPD_Productivity_${selectedMonth}_${clinicSlug}.jpeg`
+      );
+    } catch (err) {
+      console.error('Export Productivity JPEG error:', err);
+    } finally {
+      setIsExportingJpeg(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Banner Notice */}
-      <div className="bg-gradient-to-r from-amber-50 via-yellow-50 to-orange-50 border border-amber-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+      <div className="no-print bg-gradient-to-r from-amber-50 via-yellow-50 to-orange-50 border border-amber-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-lg bg-amber-600 text-white flex items-center justify-center shrink-0 shadow-sm">
             <Calculator className="w-5 h-5" />
@@ -285,15 +417,32 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold px-3 py-1.5 bg-white text-amber-900 border border-amber-300 rounded-lg shadow-2xs">
             วันทำการที่บันทึก: {workingDays} วัน
           </span>
+          <button
+            type="button"
+            onClick={handleExportOfficialJpeg}
+            disabled={isExportingJpeg}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+          >
+            <ImageDown className="w-3.5 h-3.5" />
+            <span>{isExportingJpeg ? 'กำลังสร้างรูป...' : 'บันทึกเป็น .JPEG'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={handlePrintOfficialReport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-blue-700 hover:bg-blue-600 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>พิมพ์รายงาน / PDF</span>
+          </button>
         </div>
       </div>
 
       {/* Filter Bar with LASIK Exclusion Toggle */}
-      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 space-y-3">
+      <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-1">
@@ -359,7 +508,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       </div>
 
       {/* Main 6 Steps Formulas Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="no-print grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {/* Step 1: Avg Patients / Day */}
         <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-2xs space-y-1.5">
           <div className="flex items-center justify-between text-gray-500 text-xs">
@@ -474,7 +623,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       </div>
 
       {/* Productivity Status Banner & Recommendations */}
-      <div className={`rounded-2xl p-5 border ${status.color} shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4`}>
+      <div className={`no-print rounded-2xl p-5 border ${status.color} shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4`}>
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-xl bg-white shadow-xs shrink-0">
             <StatusIcon className="w-6 h-6" />
@@ -504,7 +653,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       </div>
 
       {/* Skill Mix Breakdown Visual Bar */}
-      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3">
+      <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3">
         <h3 className="text-xs font-bold text-gray-900 flex items-center justify-between">
           <span className="flex items-center gap-1.5">
             <Layers className="w-4 h-4 text-purple-600" />
@@ -570,7 +719,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       </div>
 
       {/* Comparison Table by Clinic */}
-      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+      <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
         <h3 className="text-xs font-bold text-gray-900 flex items-center justify-between border-b pb-2">
           <span>เปรียบเทียบภาระงานและ Productivity แยกรายห้องตรวจ ({clinicBreakdown.length} คลินิก)</span>
           <span className="text-[11px] font-normal text-gray-500">จัดเรียงตามจำนวนผู้ป่วย</span>
@@ -660,6 +809,358 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Official PDF / JPEG Printable Productivity Form */}
+      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-6 space-y-4 print:p-0 print:border-0 print:shadow-none print:rounded-none">
+        <div className="no-print flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+          <div className="flex items-center gap-2">
+            <FileSpreadsheet className="w-4 h-4 text-amber-600 shrink-0" />
+            <div>
+              <h3 className="text-xs font-bold text-gray-900">
+                แบบรวบรวมภาระงานผู้ป่วยนอก (แบบฟอร์มมาตรฐาน A4 สำหรับบันทึกเป็น PDF / .JPEG)
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                แสดงข้อมูลตรงตามตัวกรองเดือน กะเวลา และห้องตรวจที่เลือกไว้ด้านบน
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportOfficialJpeg}
+              disabled={isExportingJpeg}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              <ImageDown className="w-3.5 h-3.5" />
+              <span>{isExportingJpeg ? 'กำลังสร้างรูป...' : 'บันทึกเป็น .JPEG'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handlePrintOfficialReport}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-blue-700 hover:bg-blue-600 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>พิมพ์รายงาน / PDF</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto print:overflow-visible">
+          <div
+            ref={reportSheetRef}
+            className="font-sarabun bg-white text-black mx-auto w-full max-w-[794px] min-w-[660px] print:min-w-0 print:max-w-full p-4 sm:p-6 print:p-0"
+          >
+            {/* Main Form Grid matching the official PDF layout */}
+            <table className="w-full border-collapse border border-black text-[12px] print:text-[10.5px] leading-tight">
+              <colgroup>
+                <col className="w-[9%]" />
+                <col className="w-[35%]" />
+                <col className="w-[7.5%]" />
+                <col className="w-[7.5%]" />
+                <col className="w-[7.5%]" />
+                <col className="w-[7.5%]" />
+                <col className="w-[13%]" />
+                <col className="w-[13%]" />
+              </colgroup>
+              <tbody>
+                {/* Title Header */}
+                <tr>
+                  <td
+                    colSpan={8}
+                    className="border border-black py-1.5 px-2 text-center font-bold text-[15px] print:text-[13px] bg-white"
+                  >
+                    {officialReportMeta.title}
+                  </td>
+                </tr>
+
+                {/* Summary Header Row */}
+                <tr className="text-center font-bold bg-white">
+                  <td className="border border-black py-1 px-1">วันรวม</td>
+                  <td className="border border-black py-1 px-2">Staff</td>
+                  <td className="border border-black py-1 px-1">HN</td>
+                  <td className="border border-black py-1 px-1">RN</td>
+                  <td className="border border-black py-1 px-1">PN</td>
+                  <td className="border border-black py-1 px-1">NA</td>
+                  <td className="border border-black py-1 px-1">รวม ชม.</td>
+                  <td className="border border-black py-1 px-1 text-[10.5px] print:text-[9.5px]">
+                    รวม staff /วัน (A)
+                  </td>
+                </tr>
+
+                {/* Summary Row 1: Headcount */}
+                <tr className="text-center bg-white">
+                  <td rowSpan={2} className="border border-black py-1 px-1 font-bold text-[13px] align-middle">
+                    {actualWorkingDays}
+                  </td>
+                  <td className="border border-black py-1 px-2 font-bold">รวมคน</td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumHN)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumRN)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumPN)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumNA)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-bold">
+                    {officialReportMeta.fmtSum(stats.totalNursingStaff)}
+                  </td>
+                  <td rowSpan={2} className="border border-black py-1 px-1 font-bold align-middle">
+                    {stats.totalNursingStaff > 0 ? stats.input.toFixed(2) : ''}
+                  </td>
+                </tr>
+
+                {/* Summary Row 2: Total Hours (x8) */}
+                <tr className="text-center bg-[#fef9c3]">
+                  <td className="border border-black py-1 px-2 font-bold bg-white">
+                    รวม ชม. การทำงาน (คนx8ชม.)
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumHN * 8)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumRN * 8)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumPN * 8)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-semibold">
+                    {officialReportMeta.fmtSum(stats.sumNA * 8)}
+                  </td>
+                  <td className="border border-black py-1 px-1 font-bold">
+                    {officialReportMeta.fmtSum(officialReportMeta.totalHours)}
+                  </td>
+                </tr>
+
+                {/* Subheader Row */}
+                <tr className="bg-white">
+                  <td colSpan={8} className="border border-black py-1 px-3 font-bold text-left">
+                    อัตราส่วน RN Hr/Auxiliaries
+                  </td>
+                </tr>
+
+                {/* Daily Table Column Headers */}
+                <tr className="text-center font-bold bg-white">
+                  <td className="border border-black py-1 px-1">วันที่</td>
+                  <td className="border border-black py-1 px-2"></td>
+                  <td className="border border-black py-1 px-1">HN</td>
+                  <td className="border border-black py-1 px-1">RN</td>
+                  <td className="border border-black py-1 px-1">PN</td>
+                  <td className="border border-black py-1 px-1">NA</td>
+                  <td className="border border-black py-1 px-1 text-[11px] print:text-[9.5px]">รวม staff/เวร</td>
+                  <td className="border border-black py-1 px-1 text-[11px] print:text-[9.5px]">รวม Pt/วัน</td>
+                </tr>
+
+                {/* Daily Rows */}
+                {dailyReportRows.map((row) => {
+                  const rowNursing = row.rn + row.pn + row.na;
+                  return (
+                    <tr key={row.date} className="text-center h-[22px] print:h-[18px]">
+                      <td className="border border-black py-0.5 px-1">{row.day}</td>
+                      <td className="border border-black py-0.5 px-2 text-left text-[11px] print:text-[9.5px] truncate max-w-[230px]">
+                        {row.notes.join('; ')}
+                      </td>
+                      <td className="border border-black py-0.5 px-1">
+                        {officialReportMeta.fmtStaff(row.hn)}
+                      </td>
+                      <td className="border border-black py-0.5 px-1 bg-[#ccfbf1]">
+                        {officialReportMeta.fmtStaff(row.rn)}
+                      </td>
+                      <td className="border border-black py-0.5 px-1">
+                        {officialReportMeta.fmtStaff(row.pn)}
+                      </td>
+                      <td className="border border-black py-0.5 px-1">
+                        {officialReportMeta.fmtStaff(row.na)}
+                      </td>
+                      <td className="border border-black py-0.5 px-1">
+                        {officialReportMeta.fmtStaff(rowNursing)}
+                      </td>
+                      <td className="border border-black py-0.5 px-1 bg-[#ccfbf1]">
+                        {row.pt}
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {/* Blank Padding Rows for clean official sheet layout */}
+                {Array.from({ length: officialReportMeta.blankRowCount }).map((_, idx) => (
+                  <tr key={`blank-${idx}`} className="text-center h-[22px] print:h-[18px]">
+                    <td className="border border-black py-0.5 px-1">&nbsp;</td>
+                    <td className="border border-black py-0.5 px-2"></td>
+                    <td className="border border-black py-0.5 px-1"></td>
+                    <td className="border border-black py-0.5 px-1 bg-[#ccfbf1]"></td>
+                    <td className="border border-black py-0.5 px-1"></td>
+                    <td className="border border-black py-0.5 px-1"></td>
+                    <td className="border border-black py-0.5 px-1"></td>
+                    <td className="border border-black py-0.5 px-1 bg-[#ccfbf1]"></td>
+                  </tr>
+                ))}
+
+                {/* Bottom Total Row */}
+                <tr className="text-center font-bold bg-[#d9f99d]">
+                  <td className="border border-black py-1 px-1">รวม</td>
+                  <td className="border border-black py-1 px-2"></td>
+                  <td className="border border-black py-1 px-1">
+                    {officialReportMeta.fmtSum(stats.sumHN)}
+                  </td>
+                  <td className="border border-black py-1 px-1">
+                    {officialReportMeta.fmtSum(stats.sumRN)}
+                  </td>
+                  <td className="border border-black py-1 px-1">
+                    {officialReportMeta.fmtSum(stats.sumPN)}
+                  </td>
+                  <td className="border border-black py-1 px-1">
+                    {officialReportMeta.fmtSum(stats.sumNA)}
+                  </td>
+                  <td className="border border-black py-1 px-1">
+                    {officialReportMeta.fmtSum(stats.totalNursingStaff)}
+                  </td>
+                  <td className="border border-black py-1 px-1">{stats.totalPt}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            {/* Bottom Calculation Formulas (Steps 1–5 + Skill Mix Ratio) */}
+            <div className="mt-3 print:mt-2 space-y-1.5 print:space-y-1 text-[12.5px] print:text-[10.5px] text-black px-1">
+              {/* Step 1 */}
+              <div className="grid grid-cols-12 items-center gap-1">
+                <div className="col-span-5 font-medium">1. จำนวนผู้ป่วยเฉลี่ย/วัน</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-3 text-center">PT/Day (B)</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-1 text-right font-bold">{stats.avgPtPerDay.toFixed(2)}</div>
+                <div className="col-span-1 text-left pl-1">คน/วัน</div>
+              </div>
+
+              {/* Step 2 */}
+              <div className="grid grid-cols-12 items-center gap-1">
+                <div className="col-span-5 font-medium">2. อัตรากำลังทั้งหมดที่ต้องการ</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-3 flex flex-col items-center leading-tight">
+                  <span className="border-b border-black px-3 pb-0.5">
+                    (1) x {officialReportMeta.nhppdFormulaVal}
+                  </span>
+                  <span className="pt-0.5">{settings.stdHr}</span>
+                </div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-1 text-right font-bold">{stats.ftc.toFixed(2)}</div>
+                <div className="col-span-1"></div>
+              </div>
+
+              {/* Step 3 */}
+              <div className="grid grid-cols-12 items-center gap-1">
+                <div className="col-span-5 font-medium">3. อัตรากำลังที่ต้องการต่อวัน(Outputs)</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-3 flex flex-col items-center leading-tight">
+                  <span className="border-b border-black px-2 pb-0.5">
+                    (2.) x {settings.annualHr.toLocaleString()} ชม./ปี
+                  </span>
+                  <span className="pt-0.5">{settings.workDays}วัน x 8 ชม.</span>
+                </div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-1 text-right font-bold">{stats.output.toFixed(2)}</div>
+                <div className="col-span-1 text-left pl-1">คน/วัน</div>
+              </div>
+
+              {/* Step 4 */}
+              <div className="grid grid-cols-12 items-center gap-1">
+                <div className="col-span-5 font-medium">4. อัตรากำลังที่จัดเฉลี่ยต่อวัน(Inputs)</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-3 flex flex-col items-center leading-tight">
+                  <span className="border-b border-black px-3 pb-0.5">RN+PN+NA</span>
+                  <span className="pt-0.5">วันรวม</span>
+                </div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-1 text-right font-bold">{stats.input.toFixed(2)}</div>
+                <div className="col-span-1 text-left pl-1">คน/วัน</div>
+              </div>
+
+              {/* Step 5 */}
+              <div className="grid grid-cols-12 items-center gap-1">
+                <div className="col-span-5 font-medium">5. Productivity</div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-3 flex flex-col items-center leading-tight">
+                  <span className="border-b border-black px-2 pb-0.5">Outputs(3.) x 100</span>
+                  <span className="pt-0.5">Inputs(4.)</span>
+                </div>
+                <div className="col-span-1 text-center">=</div>
+                <div className="col-span-1 text-right font-bold">{stats.productivity.toFixed(2)}</div>
+                <div className="col-span-1 text-left pl-1">%</div>
+              </div>
+
+              {/* Skill Mix Section */}
+              <div className="pt-2 print:pt-1.5 space-y-1.5 print:space-y-1">
+                <div className="font-semibold">
+                  สัดส่วนการผสมผสานอัตรากำลัง พยาบาล (RN+TN) : NA (PN+NA)
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-3">
+                  <span className="w-20">พยาบาล</span>
+                  <span>=</span>
+                  <div className="inline-flex flex-col items-center leading-tight">
+                    <span className="border-b border-black px-2 pb-0.5">
+                      รวมชั่วโมงการทำงานของ RN+TN
+                    </span>
+                    <span className="pt-0.5">รวมชั่วโมงทั้งหมด</span>
+                  </div>
+                  <span>x 100</span>
+                  <span>=</span>
+                  <div className="inline-flex flex-col items-center leading-tight min-w-[70px]">
+                    <span className="border-b border-black px-2 pb-0.5">
+                      {officialReportMeta.fmtSum(officialReportMeta.rnHours)} x 100
+                    </span>
+                    <span className="pt-0.5">
+                      {officialReportMeta.fmtSum(officialReportMeta.totalHours)}
+                    </span>
+                  </div>
+                  <span>=</span>
+                  <span className="font-bold min-w-[36px] text-right">
+                    {officialReportMeta.fmtPct(officialReportMeta.rnPct)}
+                  </span>
+                  <span>%</span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-3">
+                  <span className="w-20">Nurse Aid</span>
+                  <span>=</span>
+                  <div className="inline-flex flex-col items-center leading-tight">
+                    <span className="border-b border-black px-2 pb-0.5">
+                      รวมชั่วโมงการทำงานของ PN+NA
+                    </span>
+                    <span className="pt-0.5">รวมชั่วโมงทั้งหมด</span>
+                  </div>
+                  <span>x 100</span>
+                  <span>=</span>
+                  <div className="inline-flex flex-col items-center leading-tight min-w-[70px]">
+                    <span className="border-b border-black px-2 pb-0.5">
+                      {officialReportMeta.fmtSum(officialReportMeta.auxHours)} x 100
+                    </span>
+                    <span className="pt-0.5">
+                      {officialReportMeta.fmtSum(officialReportMeta.totalHours)}
+                    </span>
+                  </div>
+                  <span>=</span>
+                  <span className="font-bold min-w-[36px] text-right">
+                    {officialReportMeta.fmtPct(officialReportMeta.auxPct)}
+                  </span>
+                  <span>%</span>
+                </div>
+
+                <div className="flex items-center justify-center gap-8 pt-1 font-bold text-[13px] print:text-[11px]">
+                  <span>พยาบาล : Nurse Aid =</span>
+                  <span>
+                    {officialReportMeta.fmtPct(officialReportMeta.rnPct)} &nbsp;&nbsp;:&nbsp;&nbsp;{' '}
+                    {officialReportMeta.fmtPct(officialReportMeta.auxPct)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
