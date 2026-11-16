@@ -16,6 +16,8 @@ import {
   formatPositionLabel,
   CustomHoliday,
   AuditLogEntry,
+  PREMIUM_CLINIC_GROUP,
+  LEGACY_PREMIUM_CLINIC_GROUP,
   compareStaffByPositionAndStartDate,
 } from '../types';
 import {
@@ -124,8 +126,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   }, [staffList]);
 
   const allClinics = useMemo(() => {
-    return Array.from(new Set([...inTimeClinics, ...outTimeClinics]));
-  }, [inTimeClinics, outTimeClinics]);
+    return Array.from(
+      new Set([
+        ...inTimeClinics,
+        ...outTimeClinics,
+        PREMIUM_CLINIC_GROUP,
+        ...staffList.map((s) => (s.homeClinic || '').trim()).filter(Boolean),
+      ])
+    ).filter((c) => c && c !== LEGACY_PREMIUM_CLINIC_GROUP);
+  }, [inTimeClinics, outTimeClinics, staffList]);
 
   // --- Sub-Tab 1: Leave Entry State ---
   const [leaveStartDate, setLeaveStartDate] = useState<string>(todayStr);
@@ -245,11 +254,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [showOtAuditLog, setShowOtAuditLog] = useState<boolean>(false);
 
   const otWorkClinicOptions = useMemo(() => {
-    if (otShift === 'OT ในเวลาราชการ 08:00-16:00') {
-      return allClinics;
-    }
-    return outTimeClinics;
-  }, [otShift, allClinics, outTimeClinics]);
+    return allClinics;
+  }, [allClinics]);
 
   useEffect(() => {
     if (otWorkClinicOptions.length > 0 && !otWorkClinicOptions.includes(workClinic)) {

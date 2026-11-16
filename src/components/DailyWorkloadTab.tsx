@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   DailyWorkload, 
   StaffMember, 
+  StaffPosition,
+  ALL_POSITIONS,
   LeaveRecord,
   OTAttendance,
   WorkShift, 
@@ -176,6 +178,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       ),
     [isOutTime, outTimeClinics, inTimeClinics]
   );
+  const allOpdClinics = useMemo(
+    () =>
+      Array.from(
+        new Set([...inTimeClinics, ...outTimeClinics, PREMIUM_CLINIC_GROUP])
+      ).filter(c => c && c !== LEGACY_PREMIUM_CLINIC_GROUP),
+    [inTimeClinics, outTimeClinics]
+  );
   const isEchoClinic = clinic === 'Echo';
   const isPremiumClinic = clinic === PREMIUM_CLINIC_GROUP;
 
@@ -313,7 +322,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     [staffList]
   );
 
-  // Live Verification: check clinic baseline staff against Leaves, Training, Cross-Cover on selected date
+  // Live 3-Point Verification across ALL 6 positions:
+  // (1) Working staff entered == (3) Full department roster - (2) Department-matched leaves/training/cross-cover + incoming substitutes
   const dayStaffingCheck = useMemo(() => {
     const normalizeUnit = (c?: string) => {
       const trimmed = (c || '').trim();
@@ -328,8 +338,20 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       }
       return trimmed;
     };
-    const isNursing = (pos?: string) =>
-      pos === 'RN' || pos === 'PN' || pos === 'NA' || pos === 'PCA';
+    const normalizePos = (pos?: string): StaffPosition => {
+      if (pos === 'PCA') return 'NA';
+      if (
+        pos === 'HN' ||
+        pos === 'RN' ||
+        pos === 'PN' ||
+        pos === 'NA' ||
+        pos === 'Clerk' ||
+        pos === 'Service Worker'
+      ) {
+        return pos;
+      }
+      return 'RN';
+    };
     const isActiveOnDate = (s: StaffMember) => {
       if (s.status === 'Active') {
         if (s.startDate && s.startDate > date) return false;
@@ -348,67 +370,82 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     });
 
     const baselineStaff = staffList.filter(
-      s => isNursing(s.position) && isActiveOnDate(s) && normalizeUnit(s.homeClinic) === targetUnit
+      s => isActiveOnDate(s) && normalizeUnit(s.homeClinic) === targetUnit
     );
-    const baseRN = baselineStaff.filter(s => s.position === 'RN').length;
-    const basePN = baselineStaff.filter(s => s.position === 'PN').length;
-    const baseNA = baselineStaff.filter(s => s.position === 'NA' || s.position === 'PCA').length;
-    const baseTotal = baselineStaff.length;
+    const baseTotalAll = baselineStaff.length;
+    const nursingPositions: StaffPosition[] = ['RN', 'PN', 'NA'];
+    const baseTotalNursing = baselineStaff.filter(s =>
+      nursingPositions.includes(normalizePos(s.position))
+    ).length;
 
-    const absentMap = new Map<string, { name: string; pos: string; detail: string }>();
-    const incomingMap = new Map<string, { name: string; pos: string; detail: string }>();
+    const absentMap = new Map<string, { name: string; pos: StaffPosition; detail: string }>();
+    const incomingMap = new Map<string, { name: string; pos: StaffPosition; detail: string }>();
+    const nonDeptSelections: string[] = [];
 
-    if (!isOutTime) {
+    const needsStrictValidation = !isOutTime && !(isPremiumClinic && existingPremiumPool);
+
+    if (needsStrictValidation) {
+      // Saved leaves overlapping date for this department
       leaves.forEach(l => {
         const sDate = (l.startDate || '').trim();
         const eDate = (l.endDate || l.startDate || '').trim();
         if (!sDate || date < sDate || date > eDate) return;
         const unit = normalizeUnit(l.clinic || staffUnitMap.get((l.staffName || '').trim()) || '');
-        if (unit !== targetUnit || !isNursing(l.position)) return;
+        if (unit !== targetUnit) return;
         const name = (l.staffName || '').trim();
         if (!name || absentMap.has(name)) return;
         absentMap.set(name, {
           name,
-          pos: l.position === 'PCA' ? 'NA' : l.position,
+          pos: normalizePos(l.position),
           detail: `${name} (${l.leaveType})`,
         });
       });
 
+      // Selected in Section 4 Block 1: Leave
       if (hasStaffLeave) {
         selectedLeaveStaffIds.forEach(id => {
           const st = staffList.find(s => s.staffId === id);
-          if (!st || !isNursing(st.position) || normalizeUnit(st.homeClinic) !== targetUnit) return;
+          if (!st) return;
+          if (normalizeUnit(st.homeClinic) !== targetUnit) {
+            nonDeptSelections.push(`${st.name} (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
+            return;
+          }
           if (!absentMap.has(st.name)) {
             absentMap.set(st.name, {
               name: st.name,
-              pos: st.position === 'PCA' ? 'NA' : st.position,
+              pos: normalizePos(st.position),
               detail: `${st.name} (${leaveType})`,
             });
           }
         });
       }
 
+      // Selected in Section 4 Block 2: Training / Meeting
       if (hasTraining) {
         selectedTrainingStaffIds.forEach(id => {
           const st = staffList.find(s => s.staffId === id);
-          if (!st || !isNursing(st.position) || normalizeUnit(st.homeClinic) !== targetUnit) return;
+          if (!st) return;
+          if (normalizeUnit(st.homeClinic) !== targetUnit) {
+            nonDeptSelections.push(`${st.name} ไปอบรม/ประชุม (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
+            return;
+          }
           if (!absentMap.has(st.name)) {
             absentMap.set(st.name, {
               name: st.name,
-              pos: st.position === 'PCA' ? 'NA' : st.position,
+              pos: normalizePos(st.position),
               detail: `${st.name} (ไปอบรม/ประชุม)`,
             });
           }
         });
       }
 
+      // Saved OT / Cross-Cover on this date (daytime shifts)
       otRecords.forEach(o => {
         if (o.date !== date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
-        if (!isNursing(o.position)) return;
         const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get((o.staffName || '').trim()) || '');
         const wUnit = normalizeUnit(o.workClinic || '');
-        const pos = o.position === 'PCA' ? 'NA' : o.position;
+        const pos = normalizePos(o.position);
         if (hUnit === targetUnit && wUnit !== targetUnit && wUnit) {
           if (!absentMap.has(o.staffName)) {
             absentMap.set(o.staffName, {
@@ -418,25 +455,33 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             });
           }
         }
-        if (wUnit === targetUnit && (hUnit !== targetUnit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00')) {
+        if (
+          wUnit === targetUnit &&
+          (hUnit !== targetUnit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00')
+        ) {
           if (!incomingMap.has(o.staffName)) {
             const src = o.affiliation || (hUnit !== targetUnit ? o.homeClinic : '');
             incomingMap.set(o.staffName, {
               name: o.staffName,
               pos,
-              detail: `${o.staffName} (${o.shift === 'OT ในเวลาราชการ 08:00-16:00' || o.isExternal ? 'ขึ้นแทน' : 'มาช่วย'}${src ? ` จาก ${src}` : ''})`,
+              detail: `${o.staffName} (${
+                o.shift === 'OT ในเวลาราชการ 08:00-16:00' || o.isExternal ? 'ขึ้นแทน' : 'มาช่วย'
+              }${src ? ` จาก ${src}` : ''})`,
             });
           }
         }
       });
 
+      // Selected in Section 4 Block 3: Cross-Cover
       if (hasCrossCover && crossStaffName && crossTargetClinic) {
         const st = staffList.find(s => s.name === crossStaffName);
-        if (st && isNursing(st.position) && normalizeUnit(st.homeClinic) === targetUnit && normalizeUnit(crossTargetClinic) !== targetUnit) {
-          if (!absentMap.has(st.name)) {
+        if (st) {
+          if (normalizeUnit(st.homeClinic) !== targetUnit) {
+            nonDeptSelections.push(`${st.name} ไปช่วยห้องอื่น (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
+          } else if (normalizeUnit(crossTargetClinic) !== targetUnit && !absentMap.has(st.name)) {
             absentMap.set(st.name, {
               name: st.name,
-              pos: st.position === 'PCA' ? 'NA' : st.position,
+              pos: normalizePos(st.position),
               detail: `${st.name} (ไปช่วย ${crossTargetClinic})`,
             });
           }
@@ -447,48 +492,143 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     const absents = Array.from(absentMap.values());
     const incomings = Array.from(incomingMap.values());
 
-    const expectedRN = Math.max(
-      0,
-      baseRN - absents.filter(a => a.pos === 'RN').length + incomings.filter(i => i.pos === 'RN').length
+    const enteredByPos: Record<StaffPosition, number> = {
+      HN: Number(hn) || 0,
+      RN: Number(rn) || 0,
+      PN: Number(pn) || 0,
+      NA: Number(na) || 0,
+      PCA: 0,
+      Clerk: Number(clerk) || 0,
+      'Service Worker': Number(serviceWorker) || 0,
+    };
+
+    const positionShortLabels: Record<StaffPosition, string> = {
+      HN: 'HN (หัวหน้าเวร)',
+      RN: 'RN (พยาบาลวิชาชีพ)',
+      PN: 'PN (ผู้ช่วยพยาบาล)',
+      NA: 'NA (ผู้ช่วยคนไข้)',
+      PCA: 'NA',
+      Clerk: 'ผู้ปฏิบัติงานทั่วไป',
+      'Service Worker': 'พนักงานบริการ',
+    };
+
+    const positionRows = ALL_POSITIONS.map(pos => {
+      const full = baselineStaff.filter(s => normalizePos(s.position) === pos).length;
+      const working = enteredByPos[pos] || 0;
+      const absent = absents.filter(a => a.pos === pos).length;
+      const incoming = incomings.filter(i => i.pos === pos).length;
+      const expectedWorking = Math.max(0, full - absent + incoming);
+      const accounted = Number((working + absent - incoming).toFixed(1));
+      const diff = Number((accounted - full).toFixed(1));
+      const isBalanced = Math.abs(diff) < 0.001;
+
+      let issueText = '';
+      if (!isBalanced) {
+        if (diff < 0) {
+          const lack = Math.abs(diff);
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ช่วยงาน (${absent})${
+            incoming > 0 ? ` − มาแทน (${incoming})` : ''
+          } = ${accounted} คน (ต้องบันทึกผู้ลา/อบรม/ไปช่วยในแผนกเพิ่ม ${lack} คน หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
+        } else {
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ช่วยงาน (${absent})${
+            incoming > 0 ? ` − มาแทน (${incoming})` : ''
+          } = ${accounted} คน (เกินจำนวนเต็ม ${diff} คน — ต้องไม่ลา/ลดยอดลา ${diff} คน หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
+        }
+      }
+
+      return {
+        pos,
+        label: positionShortLabels[pos],
+        full,
+        working,
+        absent,
+        incoming,
+        expectedWorking,
+        accounted,
+        diff,
+        isBalanced,
+        issueText,
+      };
+    });
+
+    const activePositionRows = positionRows.filter(
+      r => r.full > 0 || r.working > 0 || r.absent > 0 || r.incoming > 0
     );
-    const expectedPN = Math.max(
-      0,
-      basePN - absents.filter(a => a.pos === 'PN').length + incomings.filter(i => i.pos === 'PN').length
-    );
-    const expectedNA = Math.max(
-      0,
-      baseNA - absents.filter(a => a.pos === 'NA').length + incomings.filter(i => i.pos === 'NA').length
-    );
-    const expectedTotal = Math.max(0, baseTotal - absents.length + incomings.length);
-    const enteredTotal = Number((rn + pn + na).toFixed(1));
-    const diff = Number((enteredTotal - expectedTotal).toFixed(1));
+
+    const getExpected = (p: StaffPosition) =>
+      positionRows.find(r => r.pos === p)?.expectedWorking ?? 0;
+
+    const expectedHN = getExpected('HN');
+    const expectedRN = getExpected('RN');
+    const expectedPN = getExpected('PN');
+    const expectedNA = getExpected('NA');
+    const expectedClerk = getExpected('Clerk');
+    const expectedServiceWorker = getExpected('Service Worker');
+
+    const expectedTotalNursing = expectedRN + expectedPN + expectedNA;
+    const enteredTotalNursing = Number((rn + pn + na).toFixed(1));
+    const expectedTotalAll = Math.max(0, baseTotalAll - absents.length + incomings.length);
+    const enteredTotalAll = Number((hn + rn + pn + na + clerk + serviceWorker).toFixed(1));
+
+    const isStrictActive = needsStrictValidation && baseTotalAll > 0;
+    const allPositionsBalanced = positionRows.every(r => r.isBalanced);
+    const hasNonDeptIssue = needsStrictValidation && nonDeptSelections.length > 0;
+
+    const validationErrors: string[] = [];
+    if (hasNonDeptIssue) {
+      validationErrors.push(`พบรายชื่อที่เลือกไม่ได้สังกัดแผนก ${clinic}: ${nonDeptSelections.join(', ')}`);
+    }
+    if (isStrictActive) {
+      positionRows.forEach(r => {
+        if (!r.isBalanced && r.issueText) {
+          validationErrors.push(r.issueText);
+        }
+      });
+    }
+
+    const canSave3Points = !hasNonDeptIssue && (!isStrictActive || allPositionsBalanced);
 
     return {
       isOutTime,
-      baseTotal,
-      baseRN,
-      basePN,
-      baseNA,
+      needsStrictValidation,
+      isStrictActive,
+      baseTotal: baseTotalNursing,
+      baseTotalAll,
       absents,
       incomings,
+      nonDeptSelections,
+      positionRows,
+      activePositionRows,
+      expectedHN,
       expectedRN,
       expectedPN,
       expectedNA,
-      expectedTotal,
-      enteredTotal,
-      diff,
-      isMatch: baseTotal > 0 && Math.abs(diff) < 0.01,
+      expectedClerk,
+      expectedServiceWorker,
+      expectedTotal: expectedTotalNursing,
+      enteredTotal: enteredTotalNursing,
+      expectedTotalAll,
+      enteredTotalAll,
+      diff: Number((enteredTotalAll - expectedTotalAll).toFixed(1)),
+      canSave3Points,
+      validationErrors,
+      isMatch: baseTotalAll > 0 && allPositionsBalanced && !hasNonDeptIssue,
     };
   }, [
     date,
     clinic,
     isOutTime,
+    isPremiumClinic,
+    existingPremiumPool,
     staffList,
     leaves,
     otRecords,
+    hn,
     rn,
     pn,
     na,
+    clerk,
+    serviceWorker,
     hasStaffLeave,
     selectedLeaveStaffIds,
     leaveType,
@@ -500,6 +640,16 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     premiumSubClinics,
   ]);
 
+  const applyExpectedAllPositions = () => {
+    setHn(dayStaffingCheck.expectedHN);
+    setRn(dayStaffingCheck.expectedRN);
+    setPn(dayStaffingCheck.expectedPN);
+    setNa(dayStaffingCheck.expectedNA);
+    setClerk(dayStaffingCheck.expectedClerk);
+    setServiceWorker(dayStaffingCheck.expectedServiceWorker);
+    setFormError('');
+  };
+
   const adjustStaff = (setter: React.Dispatch<React.SetStateAction<number>>, delta: number) => {
     setter(prev => Math.max(0, Math.round((prev + delta) * 10) / 10));
   };
@@ -510,6 +660,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
     if (!reporter.trim()) {
       setFormError('กรุณาระบุชื่อผู้รายงานก่อนบันทึก');
+      return;
+    }
+
+    if (!dayStaffingCheck.canSave3Points) {
+      setFormError(
+        `ไม่สามารถบันทึกภาระงานได้ — ข้อมูล 3 จุด (ปฏิบัติงานจริง + วันลา/อบรม/ช่วยงานในแผนก + จำนวนเต็มประจำแผนก) ไม่ตรงกัน: ${dayStaffingCheck.validationErrors.join(' | ')}`
+      );
       return;
     }
 
@@ -1161,64 +1318,88 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </span>
               </div>
 
-              {/* Live Headcount Verification vs Staff Master & Leaves/Training/Cross-Cover */}
-              {!dayStaffingCheck.isOutTime && dayStaffingCheck.baseTotal > 0 && (
+              {/* Live 3-Point Headcount Verification across ALL positions */}
+              {dayStaffingCheck.needsStrictValidation && dayStaffingCheck.baseTotalAll > 0 && (
                 <div
-                  className={`rounded-xl border p-2.5 text-[11px] flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
-                    dayStaffingCheck.isMatch
+                  className={`rounded-xl border p-3 text-[11px] space-y-2.5 ${
+                    dayStaffingCheck.canSave3Points
                       ? 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
-                      : 'bg-amber-50 border-amber-300 text-amber-950'
+                      : 'bg-red-50/90 border-red-300 text-red-950'
                   }`}
                 >
-                  <div className="flex items-start gap-2">
-                    {dayStaffingCheck.isMatch ? (
-                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    ) : (
-                      <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    )}
-                    <div className="space-y-0.5">
-                      <div className="font-bold">
-                        ตรวจเช็กยอดกำลังคน {clinic}: ประจำ {dayStaffingCheck.baseTotal} คน
-                        {dayStaffingCheck.absents.length > 0 && ` − ลา/อบรม/ไปช่วย ${dayStaffingCheck.absents.length} คน`}
-                        {dayStaffingCheck.incomings.length > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.incomings.length} คน`}
-                        {` = คาดการณ์ ${dayStaffingCheck.expectedTotal} แรง `}
-                        <span className={dayStaffingCheck.isMatch ? 'text-emerald-700' : 'text-amber-800'}>
-                          ({dayStaffingCheck.isMatch
-                            ? 'ตรงกัน'
-                            : dayStaffingCheck.diff > 0
-                            ? `กรอกอยู่ ${dayStaffingCheck.enteredTotal} แรง สูงกว่าคาด +${dayStaffingCheck.diff}`
-                            : `กรอกอยู่ ${dayStaffingCheck.enteredTotal} แรง ต่ำกว่าคาด ${dayStaffingCheck.diff}`})
-                        </span>
-                      </div>
-                      {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0) && (
-                        <div className="text-[10.5px] opacity-90 flex flex-wrap gap-1.5 pt-0.5">
-                          {dayStaffingCheck.absents.map((a, idx) => (
-                            <span key={`ab-${idx}`} className="px-1.5 py-0.5 rounded bg-white/80 border border-amber-200 font-medium">
-                              {a.detail}
-                            </span>
-                          ))}
-                          {dayStaffingCheck.incomings.map((inc, idx) => (
-                            <span key={`inc-${idx}`} className="px-1.5 py-0.5 rounded bg-white/80 border border-emerald-200 font-medium">
-                              {inc.detail}
-                            </span>
-                          ))}
-                        </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      {dayStaffingCheck.canSave3Points ? (
+                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                       )}
+                      <div>
+                        <div className="font-bold">
+                          ตรวจเช็กความสัมพันธ์ 3 จุด แผนก {clinic}: ประจำทั้งหมด {dayStaffingCheck.baseTotalAll} คน
+                          {dayStaffingCheck.absents.length > 0 && ` − ลา/อบรม/ไปช่วย ${dayStaffingCheck.absents.length} คน`}
+                          {dayStaffingCheck.incomings.length > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.incomings.length} คน`}
+                          {` = คาดการณ์ปฏิบัติงาน ${dayStaffingCheck.expectedTotalAll} คน`}
+                          <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            dayStaffingCheck.canSave3Points ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                          }`}>
+                            {dayStaffingCheck.canSave3Points ? 'ตรงกันครบทุกตำแหน่ง (บันทึกได้)' : 'ไม่ตรงจำนวนเต็ม (ยังบันทึกไม่ได้)'}
+                          </span>
+                        </div>
+                        {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0) && (
+                          <div className="text-[10.5px] opacity-90 flex flex-wrap gap-1.5 pt-1">
+                            {dayStaffingCheck.absents.map((a, idx) => (
+                              <span key={`ab-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-amber-200 text-amber-950 font-medium">
+                                {a.detail}
+                              </span>
+                            ))}
+                            {dayStaffingCheck.incomings.map((inc, idx) => (
+                              <span key={`inc-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-emerald-200 text-emerald-900 font-medium">
+                                {inc.detail}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
+
+                    {!dayStaffingCheck.canSave3Points && (
+                      <button
+                        type="button"
+                        onClick={applyExpectedAllPositions}
+                        className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[10.5px] shadow-2xs transition-colors cursor-pointer"
+                      >
+                        ตั้งยอดปฏิบัติงานตามจำนวนเต็ม − วันลา
+                      </button>
+                    )}
                   </div>
-                  {!dayStaffingCheck.isMatch && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRn(dayStaffingCheck.expectedRN);
-                        setPn(dayStaffingCheck.expectedPN);
-                        setNa(dayStaffingCheck.expectedNA);
-                      }}
-                      className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10.5px] shadow-2xs transition-colors cursor-pointer"
-                    >
-                      ใช้ยอดคาดการณ์ ({dayStaffingCheck.expectedTotal} แรง)
-                    </button>
-                  )}
+
+                  {/* Per-Position Breakdown Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                    {dayStaffingCheck.activePositionRows.map(r => (
+                      <div
+                        key={r.pos}
+                        className={`px-2 py-1.5 rounded-lg border text-[10.5px] ${
+                          r.isBalanced
+                            ? 'bg-white/90 border-emerald-200 text-emerald-950'
+                            : 'bg-white border-red-300 text-red-900 font-semibold'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-bold truncate">{r.label}</span>
+                          <span className={`px-1 rounded text-[9.5px] font-bold ${
+                            r.isBalanced ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                          }`}>
+                            {r.isBalanced ? 'ตรง' : r.diff < 0 ? `ขาด ${Math.abs(r.diff)}` : `เกิน ${r.diff}`}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-gray-600 mt-0.5">
+                          เต็ม <strong>{r.full}</strong> | ทำจริง <strong>{r.working}</strong> | ลา/อบรม <strong>{r.absent}</strong>
+                          {r.incoming > 0 ? ` | แทน +${r.incoming}` : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1507,7 +1688,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   <div className="flex items-center justify-between border-b border-amber-100 pb-2">
                     <span className="font-bold text-amber-950 flex items-center gap-1.5">
                       <CalendarOff className="w-4 h-4 text-amber-600" />
-                      1. รายชื่อเจ้าหน้าที่ที่ลาวันนี้ (เลือกได้หลายคน)
+                      1. รายชื่อเจ้าหน้าที่ที่ลาวันนี้ (สมาชิกแผนก {clinic})
                     </span>
                     <span className="text-[11px] font-semibold text-amber-700">
                       เลือกแล้ว {selectedLeaveStaffIds.length} คน
@@ -1544,7 +1725,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5" />
                     <input
                       type="text"
-                      placeholder="พิมพ์ค้นหาชื่อ, ตำแหน่ง, หรือคลินิก..."
+                      placeholder={`พิมพ์ค้นหาชื่อหรือตำแหน่งในแผนก ${clinic}...`}
                       value={leaveSearch}
                       onChange={(e) => setLeaveSearch(e.target.value)}
                       className="w-full rounded-lg border border-gray-200 bg-slate-50/60 focus:bg-white pl-8 pr-8 py-1.5 text-xs outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
@@ -1560,9 +1741,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     )}
                   </div>
 
-                  {/* Clean Scrollable Picker */}
+                  {/* Clean Scrollable Picker (scoped to current clinic staff when available) */}
                   <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
-                    {activeStaffAll
+                    {(clinicStaff.length > 0 ? clinicStaff : activeStaffAll)
                       .filter(s => {
                         const q = leaveSearch.toLowerCase().trim();
                         if (!q) return true;
@@ -1639,7 +1820,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   <div className="flex items-center justify-between border-b border-cyan-100 pb-2">
                     <span className="font-bold text-cyan-950 flex items-center gap-1.5">
                       <GraduationCap className="w-4 h-4 text-cyan-600" />
-                      2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (เลือกได้หลายคน & พิมพ์ค้นหา)
+                      2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (สมาชิกแผนก {clinic})
                     </span>
                     <span className="text-[11px] font-semibold text-cyan-700">
                       เลือกแล้ว {selectedTrainingStaffIds.length} คน
@@ -1676,7 +1857,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5" />
                     <input
                       type="text"
-                      placeholder="พิมพ์ค้นหาชื่อเจ้าหน้าที่เพื่อเลือกไปอบรม/ประชุม..."
+                      placeholder={`พิมพ์ค้นหาชื่อหรือตำแหน่งในแผนก ${clinic}...`}
                       value={trainingSearch}
                       onChange={(e) => setTrainingSearch(e.target.value)}
                       className="w-full rounded-lg border border-gray-200 bg-slate-50/60 focus:bg-white pl-8 pr-8 py-1.5 text-xs outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
@@ -1692,9 +1873,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     )}
                   </div>
 
-                  {/* Clean Scrollable Picker */}
+                  {/* Clean Scrollable Picker (scoped to current clinic staff when available) */}
                   <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
-                    {activeStaffAll
+                    {(clinicStaff.length > 0 ? clinicStaff : activeStaffAll)
                       .filter(s => {
                         const q = trainingSearch.toLowerCase().trim();
                         if (!q) return true;
@@ -1789,7 +1970,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
                       >
                         <option value="">-- เลือกเจ้าหน้าที่ --</option>
-                        {(clinicStaff.length > 0 && !crossStaffSearch.trim() ? clinicStaff : activeStaffAll)
+                        {(clinicStaff.length > 0 ? clinicStaff : activeStaffAll)
                           .filter(s => {
                             const q = crossStaffSearch.toLowerCase().trim();
                             return !q || s.name.toLowerCase().includes(q) || s.homeClinic.toLowerCase().includes(q);
@@ -1809,12 +1990,27 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white mt-7"
                       >
                         <option value="">-- เลือกห้องตรวจเป้าหมาย --</option>
-                        {availableClinics.filter(c => c !== clinic).map(c => (
+                        {allOpdClinics.filter(c => c !== clinic).map(c => (
                           <option key={c} value={c}>{c}</option>
                         ))}
                       </select>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* 3-Point Integrity Alert inside Section 4 */}
+              {dayStaffingCheck.needsStrictValidation && dayStaffingCheck.baseTotalAll > 0 && !dayStaffingCheck.canSave3Points && (
+                <div className="rounded-xl bg-red-50 border border-red-300 p-3 text-xs text-red-900 space-y-1.5">
+                  <div className="font-bold flex items-center gap-1.5 text-red-800">
+                    <ShieldAlert className="w-4 h-4 shrink-0" />
+                    <span>แจ้งเตือน: ข้อมูล 3 จุดของแผนก {clinic} ยังไม่สอดคล้องกัน (ยังบันทึกภาระงานไม่ได้)</span>
+                  </div>
+                  <ul className="list-disc pl-5 space-y-0.5 text-[11px]">
+                    {dayStaffingCheck.validationErrors.map((err, idx) => (
+                      <li key={idx}>{err}</li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>
