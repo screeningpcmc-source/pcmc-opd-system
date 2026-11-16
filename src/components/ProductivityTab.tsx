@@ -1,6 +1,9 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { 
   DailyWorkload, 
+  StaffMember,
+  LeaveRecord,
+  OTAttendance,
   SystemSettings, 
   IN_TIME_CLINICS, 
   OUT_TIME_CLINICS, 
@@ -11,11 +14,14 @@ import {
   PREMIUM_CLINIC_GROUP,
   LEGACY_PREMIUM_CLINIC_GROUP,
   DEFAULT_PREMIUM_SUB_CLINICS,
+  isPremiumGroupName,
+  isPremiumPoolClinicName,
   isPremiumWorkloadRecord,
   normalizeWorkloadRecord
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
-import { THAI_MONTHS } from '../utils/thaiDate';
+import { THAI_MONTHS, formatThaiShortDate } from '../utils/thaiDate';
+import { getHolidaysForYear } from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { 
   BarChart3, 
@@ -33,11 +39,20 @@ import {
   Star,
   Printer,
   ImageDown,
-  FileSpreadsheet
+  FileSpreadsheet,
+  ShieldCheck,
+  ShieldAlert,
+  CalendarOff,
+  GraduationCap,
+  ArrowRightLeft,
+  Users
 } from 'lucide-react';
 
 interface ProductivityTabProps {
   workloads: DailyWorkload[];
+  staffList?: StaffMember[];
+  leaves?: LeaveRecord[];
+  otRecords?: OTAttendance[];
   settings: SystemSettings;
   inTimeClinics?: string[];
   outTimeClinics?: string[];
@@ -46,6 +61,9 @@ interface ProductivityTabProps {
 
 export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   workloads,
+  staffList = [],
+  leaves = [],
+  otRecords = [],
   settings,
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
@@ -58,6 +76,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [selectedShift, setSelectedShift] = useState<string>('ALL');
   const [selectedClinic, setSelectedClinic] = useState<string>('ALL');
   const [excludeLasik, setExcludeLasik] = useState<boolean>(true); // Default exclude LASIK as per standard OPD nursing formula
+  const [showAllVerificationDays, setShowAllVerificationDays] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
 
@@ -274,7 +293,67 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return list.sort((a, b) => b.totalPt - a.totalPt);
   }, [filteredWorkloads, settings, premiumSubClinics]);
 
-  // Daily grouped rows for the official PDF-style monthly report
+  const normalizeClinicUnit = (clinicName?: string): string => {
+    const c = (clinicName || '').trim();
+    if (!c) return '';
+    if (
+      isPremiumGroupName(c) ||
+      isPremiumPoolClinicName(c) ||
+      /-Premium$/i.test(c) ||
+      premiumSubClinics.includes(c)
+    ) {
+      return PREMIUM_CLINIC_GROUP;
+    }
+    return c;
+  };
+
+  const isNursingRole = (pos?: string): boolean => {
+    return pos === 'RN' || pos === 'PN' || pos === 'NA' || pos === 'PCA';
+  };
+
+  const isStaffActiveOnDate = (s: StaffMember, dateStr: string): boolean => {
+    if (s.status === 'Active') {
+      if (s.startDate && s.startDate > dateStr) return false;
+      if (s.endDate && s.endDate < dateStr) return false;
+      return true;
+    }
+    if (!s.endDate) return false;
+    if (s.startDate && s.startDate > dateStr) return false;
+    return s.endDate >= dateStr;
+  };
+
+  const staffClinicByName = useMemo(() => {
+    const map = new Map<string, string>();
+    staffList.forEach((s) => {
+      const n = (s.name || '').trim();
+      if (n) map.set(n, (s.homeClinic || '').trim());
+    });
+    return map;
+  }, [staffList]);
+
+  const monthHolidayMap = useMemo(() => {
+    const yr = Number(selectedMonth.split('-')[0]) || new Date().getFullYear();
+    return getHolidaysForYear(yr, settings.customHolidays || []);
+  }, [selectedMonth, settings.customHolidays]);
+
+  const isWeekendOrHolidayDate = (dateStr: string): boolean => {
+    const m = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!m) return false;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const dow = d.getDay();
+    if (dow === 0 || dow === 6) return true;
+    return monthHolidayMap.has(dateStr);
+  };
+
+  const cleanAutoLeaveNote = (raw?: string): string => {
+    const txt = (raw || '').trim();
+    if (!txt) return '';
+    if (/^บันทึกอัตโนมัติจากห้องตรวจ/.test(txt)) return '';
+    if (/^ไปอบรม\/ประชุม\s*\(บันทึกจาก/.test(txt)) return '';
+    return txt;
+  };
+
+  // Daily grouped rows for the official PDF-style monthly report (connected with Leaves, Training, and Cross-Coverage/OT)
   const dailyReportRows = useMemo(() => {
     const byDate = new Map<
       string,
@@ -287,6 +366,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         na: number;
         pt: number;
         notes: string[];
+        hasInTimeShift: boolean;
       }
     >();
 
@@ -304,6 +384,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           na: 0,
           pt: 0,
           notes: [],
+          hasInTimeShift: false,
         });
       }
       const row = byDate.get(dateStr)!;
@@ -312,14 +393,455 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       row.pn += w.pn || 0;
       row.na += w.na !== undefined ? w.na : (w.pca || 0);
       row.pt += getEffectiveTotalPt(w);
+      if (w.shift === 'ในเวลา 08:00-16:00') {
+        row.hasInTimeShift = true;
+      }
       const cleanNote = (w.note || '').trim();
       if (cleanNote && !row.notes.includes(cleanNote)) {
         row.notes.push(cleanNote);
       }
     });
 
+    const includesInTime =
+      selectedShift === 'ALL' || selectedShift === 'ในเวลา 08:00-16:00';
+
+    const pushUniqueNote = (notes: string[], candidate: string, staffName?: string, keyword?: string) => {
+      const trimmed = candidate.trim();
+      if (!trimmed) return;
+      if (notes.includes(trimmed)) return;
+      if (
+        staffName &&
+        keyword &&
+        notes.some((existing) => existing.includes(staffName) && existing.includes(keyword))
+      ) {
+        return;
+      }
+      notes.push(trimmed);
+    };
+
+    // Enrich each working day row with Leaves, Training/Meeting, and Cross-Unit Coverage/Substitute OT
+    byDate.forEach((row, dateStr) => {
+      // 1. Leaves & Training/Meetings
+      if (includesInTime) {
+        const seenLeaveKeys = new Set<string>();
+        leaves.forEach((l) => {
+          const start = (l.startDate || '').trim();
+          const end = (l.endDate || l.startDate || '').trim();
+          if (!start || dateStr < start || dateStr > end) return;
+          // If multi-day leave range spans across a weekend/holiday, only show on days with in-time work or non-holidays
+          if (start !== end && !row.hasInTimeShift && isWeekendOrHolidayDate(dateStr)) {
+            return;
+          }
+
+          const rawUnit = (l.clinic || staffClinicByName.get((l.staffName || '').trim()) || '').trim();
+          const unit = normalizeClinicUnit(rawUnit);
+
+          if (selectedClinic === 'ALL') {
+            if (excludeLasik && unit === 'ศูนย์เลสิก') return;
+          } else if (unit !== selectedClinic) {
+            return;
+          }
+
+          const dedupKey = `${l.staffName}|${l.leaveType}|${unit}`;
+          if (seenLeaveKeys.has(dedupKey)) return;
+          seenLeaveKeys.add(dedupKey);
+
+          const extra = cleanAutoLeaveNote(l.note);
+          const prefix = selectedClinic === 'ALL' && unit ? `[${unit}] ` : '';
+          const isTraining = l.leaveType === 'ไปอบรม/ประชุม';
+          const text = isTraining
+            ? `${prefix}${l.staffName} ไปอบรม/ประชุม${extra ? ` (${extra})` : ''}`
+            : `${prefix}${l.staffName} ${l.leaveType}${extra ? ` (${extra})` : ''}`;
+
+          pushUniqueNote(row.notes, text, l.staffName, l.leaveType);
+        });
+      }
+
+      // 2. Cross-Unit Coverage & Substitute OT
+      const seenOtKeys = new Set<string>();
+      otRecords.forEach((o) => {
+        if ((o.date || '').trim() !== dateStr) return;
+
+        // Match shift
+        if (selectedShift !== 'ALL') {
+          if (selectedShift === 'ในเวลา 08:00-16:00') {
+            if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') {
+              return;
+            }
+          } else if (o.shift !== selectedShift) {
+            return;
+          }
+        }
+
+        const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
+        const workUnit = normalizeClinicUnit(o.workClinic || '');
+
+        if (selectedClinic === 'ALL') {
+          if (excludeLasik && homeUnit === 'ศูนย์เลสิก' && workUnit === 'ศูนย์เลสิก') return;
+          if (homeUnit && workUnit && homeUnit !== workUnit) {
+            const k = `MOVE|${o.staffName}|${homeUnit}|${workUnit}`;
+            if (seenOtKeys.has(k)) return;
+            seenOtKeys.add(k);
+            const tag = o.shift === 'OT ในเวลาราชการ 08:00-16:00' ? ' ขึ้นแทน' : ' ไปช่วย';
+            pushUniqueNote(row.notes, `${o.staffName}${tag} (${homeUnit} → ${o.workClinic})`, o.staffName, o.workClinic);
+          } else if (o.isExternal || o.shift === 'OT ในเวลาราชการ 08:00-16:00') {
+            const k = `SUB|${o.staffName}|${workUnit}`;
+            if (seenOtKeys.has(k)) return;
+            seenOtKeys.add(k);
+            const src = o.affiliation || (homeUnit && homeUnit !== workUnit ? o.homeClinic : '');
+            pushUniqueNote(
+              row.notes,
+              `[${workUnit}] ${o.staffName} ขึ้นแทน${src ? ` (${src})` : ''}`,
+              o.staffName,
+              'ขึ้นแทน'
+            );
+          }
+          return;
+        }
+
+        const isOutgoing = homeUnit === selectedClinic && workUnit !== selectedClinic && Boolean(o.workClinic);
+        const isIncoming =
+          workUnit === selectedClinic &&
+          (homeUnit !== selectedClinic || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00');
+
+        if (isOutgoing) {
+          const k = `OUT|${o.staffName}|${o.workClinic}`;
+          if (seenOtKeys.has(k)) return;
+          seenOtKeys.add(k);
+          pushUniqueNote(row.notes, `${o.staffName} ไปช่วย ${o.workClinic}`, o.staffName, 'ไปช่วย');
+        }
+
+        if (isIncoming) {
+          const k = `IN|${o.staffName}|${o.homeClinic || o.affiliation || ''}`;
+          if (seenOtKeys.has(k)) return;
+          seenOtKeys.add(k);
+          const isSubstitute = o.shift === 'OT ในเวลาราชการ 08:00-16:00' || Boolean(o.isExternal);
+          const srcLabel = o.affiliation || (homeUnit && homeUnit !== selectedClinic ? o.homeClinic : '');
+          const verb = isSubstitute ? 'ขึ้นแทน' : 'มาช่วย';
+          pushUniqueNote(
+            row.notes,
+            `${o.staffName} ${verb}${srcLabel ? ` (จาก ${srcLabel})` : ''}`,
+            o.staffName,
+            verb
+          );
+        }
+      });
+    });
+
     return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
-  }, [filteredWorkloads]);
+  }, [
+    filteredWorkloads,
+    leaves,
+    otRecords,
+    selectedShift,
+    selectedClinic,
+    excludeLasik,
+    staffClinicByName,
+    monthHolidayMap,
+    premiumSubClinics,
+  ]);
+
+  // Daily Staffing Headcount Verification (Master Staff - Leaves/Training/Outgoing + Incoming vs Recorded RN+PN+NA)
+  const staffingVerification = useMemo(() => {
+    const isOutTimeOnlyFilter =
+      selectedShift === 'นอกเวลาเย็น 16:00-20:00' || selectedShift === 'นอกเวลาวันหยุด 08:00-12:00';
+
+    interface VerificationItem {
+      key: string;
+      date: string;
+      day: number;
+      unit: string;
+      mode: 'IN_TIME' | 'OUT_TIME';
+      baselineCount: number;
+      baselineSummary: string;
+      absentList: { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' }[];
+      incomingList: { name: string; label: string }[];
+      expectedCount: number;
+      recordedNursing: number;
+      recordedRN: number;
+      recordedPN: number;
+      recordedNA: number;
+      diff: number;
+      status: 'match' | 'mismatch_over' | 'mismatch_under' | 'no_baseline';
+      message: string;
+    }
+
+    const items: VerificationItem[] = [];
+
+    if (isOutTimeOnlyFilter) {
+      // Group filteredWorkloads by date + unit and compare against OTAttendance for that shift
+      const groupMap = new Map<
+        string,
+        { date: string; unit: string; rn: number; pn: number; na: number }
+      >();
+      filteredWorkloads.forEach((w) => {
+        const unit = normalizeClinicUnit(w.clinic);
+        const key = `${w.date}||${unit}`;
+        if (!groupMap.has(key)) {
+          groupMap.set(key, { date: w.date, unit, rn: 0, pn: 0, na: 0 });
+        }
+        const g = groupMap.get(key)!;
+        g.rn += w.rn || 0;
+        g.pn += w.pn || 0;
+        g.na += w.na !== undefined ? w.na : (w.pca || 0);
+      });
+
+      groupMap.forEach((g, key) => {
+        const recorded = Number((g.rn + g.pn + g.na).toFixed(1));
+        const otMatched = otRecords.filter(
+          (o) =>
+            o.date === g.date &&
+            o.shift === selectedShift &&
+            normalizeClinicUnit(o.workClinic) === g.unit &&
+            isNursingRole(o.position)
+        );
+        const incomingList = Array.from(
+          new Map(
+            otMatched.map((o) => [
+              o.staffName,
+              {
+                name: o.staffName,
+                label: `${o.staffName} (${o.position === 'PCA' ? 'NA' : o.position})`,
+              },
+            ])
+          ).values()
+        );
+        const expected = incomingList.length;
+        const diff = Number((recorded - expected).toFixed(1));
+        const status: VerificationItem['status'] =
+          expected === 0 && recorded > 0
+            ? 'no_baseline'
+            : Math.abs(diff) < 0.01
+            ? 'match'
+            : diff > 0
+            ? 'mismatch_over'
+            : 'mismatch_under';
+
+        const message =
+          status === 'match'
+            ? 'ตรงกันกับรายชื่อเวร OT ที่บันทึกในเมนู 2'
+            : status === 'no_baseline'
+            ? `บันทึก ${recorded} แรง (ยังไม่มีรายชื่อลงเวร OT กะนี้ในเมนู 2)`
+            : diff > 0
+            ? `บันทึกมากกว่ายอดรายชื่อ OT +${diff} แรง`
+            : `บันทึกน้อยกว่ายอดรายชื่อ OT ${diff} แรง`;
+
+        items.push({
+          key,
+          date: g.date,
+          day: Number(g.date.split('-')[2]) || 0,
+          unit: g.unit,
+          mode: 'OUT_TIME',
+          baselineCount: 0,
+          baselineSummary: 'เวรนอกเวลา (เทียบจากรายชื่อ OT)',
+          absentList: [],
+          incomingList,
+          expectedCount: expected,
+          recordedNursing: recorded,
+          recordedRN: g.rn,
+          recordedPN: g.pn,
+          recordedNA: g.na,
+          diff,
+          status,
+          message,
+        });
+      });
+
+      return items.sort((a, b) => a.date.localeCompare(b.date) || a.unit.localeCompare(b.unit, 'th'));
+    }
+
+    // In-time verification: evaluate every (date, unit) pair that has In-Time workload
+    const inTimeWorkloads = filteredWorkloads.filter((w) => w.shift === 'ในเวลา 08:00-16:00');
+    const inTimeMap = new Map<
+      string,
+      { date: string; unit: string; rn: number; pn: number; na: number }
+    >();
+
+    inTimeWorkloads.forEach((w) => {
+      const unit = normalizeClinicUnit(w.clinic);
+      const key = `${w.date}||${unit}`;
+      if (!inTimeMap.has(key)) {
+        inTimeMap.set(key, { date: w.date, unit, rn: 0, pn: 0, na: 0 });
+      }
+      const g = inTimeMap.get(key)!;
+      g.rn += w.rn || 0;
+      g.pn += w.pn || 0;
+      g.na += w.na !== undefined ? w.na : (w.pca || 0);
+    });
+
+    inTimeMap.forEach((g, key) => {
+      const recorded = Number((g.rn + g.pn + g.na).toFixed(1));
+      const baseStaff = staffList.filter(
+        (s) =>
+          isNursingRole(s.position) &&
+          isStaffActiveOnDate(s, g.date) &&
+          normalizeClinicUnit(s.homeClinic) === g.unit
+      );
+      const baseRN = baseStaff.filter((s) => s.position === 'RN').length;
+      const basePN = baseStaff.filter((s) => s.position === 'PN').length;
+      const baseNA = baseStaff.filter((s) => s.position === 'NA' || s.position === 'PCA').length;
+      const baselineCount = baseStaff.length;
+      const baselineParts: string[] = [];
+      if (baseRN > 0) baselineParts.push(`RN ${baseRN}`);
+      if (basePN > 0) baselineParts.push(`PN ${basePN}`);
+      if (baseNA > 0) baselineParts.push(`NA ${baseNA}`);
+      const baselineSummary = baselineParts.length > 0 ? baselineParts.join(', ') : 'ไม่มีรายชื่อในเมนู 5';
+
+      // Absent from unit on date: Leaves + Training + Outgoing Cross-Cover
+      const absentByName = new Map<string, { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' }>();
+
+      leaves.forEach((l) => {
+        const start = (l.startDate || '').trim();
+        const end = (l.endDate || l.startDate || '').trim();
+        if (!start || g.date < start || g.date > end) return;
+        const unit = normalizeClinicUnit(l.clinic || staffClinicByName.get((l.staffName || '').trim()) || '');
+        if (unit !== g.unit) return;
+        if (!isNursingRole(l.position)) return;
+        const name = (l.staffName || '').trim();
+        if (!name || absentByName.has(name)) return;
+        const isTraining = l.leaveType === 'ไปอบรม/ประชุม';
+        const extra = cleanAutoLeaveNote(l.note);
+        absentByName.set(name, {
+          name,
+          label: `${name} (${l.leaveType}${extra ? `: ${extra}` : ''})`,
+          kind: isTraining ? 'training' : 'leave',
+        });
+      });
+
+      otRecords.forEach((o) => {
+        if ((o.date || '').trim() !== g.date) return;
+        if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
+        if (!isNursingRole(o.position)) return;
+        const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
+        const workUnit = normalizeClinicUnit(o.workClinic || '');
+        if (homeUnit === g.unit && workUnit !== g.unit && workUnit) {
+          const name = (o.staffName || '').trim();
+          if (name && !absentByName.has(name)) {
+            absentByName.set(name, {
+              name,
+              label: `${name} (ไปช่วย ${o.workClinic})`,
+              kind: 'outgoing',
+            });
+          }
+        }
+      });
+
+      // Incoming substitutes / cross-cover
+      const incomingByName = new Map<string, { name: string; label: string }>();
+      otRecords.forEach((o) => {
+        if ((o.date || '').trim() !== g.date) return;
+        if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
+        if (!isNursingRole(o.position)) return;
+        const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
+        const workUnit = normalizeClinicUnit(o.workClinic || '');
+        const isIncoming =
+          workUnit === g.unit &&
+          (homeUnit !== g.unit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00');
+        if (!isIncoming) return;
+        const name = (o.staffName || '').trim();
+        if (!name || incomingByName.has(name)) return;
+        const src = o.affiliation || (homeUnit && homeUnit !== g.unit ? o.homeClinic : '');
+        const isSub = o.shift === 'OT ในเวลาราชการ 08:00-16:00' || Boolean(o.isExternal);
+        incomingByName.set(name, {
+          name,
+          label: `${name} (${isSub ? 'ขึ้นแทน' : 'มาช่วย'}${src ? ` จาก ${src}` : ''})`,
+        });
+      });
+
+      const absentList = Array.from(absentByName.values());
+      const incomingList = Array.from(incomingByName.values());
+      const expectedCount = Math.max(0, baselineCount - absentList.length + incomingList.length);
+      const diff = Number((recorded - expectedCount).toFixed(1));
+
+      let status: VerificationItem['status'];
+      let message: string;
+      if (baselineCount === 0) {
+        status = 'no_baseline';
+        message =
+          absentList.length > 0 || incomingList.length > 0
+            ? 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5 (พบข้อมูลลา/อบรม/ช่วยงานตามรายการ)'
+            : 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5';
+      } else if (Math.abs(diff) < 0.01) {
+        status = 'match';
+        message =
+          absentList.length > 0 || incomingList.length > 0
+            ? 'ตรงกัน (หักยอดลา/อบรม/ช่วยงานแล้วสอดคล้องกับยอดปฏิบัติงาน)'
+            : 'ตรงกันตามอัตรากำลังประจำ';
+      } else if (diff > 0) {
+        status = 'mismatch_over';
+        if (absentList.length > 0 && Math.abs(diff - 0.5) < 0.01) {
+          message =
+            'ต่าง +0.5 แรง (คาดว่ามีผู้มาขึ้นแทน/ช่วยครึ่งวัน 0.5 แรง — แนะนำบันทึกรายชื่อผู้ขึ้นแทนในเมนู 2)';
+        } else if (absentList.length > 0) {
+          message = `บันทึกสูงกว่าคาดการณ์ +${diff} แรง (มีรายชื่อลา/อบรม/ไปช่วย ${absentList.length} คน กรุณาตรวจสอบยอดคนหรือผู้ขึ้นแทน)`;
+        } else {
+          message = `บันทึกสูงกว่ากำลังคนประจำ +${diff} แรง (ตรวจสอบว่ามีผู้มาช่วยงานหรือไม่)`;
+        }
+      } else {
+        status = 'mismatch_under';
+        message =
+          absentList.length === 0
+            ? `บันทึกต่ำกว่ากำลังคนประจำ ${diff} แรง (ยังไม่มีรายชื่อลา / ไปอบรม / ไปช่วยห้องอื่นในวันนี้)`
+            : `บันทึกต่ำกว่าคาดการณ์ ${diff} แรง (กรุณาตรวจสอบรายชื่อลา/อบรมซ้ำ)`;
+      }
+
+      items.push({
+        key,
+        date: g.date,
+        day: Number(g.date.split('-')[2]) || 0,
+        unit: g.unit,
+        mode: 'IN_TIME',
+        baselineCount,
+        baselineSummary,
+        absentList,
+        incomingList,
+        expectedCount,
+        recordedNursing: recorded,
+        recordedRN: g.rn,
+        recordedPN: g.pn,
+        recordedNA: g.na,
+        diff,
+        status,
+        message,
+      });
+    });
+
+    return items.sort((a, b) => a.date.localeCompare(b.date) || a.unit.localeCompare(b.unit, 'th'));
+  }, [
+    filteredWorkloads,
+    selectedShift,
+    staffList,
+    leaves,
+    otRecords,
+    staffClinicByName,
+    premiumSubClinics,
+  ]);
+
+  const verificationStats = useMemo(() => {
+    const matched = staffingVerification.filter((v) => v.status === 'match').length;
+    const mismatch = staffingVerification.filter(
+      (v) => v.status === 'mismatch_over' || v.status === 'mismatch_under'
+    ).length;
+    const withEvents = staffingVerification.filter(
+      (v) => v.absentList.length > 0 || v.incomingList.length > 0
+    ).length;
+    const visibleItems = showAllVerificationDays
+      ? staffingVerification
+      : staffingVerification.filter(
+          (v) =>
+            v.absentList.length > 0 ||
+            v.incomingList.length > 0 ||
+            v.status === 'mismatch_over' ||
+            v.status === 'mismatch_under'
+        );
+    return {
+      total: staffingVerification.length,
+      matched,
+      mismatch,
+      withEvents,
+      visibleItems,
+    };
+  }, [staffingVerification, showAllVerificationDays]);
 
   const actualWorkingDays = dailyReportRows.length;
 
@@ -812,6 +1334,199 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         </div>
       </div>
 
+      {/* Staffing Headcount vs Leave / Training / Cross-Coverage Verification Panel */}
+      <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+          <div className="flex items-start gap-2.5">
+            <div className={`p-2 rounded-xl shrink-0 ${
+              verificationStats.mismatch > 0
+                ? 'bg-amber-100 text-amber-800'
+                : 'bg-emerald-100 text-emerald-800'
+            }`}>
+              {verificationStats.mismatch > 0 ? (
+                <ShieldAlert className="w-5 h-5" />
+              ) : (
+                <ShieldCheck className="w-5 h-5" />
+              )}
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-gray-900">
+                ตรวจสอบความสอดคล้องจำนวนบุคลากร vs รายชื่อลา / ไปอบรม / ไปช่วยงานอื่น
+              </h3>
+              <p className="text-[11px] text-gray-500 mt-0.5">
+                เทียบกำลังคนประจำในเมนู 5 หักผู้ลา/อบรม/ไปช่วยห้องอื่น บวกผู้มาขึ้นแทน เทียบกับยอดกำลังคน (RN+PN+NA) ที่บันทึกจริง
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
+              ตรงกัน: {verificationStats.matched} รายการ
+            </span>
+            {verificationStats.mismatch > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-300 font-bold">
+                ควรตรวจสอบ: {verificationStats.mismatch} รายการ
+              </span>
+            )}
+            <span className="px-2.5 py-1 rounded-lg bg-slate-50 text-slate-700 border border-slate-200 font-medium">
+              วันที่มีลา/อบรม/ช่วยงาน: {verificationStats.withEvents} รายการ
+            </span>
+            {staffingVerification.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAllVerificationDays((v) => !v)}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-gray-300 font-semibold cursor-pointer transition-colors"
+              >
+                {showAllVerificationDays
+                  ? 'แสดงเฉพาะวันที่มีลา/อบรม/ไม่ตรงกัน'
+                  : `แสดงทุกวันทำการ (${staffingVerification.length})`}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {staffingVerification.length === 0 ? (
+          <div className="py-5 text-center text-xs text-gray-400">
+            ยังไม่มีข้อมูลภาระงานสำหรับตรวจสอบในเดือน/กะเวลาที่เลือก
+          </div>
+        ) : verificationStats.visibleItems.length === 0 ? (
+          <div className="py-4 px-3 rounded-xl bg-emerald-50/70 border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2 font-semibold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              กำลังคนพยาบาลทุกวันทำการ ({verificationStats.matched} รายการ) สอดคล้องตรงตามอัตรากำลังประจำและไม่พบความคลาดเคลื่อน
+            </span>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 text-slate-700 font-semibold border-b">
+                <tr>
+                  <th className="py-2 px-2.5 whitespace-nowrap">วันที่</th>
+                  {selectedClinic === 'ALL' && <th className="py-2 px-2.5">หน่วยงาน</th>}
+                  <th className="py-2 px-2.5 text-center whitespace-nowrap">ประจำ (เมนู 5)</th>
+                  <th className="py-2 px-2.5">รายชื่อลา / อบรม / ไปช่วย (-)</th>
+                  <th className="py-2 px-2.5">มาช่วย / ขึ้นแทน (+)</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">คาดการณ์</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">บันทึกจริง</th>
+                  <th className="py-2 px-2.5">ผลการตรวจสอบ</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {verificationStats.visibleItems.map((v) => {
+                  const rowBg =
+                    v.status === 'mismatch_over' || v.status === 'mismatch_under'
+                      ? 'bg-amber-50/60'
+                      : v.status === 'match'
+                      ? 'bg-emerald-50/30'
+                      : 'bg-white';
+                  return (
+                    <tr key={v.key} className={`${rowBg} align-top`}>
+                      <td className="py-2 px-2.5 font-semibold text-gray-900 whitespace-nowrap">
+                        {formatThaiShortDate(v.date)}
+                      </td>
+                      {selectedClinic === 'ALL' && (
+                        <td className="py-2 px-2.5 font-semibold text-gray-800 whitespace-nowrap">
+                          {v.unit}
+                        </td>
+                      )}
+                      <td className="py-2 px-2.5 text-center whitespace-nowrap">
+                        {v.mode === 'IN_TIME' ? (
+                          <div>
+                            <div className="font-bold text-gray-900">{v.baselineCount} คน</div>
+                            <div className="text-[10px] text-gray-500">{v.baselineSummary}</div>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-gray-500">{v.baselineSummary}</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2.5">
+                        {v.absentList.length === 0 ? (
+                          <span className="text-gray-300">-</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {v.absentList.map((ab, idx) => (
+                              <div
+                                key={idx}
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium mr-1 ${
+                                  ab.kind === 'training'
+                                    ? 'bg-cyan-50 text-cyan-900 border border-cyan-200'
+                                    : ab.kind === 'outgoing'
+                                    ? 'bg-purple-50 text-purple-900 border border-purple-200'
+                                    : 'bg-amber-100/80 text-amber-950 border border-amber-200'
+                                }`}
+                              >
+                                {ab.kind === 'training' ? (
+                                  <GraduationCap className="w-3 h-3 shrink-0" />
+                                ) : ab.kind === 'outgoing' ? (
+                                  <ArrowRightLeft className="w-3 h-3 shrink-0" />
+                                ) : (
+                                  <CalendarOff className="w-3 h-3 shrink-0" />
+                                )}
+                                <span>{ab.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2.5">
+                        {v.incomingList.length === 0 ? (
+                          <span className="text-gray-300">-</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {v.incomingList.map((inc, idx) => (
+                              <div
+                                key={idx}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-900 border border-emerald-200 mr-1"
+                              >
+                                <Users className="w-3 h-3 shrink-0" />
+                                <span>{inc.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-center font-bold text-slate-800 whitespace-nowrap">
+                        {v.baselineCount > 0 || v.mode === 'OUT_TIME' ? `${v.expectedCount} แรง` : '-'}
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <div className="font-extrabold text-blue-900">{v.recordedNursing} แรง</div>
+                        <div className="text-[10px] text-gray-500">
+                          RN {v.recordedRN}
+                          {v.recordedPN > 0 ? ` / PN ${v.recordedPN}` : ''}
+                          {v.recordedNA > 0 ? ` / NA ${v.recordedNA}` : ''}
+                        </div>
+                      </td>
+                      <td className="py-2 px-2.5">
+                        <div className="flex items-start gap-1.5">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                              v.status === 'match'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : v.status === 'no_baseline'
+                                ? 'bg-gray-100 text-gray-700'
+                                : 'bg-amber-200 text-amber-950'
+                            }`}
+                          >
+                            {v.status === 'match'
+                              ? 'ตรงกัน'
+                              : v.status === 'no_baseline'
+                              ? 'ไม่มีฐานเมนู 5'
+                              : v.diff > 0
+                              ? `เกิน ${v.diff}`
+                              : `ขาด ${Math.abs(v.diff)}`}
+                          </span>
+                          <span className="text-[11px] text-gray-700 leading-snug">{v.message}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Official PDF / JPEG Printable Productivity Form */}
       <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-6 space-y-4 print:p-0 print:border-0 print:shadow-none print:rounded-none">
         <div className="no-print flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
@@ -960,10 +1675,10 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                 {dailyReportRows.map((row) => {
                   const rowNursing = row.rn + row.pn + row.na;
                   return (
-                    <tr key={row.date} className="text-center h-[22px] print:h-[18px]">
-                      <td className="border border-black py-0.5 px-1">{row.day}</td>
-                      <td className="border border-black py-0.5 px-2 text-left text-[11px] print:text-[9.5px] truncate max-w-[230px]">
-                        {row.notes.join('; ')}
+                    <tr key={row.date} className="text-center min-h-[22px] print:min-h-[18px]">
+                      <td className="border border-black py-0.5 px-1 align-middle">{row.day}</td>
+                      <td className="border border-black py-0.5 px-1.5 text-left text-[10.5px] print:text-[9px] leading-snug whitespace-normal break-words align-middle">
+                        {row.notes.join(', ')}
                       </td>
                       <td className="border border-black py-0.5 px-1">
                         {officialReportMeta.fmtStaff(row.hn)}

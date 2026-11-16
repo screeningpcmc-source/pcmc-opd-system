@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   DailyWorkload, 
   StaffMember, 
+  LeaveRecord,
+  OTAttendance,
   WorkShift, 
   IN_TIME_CLINICS, 
   OUT_TIME_CLINICS, 
@@ -40,6 +42,7 @@ import {
   ArrowRightLeft,
   Lock,
   ShieldCheck,
+  ShieldAlert,
   Pencil,
   X,
   Save,
@@ -54,6 +57,8 @@ import {
 interface DailyWorkloadTabProps {
   workloads: DailyWorkload[];
   staffList: StaffMember[];
+  leaves?: LeaveRecord[];
+  otRecords?: OTAttendance[];
   inTimeClinics?: string[];
   outTimeClinics?: string[];
   premiumSubClinics?: string[];
@@ -80,6 +85,8 @@ interface DailyWorkloadTabProps {
 export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   workloads,
   staffList,
+  leaves = [],
+  otRecords = [],
   inTimeClinics = [...IN_TIME_CLINICS],
   outTimeClinics = [...OUT_TIME_CLINICS],
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
@@ -305,6 +312,193 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         .sort(compareStaffByPositionAndStartDate),
     [staffList]
   );
+
+  // Live Verification: check clinic baseline staff against Leaves, Training, Cross-Cover on selected date
+  const dayStaffingCheck = useMemo(() => {
+    const normalizeUnit = (c?: string) => {
+      const trimmed = (c || '').trim();
+      if (!trimmed) return '';
+      if (
+        isPremiumGroupName(trimmed) ||
+        isPremiumPoolClinicName(trimmed) ||
+        /-Premium$/i.test(trimmed) ||
+        premiumSubClinics.includes(trimmed)
+      ) {
+        return PREMIUM_CLINIC_GROUP;
+      }
+      return trimmed;
+    };
+    const isNursing = (pos?: string) =>
+      pos === 'RN' || pos === 'PN' || pos === 'NA' || pos === 'PCA';
+    const isActiveOnDate = (s: StaffMember) => {
+      if (s.status === 'Active') {
+        if (s.startDate && s.startDate > date) return false;
+        if (s.endDate && s.endDate < date) return false;
+        return true;
+      }
+      if (!s.endDate) return false;
+      if (s.startDate && s.startDate > date) return false;
+      return s.endDate >= date;
+    };
+
+    const targetUnit = normalizeUnit(clinic);
+    const staffUnitMap = new Map<string, string>();
+    staffList.forEach(s => {
+      if (s.name) staffUnitMap.set(s.name.trim(), normalizeUnit(s.homeClinic));
+    });
+
+    const baselineStaff = staffList.filter(
+      s => isNursing(s.position) && isActiveOnDate(s) && normalizeUnit(s.homeClinic) === targetUnit
+    );
+    const baseRN = baselineStaff.filter(s => s.position === 'RN').length;
+    const basePN = baselineStaff.filter(s => s.position === 'PN').length;
+    const baseNA = baselineStaff.filter(s => s.position === 'NA' || s.position === 'PCA').length;
+    const baseTotal = baselineStaff.length;
+
+    const absentMap = new Map<string, { name: string; pos: string; detail: string }>();
+    const incomingMap = new Map<string, { name: string; pos: string; detail: string }>();
+
+    if (!isOutTime) {
+      leaves.forEach(l => {
+        const sDate = (l.startDate || '').trim();
+        const eDate = (l.endDate || l.startDate || '').trim();
+        if (!sDate || date < sDate || date > eDate) return;
+        const unit = normalizeUnit(l.clinic || staffUnitMap.get((l.staffName || '').trim()) || '');
+        if (unit !== targetUnit || !isNursing(l.position)) return;
+        const name = (l.staffName || '').trim();
+        if (!name || absentMap.has(name)) return;
+        absentMap.set(name, {
+          name,
+          pos: l.position === 'PCA' ? 'NA' : l.position,
+          detail: `${name} (${l.leaveType})`,
+        });
+      });
+
+      if (hasStaffLeave) {
+        selectedLeaveStaffIds.forEach(id => {
+          const st = staffList.find(s => s.staffId === id);
+          if (!st || !isNursing(st.position) || normalizeUnit(st.homeClinic) !== targetUnit) return;
+          if (!absentMap.has(st.name)) {
+            absentMap.set(st.name, {
+              name: st.name,
+              pos: st.position === 'PCA' ? 'NA' : st.position,
+              detail: `${st.name} (${leaveType})`,
+            });
+          }
+        });
+      }
+
+      if (hasTraining) {
+        selectedTrainingStaffIds.forEach(id => {
+          const st = staffList.find(s => s.staffId === id);
+          if (!st || !isNursing(st.position) || normalizeUnit(st.homeClinic) !== targetUnit) return;
+          if (!absentMap.has(st.name)) {
+            absentMap.set(st.name, {
+              name: st.name,
+              pos: st.position === 'PCA' ? 'NA' : st.position,
+              detail: `${st.name} (ไปอบรม/ประชุม)`,
+            });
+          }
+        });
+      }
+
+      otRecords.forEach(o => {
+        if (o.date !== date) return;
+        if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
+        if (!isNursing(o.position)) return;
+        const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get((o.staffName || '').trim()) || '');
+        const wUnit = normalizeUnit(o.workClinic || '');
+        const pos = o.position === 'PCA' ? 'NA' : o.position;
+        if (hUnit === targetUnit && wUnit !== targetUnit && wUnit) {
+          if (!absentMap.has(o.staffName)) {
+            absentMap.set(o.staffName, {
+              name: o.staffName,
+              pos,
+              detail: `${o.staffName} (ไปช่วย ${o.workClinic})`,
+            });
+          }
+        }
+        if (wUnit === targetUnit && (hUnit !== targetUnit || Boolean(o.isExternal) || o.shift === 'OT ในเวลาราชการ 08:00-16:00')) {
+          if (!incomingMap.has(o.staffName)) {
+            const src = o.affiliation || (hUnit !== targetUnit ? o.homeClinic : '');
+            incomingMap.set(o.staffName, {
+              name: o.staffName,
+              pos,
+              detail: `${o.staffName} (${o.shift === 'OT ในเวลาราชการ 08:00-16:00' || o.isExternal ? 'ขึ้นแทน' : 'มาช่วย'}${src ? ` จาก ${src}` : ''})`,
+            });
+          }
+        }
+      });
+
+      if (hasCrossCover && crossStaffName && crossTargetClinic) {
+        const st = staffList.find(s => s.name === crossStaffName);
+        if (st && isNursing(st.position) && normalizeUnit(st.homeClinic) === targetUnit && normalizeUnit(crossTargetClinic) !== targetUnit) {
+          if (!absentMap.has(st.name)) {
+            absentMap.set(st.name, {
+              name: st.name,
+              pos: st.position === 'PCA' ? 'NA' : st.position,
+              detail: `${st.name} (ไปช่วย ${crossTargetClinic})`,
+            });
+          }
+        }
+      }
+    }
+
+    const absents = Array.from(absentMap.values());
+    const incomings = Array.from(incomingMap.values());
+
+    const expectedRN = Math.max(
+      0,
+      baseRN - absents.filter(a => a.pos === 'RN').length + incomings.filter(i => i.pos === 'RN').length
+    );
+    const expectedPN = Math.max(
+      0,
+      basePN - absents.filter(a => a.pos === 'PN').length + incomings.filter(i => i.pos === 'PN').length
+    );
+    const expectedNA = Math.max(
+      0,
+      baseNA - absents.filter(a => a.pos === 'NA').length + incomings.filter(i => i.pos === 'NA').length
+    );
+    const expectedTotal = Math.max(0, baseTotal - absents.length + incomings.length);
+    const enteredTotal = Number((rn + pn + na).toFixed(1));
+    const diff = Number((enteredTotal - expectedTotal).toFixed(1));
+
+    return {
+      isOutTime,
+      baseTotal,
+      baseRN,
+      basePN,
+      baseNA,
+      absents,
+      incomings,
+      expectedRN,
+      expectedPN,
+      expectedNA,
+      expectedTotal,
+      enteredTotal,
+      diff,
+      isMatch: baseTotal > 0 && Math.abs(diff) < 0.01,
+    };
+  }, [
+    date,
+    clinic,
+    isOutTime,
+    staffList,
+    leaves,
+    otRecords,
+    rn,
+    pn,
+    na,
+    hasStaffLeave,
+    selectedLeaveStaffIds,
+    leaveType,
+    hasTraining,
+    selectedTrainingStaffIds,
+    hasCrossCover,
+    crossStaffName,
+    crossTargetClinic,
+    premiumSubClinics,
+  ]);
 
   const adjustStaff = (setter: React.Dispatch<React.SetStateAction<number>>, delta: number) => {
     setter(prev => Math.max(0, Math.round((prev + delta) * 10) / 10));
@@ -966,6 +1160,67 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   กำลังคนการพยาบาล (RN+PN+NA): {(rn + pn + na).toFixed(1)} แรง
                 </span>
               </div>
+
+              {/* Live Headcount Verification vs Staff Master & Leaves/Training/Cross-Cover */}
+              {!dayStaffingCheck.isOutTime && dayStaffingCheck.baseTotal > 0 && (
+                <div
+                  className={`rounded-xl border p-2.5 text-[11px] flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                    dayStaffingCheck.isMatch
+                      ? 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
+                      : 'bg-amber-50 border-amber-300 text-amber-950'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    {dayStaffingCheck.isMatch ? (
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="space-y-0.5">
+                      <div className="font-bold">
+                        ตรวจเช็กยอดกำลังคน {clinic}: ประจำ {dayStaffingCheck.baseTotal} คน
+                        {dayStaffingCheck.absents.length > 0 && ` − ลา/อบรม/ไปช่วย ${dayStaffingCheck.absents.length} คน`}
+                        {dayStaffingCheck.incomings.length > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.incomings.length} คน`}
+                        {` = คาดการณ์ ${dayStaffingCheck.expectedTotal} แรง `}
+                        <span className={dayStaffingCheck.isMatch ? 'text-emerald-700' : 'text-amber-800'}>
+                          ({dayStaffingCheck.isMatch
+                            ? 'ตรงกัน'
+                            : dayStaffingCheck.diff > 0
+                            ? `กรอกอยู่ ${dayStaffingCheck.enteredTotal} แรง สูงกว่าคาด +${dayStaffingCheck.diff}`
+                            : `กรอกอยู่ ${dayStaffingCheck.enteredTotal} แรง ต่ำกว่าคาด ${dayStaffingCheck.diff}`})
+                        </span>
+                      </div>
+                      {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0) && (
+                        <div className="text-[10.5px] opacity-90 flex flex-wrap gap-1.5 pt-0.5">
+                          {dayStaffingCheck.absents.map((a, idx) => (
+                            <span key={`ab-${idx}`} className="px-1.5 py-0.5 rounded bg-white/80 border border-amber-200 font-medium">
+                              {a.detail}
+                            </span>
+                          ))}
+                          {dayStaffingCheck.incomings.map((inc, idx) => (
+                            <span key={`inc-${idx}`} className="px-1.5 py-0.5 rounded bg-white/80 border border-emerald-200 font-medium">
+                              {inc.detail}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {!dayStaffingCheck.isMatch && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRn(dayStaffingCheck.expectedRN);
+                        setPn(dayStaffingCheck.expectedPN);
+                        setNa(dayStaffingCheck.expectedNA);
+                      }}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10.5px] shadow-2xs transition-colors cursor-pointer"
+                    >
+                      ใช้ยอดคาดการณ์ ({dayStaffingCheck.expectedTotal} แรง)
+                    </button>
+                  )}
+                </div>
+              )}
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {/* HN */}

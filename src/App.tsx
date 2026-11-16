@@ -1896,6 +1896,8 @@ export default function App() {
           <DailyWorkloadTab
             workloads={db.workloads}
             staffList={db.staff}
+            leaves={db.leaves}
+            otRecords={db.ot}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
             premiumSubClinics={premiumSubClinics}
@@ -1947,6 +1949,9 @@ export default function App() {
         {activeTab === 'productivity' && (
           <ProductivityTab
             workloads={db.workloads}
+            staffList={db.staff}
+            leaves={db.leaves}
+            otRecords={db.ot}
             settings={db.settings}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
