@@ -3,7 +3,45 @@
  * โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน (PCMC)
  */
 
-export type StaffPosition = 'HN' | 'RN' | 'PN' | 'NA' | 'Clerk' | 'Service Worker' | 'PCA';
+export type StaffPosition =
+  | 'HN'
+  | 'RN'
+  | 'PN'
+  | 'NA'
+  | 'Clerk'
+  | 'Service Worker'
+  | 'Daily Wage'
+  | 'PCA';
+
+export const DAILY_WAGE_POSITION = 'Daily Wage' as const;
+
+export const isDailyWorkloadExcludedPosition = (pos?: string): boolean => {
+  const trimmed = (pos || '').trim();
+  return (
+    trimmed === 'Daily Wage' ||
+    trimmed === 'Daily Nurse' ||
+    trimmed === 'Daily Hire' ||
+    trimmed === 'จ้างรายวัน' ||
+    trimmed === 'พยาบาลจ้างรายวัน'
+  );
+};
+
+export const normalizeStaffPosition = (pos?: string): StaffPosition => {
+  const trimmed = (pos || '').trim();
+  if (trimmed === 'PCA') return 'NA';
+  if (isDailyWorkloadExcludedPosition(trimmed)) return 'Daily Wage';
+  if (
+    trimmed === 'HN' ||
+    trimmed === 'RN' ||
+    trimmed === 'PN' ||
+    trimmed === 'NA' ||
+    trimmed === 'Clerk' ||
+    trimmed === 'Service Worker'
+  ) {
+    return trimmed;
+  }
+  return 'RN';
+};
 
 export type StaffStatus = 'Active' | 'Resigned' | 'Retired';
 
@@ -411,7 +449,15 @@ export const OUT_TIME_CLINICS = [
   'หน่วยคัดกรอง'
 ] as const;
 
-export const ALL_POSITIONS: StaffPosition[] = ['HN', 'RN', 'PN', 'NA', 'Clerk', 'Service Worker'];
+export const ALL_POSITIONS: StaffPosition[] = [
+  'HN',
+  'RN',
+  'PN',
+  'NA',
+  'Clerk',
+  'Service Worker',
+  'Daily Wage',
+];
 
 export const POSITION_LABELS: Record<StaffPosition, string> = {
   HN: 'หัวหน้าพยาบาล/หัวหน้าเวร',
@@ -420,7 +466,8 @@ export const POSITION_LABELS: Record<StaffPosition, string> = {
   NA: 'ผู้ช่วยเหลือคนไข้',
   PCA: 'ผู้ช่วยเหลือคนไข้',
   Clerk: 'ผู้ปฏิบัติงานทั่วไป',
-  'Service Worker': 'พนักงานบริการ'
+  'Service Worker': 'พนักงานบริการ',
+  'Daily Wage': 'จ้างรายวัน',
 };
 
 export const formatPositionLabel = (pos: StaffPosition | string): string => {
@@ -430,6 +477,7 @@ export const formatPositionLabel = (pos: StaffPosition | string): string => {
   if (pos === 'NA' || pos === 'PCA') return 'ผู้ช่วยเหลือคนไข้';
   if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
   if (pos === 'Service Worker') return 'พนักงานบริการ';
+  if (isDailyWorkloadExcludedPosition(pos)) return 'จ้างรายวัน';
   return pos;
 };
 
@@ -441,6 +489,7 @@ export const POSITION_SORT_ORDER: Record<StaffPosition, number> = {
   PCA: 4,
   Clerk: 5,
   'Service Worker': 6,
+  'Daily Wage': 7,
 };
 
 export const compareStaffByPositionAndStartDate = (

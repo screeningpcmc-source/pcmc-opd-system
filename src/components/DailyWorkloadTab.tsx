@@ -37,6 +37,8 @@ import {
   isReferralClinicName,
   isReferralWorkload,
   normalizeReferralData,
+  isDailyWorkloadExcludedPosition,
+  normalizeStaffPosition,
 } from '../types';
 import {
   formatThaiShortDate,
@@ -419,13 +421,14 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setTotalPt(adultPt + v);
   };
 
-  // Filter & sort staff by position rank (1→6) and startDate
+  // Filter & sort staff by position rank (1→6) and startDate (exclude Daily Wage / จ้างรายวัน from daily workload)
   const clinicStaff = useMemo(
     () =>
       staffList
         .filter(
           s =>
             s.status === 'Active' &&
+            !isDailyWorkloadExcludedPosition(s.position) &&
             (isPremiumClinic
               ? s.homeClinic === PREMIUM_CLINIC_GROUP || s.homeClinic === LEGACY_PREMIUM_CLINIC_GROUP
               : s.homeClinic === clinic)
@@ -433,10 +436,22 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         .sort(compareStaffByPositionAndStartDate),
     [staffList, clinic, isPremiumClinic]
   );
+  const dailyWageClinicStaffCount = useMemo(
+    () =>
+      staffList.filter(
+        s =>
+          s.status === 'Active' &&
+          isDailyWorkloadExcludedPosition(s.position) &&
+          (isPremiumClinic
+            ? s.homeClinic === PREMIUM_CLINIC_GROUP || s.homeClinic === LEGACY_PREMIUM_CLINIC_GROUP
+            : s.homeClinic === clinic)
+      ).length,
+    [staffList, clinic, isPremiumClinic]
+  );
   const activeStaffAll = useMemo(
     () =>
       staffList
-        .filter(s => s.status === 'Active')
+        .filter(s => s.status === 'Active' && !isDailyWorkloadExcludedPosition(s.position))
         .sort(compareStaffByPositionAndStartDate),
     [staffList]
   );
@@ -458,20 +473,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       }
       return trimmed;
     };
-    const normalizePos = (pos?: string): StaffPosition => {
-      if (pos === 'PCA') return 'NA';
-      if (
-        pos === 'HN' ||
-        pos === 'RN' ||
-        pos === 'PN' ||
-        pos === 'NA' ||
-        pos === 'Clerk' ||
-        pos === 'Service Worker'
-      ) {
-        return pos;
-      }
-      return 'RN';
-    };
+    const normalizePos = (pos?: string): StaffPosition => normalizeStaffPosition(pos);
     const isActiveOnDate = (s: StaffMember) => {
       if (s.status !== 'Active') return false;
       if (s.startDate && s.startDate > date) return false;
@@ -481,15 +483,21 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
     const targetUnit = normalizeUnit(clinic);
     const staffUnitMap = new Map<string, string>();
+    const staffPosMap = new Map<string, StaffPosition>();
     staffList.forEach(s => {
-      if (s.name) staffUnitMap.set(s.name.trim(), normalizeUnit(s.homeClinic));
+      if (s.name) {
+        const cleanName = s.name.trim();
+        staffUnitMap.set(cleanName, normalizeUnit(s.homeClinic));
+        staffPosMap.set(cleanName, normalizePos(s.position));
+      }
     });
 
     const baselineStaff = staffList.filter(
       s =>
         isActiveOnDate(s) &&
         normalizeUnit(s.homeClinic) === targetUnit &&
-        normalizePos(s.position) !== 'HN'
+        normalizePos(s.position) !== 'HN' &&
+        !isDailyWorkloadExcludedPosition(s.position)
     );
     const baseTotalAll = baselineStaff.length;
     const nursingPositions: StaffPosition[] = ['RN', 'PN', 'NA'];
@@ -514,13 +522,15 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     if (needsStrictValidation) {
       // Saved leaves & training overlapping date for this department
       leaves.forEach(l => {
+        const name = (l.staffName || '').trim();
+        if (!name) return;
+        const resolvedPos = staffPosMap.get(name) || normalizePos(l.position);
+        if (isDailyWorkloadExcludedPosition(resolvedPos)) return;
         const sDate = (l.startDate || '').trim();
         const eDate = (l.endDate || l.startDate || '').trim();
         if (!sDate || date < sDate || date > eDate) return;
-        const unit = normalizeUnit(l.clinic || staffUnitMap.get((l.staffName || '').trim()) || '');
+        const unit = normalizeUnit(l.clinic || staffUnitMap.get(name) || '');
         if (unit !== targetUnit) return;
-        const name = (l.staffName || '').trim();
-        if (!name) return;
 
         if (isTrainingLeaveType(l.leaveType)) {
           if (!trainingNameSet.has(name)) {
@@ -618,10 +628,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       otRecords.forEach(o => {
         if (o.date !== date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
+        const cleanOtName = (o.staffName || '').trim();
+        const pos = (cleanOtName && staffPosMap.get(cleanOtName)) || normalizePos(o.position);
+        if (isDailyWorkloadExcludedPosition(pos)) return;
         const parsedWork = parseOtWorkClinic(o.workClinic);
-        const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get((o.staffName || '').trim()) || '');
+        const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get(cleanOtName) || '');
         const wUnit = normalizeUnit(parsedWork.clinic);
-        const pos = normalizePos(o.position);
         const amt = parsedWork.amount;
         const pSuffix = amt === 0.5 && parsedWork.periodLabel ? ` 0.5 ${parsedWork.periodLabel}` : '';
 
@@ -710,6 +722,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       PCA: 0,
       Clerk: Number(clerk) || 0,
       'Service Worker': Number(serviceWorker) || 0,
+      'Daily Wage': 0,
     };
 
     const positionShortLabels: Record<StaffPosition, string> = {
@@ -720,9 +733,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       PCA: 'NA',
       Clerk: 'ผู้ปฏิบัติงานทั่วไป',
       'Service Worker': 'พนักงานบริการ',
+      'Daily Wage': 'จ้างรายวัน',
     };
 
-    const trackedPositions = ALL_POSITIONS.filter(pos => pos !== 'HN');
+    const trackedPositions = ALL_POSITIONS.filter(
+      pos => pos !== 'HN' && !isDailyWorkloadExcludedPosition(pos)
+    );
 
     const positionRows = trackedPositions.map(pos => {
       const full = baselineStaff.filter(s => normalizePos(s.position) === pos).length;
@@ -1683,6 +1699,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </span>
               </div>
 
+              {dailyWageClinicStaffCount > 0 && (
+                <div className="rounded-lg bg-sky-50 border border-sky-200 px-3 py-1.5 text-[11px] text-sky-900 font-medium">
+                  หมายเหตุ: แผนกนี้มีเจ้าหน้าที่ตำแหน่ง <strong>"จ้างรายวัน"</strong> {dailyWageClinicStaffCount} คน ซึ่งจะไม่นับรวมในภาระงานประจำวัน (สามารถบันทึกวันลา/OT เพื่อคิด Unit Cost ประจำปีได้ที่เมนู 2)
+                </div>
+              )}
+
               {/* Live 3-Point Headcount Verification across ALL positions */}
               {dayStaffingCheck.needsStrictValidation && dayStaffingCheck.baseTotalAll > 0 && (
                 <div
@@ -2485,7 +2507,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                             onChange={(e) => setCrossExtPosition(e.target.value as StaffPosition)}
                             className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
                           >
-                            {ALL_POSITIONS.map(p => (
+                            {ALL_POSITIONS.filter(p => !isDailyWorkloadExcludedPosition(p)).map(p => (
                               <option key={p} value={p}>{formatPositionLabel(p)}</option>
                             ))}
                           </select>

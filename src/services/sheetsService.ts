@@ -20,6 +20,7 @@ import {
   getCanonicalReferralSignature,
   getEffectiveTotalPt,
   normalizeWorkloadRecord,
+  normalizeStaffPosition,
   parseReferralFromSheetNote
 } from '../types';
 import {
@@ -561,7 +562,7 @@ export const loadLocalDatabase = (): AppDatabase => {
         : rawStaff
       ).map((s: StaffMember) => ({
         ...s,
-        position: (s.position === 'PCA' ? 'NA' : s.position) as StaffPosition,
+        position: normalizeStaffPosition(s.position),
       }));
 
       const mergedPremiumClinics =
@@ -593,7 +594,7 @@ export const loadLocalDatabase = (): AppDatabase => {
         : rawLeaves
       ).map((l: any) => ({
         ...l,
-        position: (l.position === 'PCA' ? 'NA' : l.position) as StaffPosition,
+        position: normalizeStaffPosition(l.position),
       }));
 
       const rawOt: any[] = parsed.ot || INITIAL_OT;
@@ -602,7 +603,7 @@ export const loadLocalDatabase = (): AppDatabase => {
         : rawOt
       ).map((o: any) => ({
         ...o,
-        position: (o.position === 'PCA' ? 'NA' : o.position) as StaffPosition,
+        position: normalizeStaffPosition(o.position),
       }));
 
       const isUnlinked = Boolean(parsed.settings?.isUnlinked);
@@ -1099,7 +1100,7 @@ export const syncAllWithGoogleSheet = async (
     .filter((r) => (r[1] || '').trim().length > 0)
     .map((r, idx): StaffMember => {
       const rawPos = (r[2] || 'RN').trim();
-      const pos = (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition;
+      const pos = normalizeStaffPosition(rawPos);
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
@@ -1214,7 +1215,7 @@ export const syncAllWithGoogleSheet = async (
         startDate: String(r[0] || '').trim(),
         endDate: String(r[1] || r[0] || '').trim(),
         staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        position: normalizeStaffPosition(rawPos),
         clinic: String(r[4] || '').trim(),
         leaveType: (String(r[5] || 'ลาป่วย').trim()) as LeaveType,
         days: Number(r[6] || 1),
@@ -1268,7 +1269,7 @@ export const syncAllWithGoogleSheet = async (
         date: String(r[0] || '').trim(),
         shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
         staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        position: normalizeStaffPosition(rawPos),
         homeClinic: String(r[4] || '').trim(),
         workClinic: String(r[5] || '').trim(),
       };
@@ -2036,7 +2037,7 @@ function mergeRemoteDataRows(
     .filter((r) => (r[1] || '').trim().length > 0)
     .map((r, idx) => {
       const rawPos = (r[2] || 'RN').trim();
-      const pos = (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition;
+      const pos = normalizeStaffPosition(rawPos);
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
@@ -2166,7 +2167,7 @@ function mergeRemoteDataRows(
           startDate: String(r[0] || '').trim(),
           endDate: String(r[1] || r[0] || '').trim(),
           staffName: String(r[2] || '').trim(),
-          position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+          position: normalizeStaffPosition(rawPos),
           clinic: String(r[4] || '').trim(),
           leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
           days: Number(r[6] || 1),
@@ -2225,7 +2226,7 @@ function mergeRemoteDataRows(
           date: String(r[0] || '').trim(),
           shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
           staffName: String(r[2] || '').trim(),
-          position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+          position: normalizeStaffPosition(rawPos),
           homeClinic: String(r[4] || '').trim(),
           workClinic: String(r[5] || '').trim(),
         };
@@ -2708,7 +2709,7 @@ function parseRemoteLeavesOnly(leaveRows: unknown): LeaveRecord[] {
         startDate: String(r[0] || '').trim(),
         endDate: String(r[1] || r[0] || '').trim(),
         staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        position: normalizeStaffPosition(rawPos),
         clinic: String(r[4] || '').trim(),
         leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
         days: Number(r[6] || 1),
@@ -2728,7 +2729,7 @@ function parseRemoteOtOnly(otRows: unknown): OTAttendance[] {
         date: String(r[0] || '').trim(),
         shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
         staffName: String(r[2] || '').trim(),
-        position: (rawPos === 'PCA' ? 'NA' : rawPos) as StaffPosition,
+        position: normalizeStaffPosition(rawPos),
         homeClinic: String(r[4] || '').trim(),
         workClinic: String(r[5] || '').trim(),
       };

@@ -496,6 +496,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(2570);
   const [shiftFilter, setShiftFilter] = useState<'ALL' | 'IN_TIME' | 'OT'>('ALL');
   const [clinicFilter, setClinicFilter] = useState<string>('ALL');
+  const [fiscalPositionFilter, setFiscalPositionFilter] = useState<string>('ALL');
   const [staffFilter, setStaffFilter] = useState<string>('ALL');
   const [monthFilter, setMonthFilter] = useState<string>('ALL');
   const [summarySearchQuery, setSummarySearchQuery] = useState<string>('');
@@ -790,6 +791,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         if (clinicFilter !== 'ALL' && item.staff.homeClinic !== clinicFilter) {
           return false;
         }
+        if (fiscalPositionFilter !== 'ALL' && item.staff.position !== fiscalPositionFilter) {
+          return false;
+        }
         if (staffFilter !== 'ALL' && item.staff.staffId !== staffFilter) {
           return false;
         }
@@ -805,7 +809,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         return true;
       })
       .sort((a, b) => compareStaffByPositionAndStartDate(a.staff, b.staff));
-  }, [fiscalSummaryData, clinicFilter, staffFilter, summarySearchQuery]);
+  }, [fiscalSummaryData, clinicFilter, fiscalPositionFilter, staffFilter, summarySearchQuery]);
 
   const summaryKpis = useMemo(() => {
     if (monthFilter === 'ALL') {
@@ -1022,6 +1026,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const filteredRoster = Array.from(rosterMap.values())
       .filter((person) => {
         if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
+        if (fiscalPositionFilter !== 'ALL' && person.position !== fiscalPositionFilter) return false;
         if (staffFilter !== 'ALL' && person.id !== staffFilter) return false;
         if (q) {
           const match =
@@ -1087,6 +1092,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     activeStaff,
     staffList,
     clinicFilter,
+    fiscalPositionFilter,
     staffFilter,
     summarySearchQuery,
     onlyStaffWithLeaves,
@@ -2562,7 +2568,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                   ? 'bg-teal-100 text-teal-800'
                                   : s.position === 'NA' || s.position === 'PCA'
                                     ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-gray-100 text-gray-800'
+                                    : s.position === 'Daily Wage'
+                                      ? 'bg-sky-100 text-sky-800'
+                                      : 'bg-gray-100 text-gray-800'
                             }`}
                           >
                             {formatPositionLabel(s.position)}
@@ -3317,7 +3325,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <span>ตัวกรองการแสดงผล (Filters)</span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               {/* 1. Shift Filter */}
               <div>
                 <label className="block text-[11px] font-bold text-gray-700 mb-1 flex items-center gap-1">
@@ -3355,7 +3363,27 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </select>
               </div>
 
-              {/* 3. Month Filter */}
+              {/* 3. Position Filter (for Unit Cost breakdown) */}
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1 flex items-center gap-1">
+                  <Users className="w-3 h-3 text-teal-700" />
+                  <span>ตำแหน่ง (สำหรับ Unit Cost):</span>
+                </label>
+                <select
+                  value={fiscalPositionFilter}
+                  onChange={(e) => setFiscalPositionFilter(e.target.value)}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-medium text-gray-900 focus:ring-1 focus:ring-teal-500"
+                >
+                  <option value="ALL">-- ทุกตำแหน่งวิชาชีพ --</option>
+                  {ALL_POSITIONS.map((p) => (
+                    <option key={p} value={p}>
+                      {POSITION_LABELS[p]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 4. Month Filter */}
               <div>
                 <label className="block text-[11px] font-bold text-gray-700 mb-1 flex items-center gap-1">
                   <Calendar className="w-3 h-3 text-teal-700" />
@@ -3375,7 +3403,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </select>
               </div>
 
-              {/* 4. Individual Staff Filter */}
+              {/* 5. Individual Staff Filter */}
               <div>
                 <label className="block text-[11px] font-bold text-gray-700 mb-1 flex items-center gap-1">
                   <User className="w-3 h-3 text-teal-700" />
@@ -3413,6 +3441,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <div className="flex items-center gap-2">
                 {(shiftFilter !== 'ALL' ||
                   clinicFilter !== 'ALL' ||
+                  fiscalPositionFilter !== 'ALL' ||
                   staffFilter !== 'ALL' ||
                   monthFilter !== 'ALL' ||
                   summarySearchQuery) && (
@@ -3421,6 +3450,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     onClick={() => {
                       setShiftFilter('ALL');
                       setClinicFilter('ALL');
+                      setFiscalPositionFilter('ALL');
                       setStaffFilter('ALL');
                       setMonthFilter('ALL');
                       setSummarySearchQuery('');
@@ -3568,7 +3598,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-teal-100 text-teal-800'
                                       : staff.position === 'NA' || staff.position === 'PCA'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : 'bg-gray-100 text-gray-800'
+                                        : staff.position === 'Daily Wage'
+                                          ? 'bg-sky-100 text-sky-800'
+                                          : 'bg-gray-100 text-gray-800'
                               }`}
                             >
                               {formatPositionLabel(staff.position)}
@@ -3705,7 +3737,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-teal-100 text-teal-800'
                                       : staff.position === 'NA' || staff.position === 'PCA'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : 'bg-gray-100 text-gray-800'
+                                        : staff.position === 'Daily Wage'
+                                          ? 'bg-sky-100 text-sky-800'
+                                          : 'bg-gray-100 text-gray-800'
                               }`}
                             >
                               {formatPositionLabel(staff.position)}
