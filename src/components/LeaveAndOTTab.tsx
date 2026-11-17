@@ -2294,12 +2294,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       {/* --- SUB-TAB 2: OT MULTI-SELECT + IN-TIME OT + EXTERNAL SUBSTITUTE ENTRY --- */}
       {activeSubTab === 'ot' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 lg:items-stretch">
-            {/* Controls: 30% width (3/10 cols) */}
-            <div className="lg:col-span-3 flex flex-col min-w-0">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:items-stretch">
+            {/* Controls: 50% width */}
+            <div className="flex flex-col min-w-0">
               <form
                 onSubmit={handleSaveBatchOTSubmit}
-                className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-5 space-y-4 flex-1 flex flex-col justify-between"
+                className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4 flex-1 flex flex-col justify-between"
               >
                 <div className="space-y-4">
                 <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2 border-b pb-2">
@@ -2497,8 +2497,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </form>
             </div>
 
-            {/* Staff Multi-Select Grid: 70% width (7/10 cols, equal height to left form) */}
-            <div className="lg:col-span-7 lg:relative min-w-0">
+            {/* Staff Multi-Select Grid: 50% width, equal height to left form */}
+            <div className="lg:relative min-w-0">
               <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 flex flex-col gap-3 lg:absolute lg:inset-0">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 shrink-0">
                   <h3 className="text-xs font-bold text-gray-900">
