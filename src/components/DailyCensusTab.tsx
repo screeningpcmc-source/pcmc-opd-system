@@ -8,8 +8,15 @@ import {
   DEFAULT_PREMIUM_SUB_CLINICS,
   isPremiumWorkloadRecord,
   normalizeWorkloadRecord,
+  REFERRAL_ITEM_DEFINITIONS,
+  ReferralCenterData,
+  formatReferralSummaryText,
+  getReferralAdmitCount,
+  getReferralTotalCount,
+  isReferralWorkload,
+  normalizeReferralData,
 } from '../types';
-import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime } from '../utils/thaiDate';
+import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS } from '../utils/thaiDate';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
@@ -185,6 +192,43 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 
   const totalNursingOnDuty = totals.rn + totals.pn + totals.na;
 
+  const referralRecords = useMemo(
+    () => filteredWorkloads.filter(isReferralWorkload),
+    [filteredWorkloads]
+  );
+
+  const referralSummarySheet = useMemo(() => {
+    if (referralRecords.length === 0) return null;
+    const aggregated = REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+      let count = 0;
+      const reasons: string[] = [];
+      referralRecords.forEach((rec) => {
+        const ref = rec.referralData;
+        if (!ref) return;
+        count += Number(ref[key]?.count) || 0;
+        const r = (ref[key]?.reason || '').trim();
+        if (r && !reasons.includes(r)) reasons.push(r);
+      });
+      return { key, label, count, reason: reasons.join('; ') };
+    });
+    const totalCount = aggregated.reduce((sum, item) => sum + item.count, 0);
+    const reporters = Array.from(
+      new Set(referralRecords.map((r) => (r.reporter || '').trim()).filter(Boolean))
+    );
+    const m = (date || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    const day = m ? String(Number(m[3])) : '-';
+    const month = m ? THAI_SHORT_MONTHS[Number(m[2]) - 1] || '-' : '-';
+    const beYear = m ? String(Number(m[1]) + 543) : '-';
+    return {
+      rows: aggregated,
+      totalCount,
+      reporterText: reporters.join(', ') || '-',
+      day,
+      month,
+      beYear,
+    };
+  }, [referralRecords, date]);
+
   // Print function
   const handlePrint = () => {
     window.print();
@@ -211,23 +255,29 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
       'Admit', 'HN', 'RN', 'PN', 'NA', 'ผู้ปฏิบัติงานทั่วไป', 'พนักงานบริการ', 'ผู้รายงาน', 'หมายเหตุ'
     ];
 
-    const rows: (string | number)[][] = regularWorkloads.map((w, i) => [
-      i + 1,
-      `"${w.clinic}"`,
-      `"${w.shift}"`,
-      getEffectiveTotalPt(w),
-      w.adultPt,
-      w.childPt,
-      w.admit,
-      w.hn,
-      w.rn,
-      w.pn,
-      w.na !== undefined ? w.na : (w.pca || 0),
-      w.clerk,
-      w.serviceWorker,
-      `"${w.reporter}"`,
-      `"${w.note || ''}"`
-    ]);
+    const rows: (string | number)[][] = regularWorkloads.map((w, i) => {
+      const noteWithReferral =
+        isReferralWorkload(w) && w.referralData
+          ? [formatReferralSummaryText(w.referralData), w.note].filter(Boolean).join(' | ')
+          : w.note || '';
+      return [
+        i + 1,
+        `"${w.clinic}"`,
+        `"${w.shift}"`,
+        getEffectiveTotalPt(w),
+        w.adultPt,
+        w.childPt,
+        w.admit,
+        w.hn,
+        w.rn,
+        w.pn,
+        w.na !== undefined ? w.na : (w.pca || 0),
+        w.clerk,
+        w.serviceWorker,
+        `"${w.reporter}"`,
+        `"${noteWithReferral.replace(/"/g, '""')}"`
+      ];
+    });
 
     premiumGroups.forEach((grp, idx) => {
       rows.push([
@@ -314,6 +364,14 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
       premiumSection = `\n──────────────────\n${premiumLines.join('\n')}`;
     }
 
+    let referralSection = '';
+    if (referralSummarySheet) {
+      const refLines = referralSummarySheet.rows.map(
+        (r) => `  • ${r.label}: ${r.count > 0 ? r.count : '-'}${r.reason ? ` (${r.reason})` : ''}`
+      );
+      referralSection = `\n──────────────────\n🚑 ห้องรับ - ส่งต่อผู้ป่วย (รวม ${referralSummarySheet.totalCount} รายการ)\n${refLines.join('\n')}\nผู้รายงาน: ${referralSummarySheet.reporterText}`;
+    }
+
     const text = `📊 รายงานภาระงานผู้ป่วยนอก OPD PCMC
 🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน
 📅 ประจำวันที่: ${formattedThaiDate} (${shiftLabel})
@@ -321,7 +379,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 👥 ผู้ป่วยนอกรวม: ${totals.totalPt.toLocaleString()} ราย
 🛌 รับไว้รักษา (Admit): ${totals.admit.toLocaleString()} ราย
 👩‍⚕️ กำลังคนพยาบาลปฏิบัติงาน (RN+PN+NA): ${totalNursingOnDuty.toFixed(1)} แรง
-(RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})${premiumSection}
+(RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})${premiumSection}${referralSection}
 ──────────────────
 บันทึกทั้งหมด ${clinicCount} คลินิกหลัก`;
 
@@ -553,8 +611,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
                       <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
                       <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
-                      <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
-                        <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || '-'}</div>
+                      <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[200px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
+                        {isReferralWorkload(w) && w.referralData && (
+                          <div className="mb-0.5 text-[10px] text-indigo-900 font-medium leading-snug print:text-[7.5px]">
+                            {formatReferralSummaryText(w.referralData)}
+                          </div>
+                        )}
+                        <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || (!w.referralData ? '-' : '')}</div>
                         {(w.lastEditReason || w.lastEditedAt) && (
                           <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
                             แก้ไข: {w.lastEditReason || '-'}
@@ -568,7 +631,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setEditingWorkload({ ...w, totalPt: getEffectiveTotalPt(w) });
+                                  setEditingWorkload({
+                                    ...w,
+                                    totalPt: getEffectiveTotalPt(w),
+                                    ...(isReferralWorkload(w)
+                                      ? { referralData: normalizeReferralData(w.referralData) }
+                                      : {}),
+                                  });
                                   setEditWorkloadReason('');
                                   setEditWorkloadReasonError('');
                                   setEditModalError('');
@@ -822,6 +891,55 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
           </table>
         </div>
 
+        {/* Dedicated Referral Center Form Block (matches paper form & exports into Print/PDF/JPEG) */}
+        {referralSummarySheet && (
+          <div className="pt-2">
+            <div className="max-w-xl mx-auto border-2 border-gray-800 rounded-sm overflow-hidden bg-white text-gray-950">
+              <div className="text-center font-bold text-sm py-2 px-3 border-b border-gray-800 underline underline-offset-4 bg-indigo-50/40 print:bg-white">
+                ตารางเก็บข้อมูล ห้องรับ - ส่งต่อผู้ป่วย
+              </div>
+              <div className="grid grid-cols-3 text-xs font-semibold border-b border-gray-800 py-1.5 px-3 text-center bg-white">
+                <span>วันที่ <strong className="ml-1 font-extrabold">{referralSummarySheet.day}</strong></span>
+                <span>เดือน <strong className="ml-1 font-extrabold">{referralSummarySheet.month}</strong></span>
+                <span>พ.ศ. <strong className="ml-1 font-extrabold">{referralSummarySheet.beYear}</strong></span>
+              </div>
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-gray-800 bg-slate-100 print:bg-slate-50 font-bold">
+                    <th className="py-1.5 px-3 text-center border-r border-gray-800 w-44">รายการ</th>
+                    <th className="py-1.5 px-3 text-center border-r border-gray-800 w-24">จำนวน</th>
+                    <th className="py-1.5 px-3 text-center">เหตุผล</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {referralSummarySheet.rows.map((r) => (
+                    <tr key={r.key} className="border-b border-gray-800">
+                      <td className="py-1.5 px-3 font-medium border-r border-gray-800">{r.label}</td>
+                      <td className="py-1.5 px-3 text-center font-bold border-r border-gray-800">
+                        {r.count > 0 ? r.count.toLocaleString() : '-'}
+                      </td>
+                      <td className="py-1.5 px-3 text-gray-800">{r.reason}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-b border-gray-800 font-extrabold bg-slate-50">
+                    <td className="py-1.5 px-3 text-center border-r border-gray-800">รวม</td>
+                    <td className="py-1.5 px-3 text-center border-r border-gray-800 text-sm">
+                      {referralSummarySheet.totalCount.toLocaleString()}
+                    </td>
+                    <td className="py-1.5 px-3"></td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 px-3 font-bold border-r border-gray-800">ผู้รายงาน</td>
+                    <td colSpan={2} className="py-2 px-3 text-center font-semibold">
+                      {referralSummarySheet.reporterText}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* Printable Official Signatures */}
         <div className="pt-8 pb-4 print:pt-12 grid grid-cols-2 gap-8 text-center text-xs text-gray-700">
           <div>
@@ -900,6 +1018,87 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 </div>
               </div>
 
+              {isReferralWorkload(editingWorkload) ? (
+                <div className="bg-indigo-50/60 border border-indigo-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-indigo-950">
+                      ข้อมูลห้องรับ - ส่งต่อผู้ป่วย (คำนวณยอดรวมและ Admit อัตโนมัติ)
+                    </span>
+                    <span className="text-[11px] font-bold text-indigo-800">
+                      รวม {getReferralTotalCount(normalizeReferralData(editingWorkload.referralData))} | Admit{' '}
+                      {getReferralAdmitCount(normalizeReferralData(editingWorkload.referralData))}
+                    </span>
+                  </div>
+                  <div className="bg-white border border-indigo-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-indigo-100/70 text-indigo-950 font-bold border-b border-indigo-200">
+                        <tr>
+                          <th className="py-1.5 px-2.5 text-left w-36">รายการ</th>
+                          <th className="py-1.5 px-2 text-center w-24">จำนวน</th>
+                          <th className="py-1.5 px-2.5 text-left">เหตุผล</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-indigo-100">
+                        {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+                          const currentRef = normalizeReferralData(editingWorkload.referralData);
+                          const entry = currentRef[key];
+                          return (
+                            <tr key={key}>
+                              <td className="py-1 px-2.5 font-semibold text-gray-800">{label}</td>
+                              <td className="py-1 px-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={entry.count || ''}
+                                  onChange={(e) => {
+                                    const nextRef: ReferralCenterData = {
+                                      ...currentRef,
+                                      [key]: {
+                                        ...entry,
+                                        count: Math.max(0, Number(e.target.value) || 0),
+                                      },
+                                    };
+                                    setEditingWorkload({
+                                      ...editingWorkload,
+                                      referralData: nextRef,
+                                      totalPt: getReferralTotalCount(nextRef),
+                                      adultPt: 0,
+                                      childPt: 0,
+                                      admit: getReferralAdmitCount(nextRef),
+                                    });
+                                  }}
+                                  className="w-full text-center font-bold border border-indigo-200 rounded py-1 px-1.5 text-xs"
+                                />
+                              </td>
+                              <td className="py-1 px-2">
+                                <input
+                                  type="text"
+                                  value={entry.reason}
+                                  onChange={(e) => {
+                                    const nextRef: ReferralCenterData = {
+                                      ...currentRef,
+                                      [key]: {
+                                        ...entry,
+                                        reason: e.target.value,
+                                      },
+                                    };
+                                    setEditingWorkload({
+                                      ...editingWorkload,
+                                      referralData: nextRef,
+                                    });
+                                  }}
+                                  placeholder="ระบุเหตุผล..."
+                                  className="w-full border border-gray-200 rounded py-1 px-2 text-xs"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-xl border border-gray-200">
                 <div>
                   <label className="block font-semibold text-blue-900 mb-1">ผู้ป่วยทั้งหมด</label>
@@ -963,6 +1162,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   />
                 </div>
               </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-gray-800 mb-1.5">

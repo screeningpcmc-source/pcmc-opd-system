@@ -14,8 +14,10 @@ import {
   formatPositionLabel,
   CustomHoliday,
   AdminPinEntry,
-  compareStaffByPositionAndStartDate
+  compareStaffByPositionAndStartDate,
+  REFERRAL_CLINIC_NAME
 } from '../types';
+import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
 import { formatThaiShortDate } from '../utils/thaiDate';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
 import {
@@ -298,6 +300,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       return;
     }
     setInlineError('');
+    if (trimmed === REFERRAL_CLINIC_NAME) {
+      markReferralClinicRemovedByAdmin(false);
+    }
     onSaveSettings({
       ...settings,
       inTimeClinics: [...inTimeClinics, trimmed],
@@ -312,6 +317,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       return;
     }
     setInlineError('');
+    if (clinicName === REFERRAL_CLINIC_NAME) {
+      markReferralClinicRemovedByAdmin(true);
+    }
     onSaveSettings({
       ...settings,
       inTimeClinics: inTimeClinics.filter(c => c !== clinicName),
@@ -351,6 +359,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleRestoreDefaultClinics = () => {
     setInlineError('');
+    markReferralClinicRemovedByAdmin(false);
     onSaveSettings({
       ...settings,
       inTimeClinics: [...IN_TIME_CLINICS],

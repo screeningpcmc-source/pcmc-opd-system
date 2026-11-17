@@ -47,6 +47,73 @@ export const DEFAULT_PREMIUM_SUB_CLINICS = [
   'เวชศาสตร์ครอบครัว-Premium',
 ] as const;
 
+export const REFERRAL_CLINIC_NAME = 'ศูนย์รับ - ส่งต่อผู้ป่วย';
+
+export type ReferralItemKey =
+  | 'admitPrivate'
+  | 'admitGeneral'
+  | 'referIn'
+  | 'referOut'
+  | 'reservePrivateRoom'
+  | 'cancelPrivateRoom';
+
+export interface ReferralItemEntry {
+  count: number;
+  reason: string;
+}
+
+export type ReferralCenterData = Record<ReferralItemKey, ReferralItemEntry>;
+
+export const REFERRAL_ITEM_DEFINITIONS: { key: ReferralItemKey; label: string }[] = [
+  { key: 'admitPrivate', label: 'Admit พิเศษ' },
+  { key: 'admitGeneral', label: 'Admit สามัญ' },
+  { key: 'referIn', label: 'Refer in' },
+  { key: 'referOut', label: 'Refer out' },
+  { key: 'reservePrivateRoom', label: 'จองห้องพิเศษ' },
+  { key: 'cancelPrivateRoom', label: 'ยกเลิกห้องพิเศษ' },
+];
+
+export function createEmptyReferralData(): ReferralCenterData {
+  return {
+    admitPrivate: { count: 0, reason: '' },
+    admitGeneral: { count: 0, reason: '' },
+    referIn: { count: 0, reason: '' },
+    referOut: { count: 0, reason: '' },
+    reservePrivateRoom: { count: 0, reason: '' },
+    cancelPrivateRoom: { count: 0, reason: '' },
+  };
+}
+
+export function normalizeReferralData(raw?: Partial<Record<string, any>> | null): ReferralCenterData {
+  const base = createEmptyReferralData();
+  if (!raw || typeof raw !== 'object') return base;
+  REFERRAL_ITEM_DEFINITIONS.forEach(({ key }) => {
+    const entry = raw[key];
+    if (entry && typeof entry === 'object') {
+      const cnt = Number(entry.count);
+      base[key] = {
+        count: Number.isFinite(cnt) && cnt >= 0 ? cnt : 0,
+        reason: typeof entry.reason === 'string' ? entry.reason.trim() : '',
+      };
+    }
+  });
+  return base;
+}
+
+export function getReferralTotalCount(data?: ReferralCenterData | null): number {
+  if (!data) return 0;
+  return REFERRAL_ITEM_DEFINITIONS.reduce((sum, { key }) => sum + (Number(data[key]?.count) || 0), 0);
+}
+
+export function getReferralAdmitCount(data?: ReferralCenterData | null): number {
+  if (!data) return 0;
+  return (Number(data.admitPrivate?.count) || 0) + (Number(data.admitGeneral?.count) || 0);
+}
+
+export function isReferralClinicName(clinic?: string): boolean {
+  return (clinic || '').trim() === REFERRAL_CLINIC_NAME;
+}
+
 export interface DailyWorkload {
   id: string;
   date: string; // YYYY-MM-DD
@@ -68,10 +135,79 @@ export interface DailyWorkload {
   clinicGroup?: string;
   poolId?: string;
   recordType?: WorkloadRecordType;
+  referralData?: ReferralCenterData;
   timestamp?: string;
   lastEditedAt?: string;
   lastEditReason?: string;
   lastEditedBy?: string;
+}
+
+export function isReferralWorkload(
+  w: Pick<DailyWorkload, 'clinic' | 'referralData'>
+): boolean {
+  return isReferralClinicName(w.clinic) || Boolean(w.referralData);
+}
+
+const REFERRAL_TAG_REGEX = /\[\[REFERRAL_JSON:([\s\S]*?)\]\]/;
+
+export function stripReferralTagFromNote(note?: string): string {
+  return (note || '').replace(REFERRAL_TAG_REGEX, '').trim();
+}
+
+export function parseReferralFromSheetNote(rawNote?: string): {
+  cleanNote: string;
+  referralData?: ReferralCenterData;
+} {
+  const txt = (rawNote || '').trim();
+  if (!txt) return { cleanNote: '' };
+  const match = txt.match(REFERRAL_TAG_REGEX);
+  if (!match) return { cleanNote: txt };
+  const cleanNote = txt.replace(REFERRAL_TAG_REGEX, '').trim();
+  try {
+    const parsed = JSON.parse(match[1]);
+    return {
+      cleanNote,
+      referralData: normalizeReferralData(parsed),
+    };
+  } catch {
+    return { cleanNote };
+  }
+}
+
+export function formatWorkloadNoteForSheet(
+  note?: string,
+  referralData?: ReferralCenterData
+): string {
+  const cleaned = stripReferralTagFromNote(note);
+  if (!referralData) return cleaned;
+  const normalized = normalizeReferralData(referralData);
+  const compact: Record<string, { count: number; reason: string }> = {};
+  REFERRAL_ITEM_DEFINITIONS.forEach(({ key }) => {
+    compact[key] = {
+      count: Number(normalized[key]?.count) || 0,
+      reason: (normalized[key]?.reason || '').trim(),
+    };
+  });
+  const tag = `[[REFERRAL_JSON:${JSON.stringify(compact)}]]`;
+  return cleaned ? `${cleaned} ${tag}` : tag;
+}
+
+export function formatReferralSummaryText(data?: ReferralCenterData | null): string {
+  if (!data) return '';
+  return REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+    const item = data[key] || { count: 0, reason: '' };
+    const cnt = Number(item.count) || 0;
+    const reason = (item.reason || '').trim();
+    return reason ? `${label} ${cnt} (${reason})` : `${label} ${cnt}`;
+  }).join(', ');
+}
+
+export function getCanonicalReferralSignature(data?: ReferralCenterData | null): string {
+  if (!data) return '';
+  return REFERRAL_ITEM_DEFINITIONS.map(({ key }) => {
+    const item = data[key];
+    return `${key}:${Number(item?.count) || 0}:${(item?.reason || '').trim()}`;
+  }).join(';');
 }
 
 export interface LeaveRecord {
@@ -187,9 +323,17 @@ export function normalizeWorkloadRecord(
       : [...DEFAULT_PREMIUM_SUB_CLINICS];
   const fallbackPoolId = (w.poolId || '').trim() || `POOL-${w.date}-${w.shift}`;
 
+  const parsedFromNote = parseReferralFromSheetNote(w.note);
+  const resolvedReferralData = w.referralData
+    ? normalizeReferralData(w.referralData)
+    : parsedFromNote.referralData;
+  const cleanedNote = parsedFromNote.cleanNote;
+
   if (w.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(clinic)) {
     return {
       ...w,
+      note: cleanedNote,
+      ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
       clinicGroup: PREMIUM_CLINIC_GROUP,
       poolId: fallbackPoolId,
       recordType: 'PREMIUM_POOL',
@@ -204,6 +348,8 @@ export function normalizeWorkloadRecord(
   ) {
     return {
       ...w,
+      note: cleanedNote,
+      ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
       clinicGroup: PREMIUM_CLINIC_GROUP,
       poolId: fallbackPoolId,
       recordType: 'PREMIUM_SUB',
@@ -212,6 +358,8 @@ export function normalizeWorkloadRecord(
 
   return {
     ...w,
+    note: cleanedNote,
+    ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
     clinicGroup: w.clinicGroup || '',
     poolId: w.poolId || '',
     recordType: w.recordType || 'STANDARD',
@@ -246,7 +394,8 @@ export const IN_TIME_CLINICS = [
   'AAIRC',
   'ODS',
   'ประกันสังคม',
-  'หน่วยคัดกรอง'
+  'หน่วยคัดกรอง',
+  'ศูนย์รับ - ส่งต่อผู้ป่วย'
 ] as const;
 
 export const OUT_TIME_CLINICS = [

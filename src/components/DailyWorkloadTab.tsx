@@ -27,10 +27,21 @@ import {
   WorkloadLeavePayload,
   WorkloadCrossCoveragePayload,
   WorkloadTrainingPayload,
+  REFERRAL_CLINIC_NAME,
+  REFERRAL_ITEM_DEFINITIONS,
+  ReferralCenterData,
+  ReferralItemKey,
+  createEmptyReferralData,
+  getReferralAdmitCount,
+  getReferralTotalCount,
+  isReferralClinicName,
+  isReferralWorkload,
+  normalizeReferralData,
 } from '../types';
 import {
   formatThaiShortDate,
   formatThaiDateTime,
+  THAI_SHORT_MONTHS,
 } from '../utils/thaiDate';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
@@ -189,6 +200,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     Record<string, { adultPt: number; childPt: number; admit: number }>
   >({});
 
+  // ศูนย์รับ - ส่งต่อผู้ป่วย 6-item inputs
+  const [referralInputs, setReferralInputs] = useState<ReferralCenterData>(() =>
+    createEmptyReferralData()
+  );
+
   const regularLeaveOptions = useMemo(() => {
     const filtered = leaveTypes.filter(lt => !isTrainingLeaveType(lt));
     return filtered.length > 0 ? filtered : ['ลาป่วย', 'ลากิจ', 'ลาพักผ่อน'];
@@ -256,6 +272,40 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   );
   const isEchoClinic = clinic === 'Echo';
   const isPremiumClinic = clinic === PREMIUM_CLINIC_GROUP;
+  const isReferralClinic = isReferralClinicName(clinic);
+
+  const referralTotal = useMemo(() => getReferralTotalCount(referralInputs), [referralInputs]);
+  const referralAdmit = useMemo(() => getReferralAdmitCount(referralInputs), [referralInputs]);
+
+  const referralThaiDateParts = useMemo(() => {
+    const m = (date || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!m) return { day: '-', month: '-', beYear: '-' };
+    const yr = Number(m[1]);
+    const mo = Number(m[2]);
+    const dy = Number(m[3]);
+    return {
+      day: String(dy),
+      month: THAI_SHORT_MONTHS[mo - 1] || '-',
+      beYear: String(yr + 543),
+    };
+  }, [date]);
+
+  const updateReferralInput = (
+    key: ReferralItemKey,
+    field: 'count' | 'reason',
+    value: number | string
+  ) => {
+    setReferralInputs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        [field]:
+          field === 'count'
+            ? Math.max(0, Number(value) || 0)
+            : String(value),
+      },
+    }));
+  };
 
   const existingPremiumPool = useMemo(() => {
     return (
@@ -423,14 +473,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       return 'RN';
     };
     const isActiveOnDate = (s: StaffMember) => {
-      if (s.status === 'Active') {
-        if (s.startDate && s.startDate > date) return false;
-        if (s.endDate && s.endDate < date) return false;
-        return true;
-      }
-      if (!s.endDate) return false;
+      if (s.status !== 'Active') return false;
       if (s.startDate && s.startDate > date) return false;
-      return s.endDate >= date;
+      if (s.endDate && s.endDate < date) return false;
+      return true;
     };
 
     const targetUnit = normalizeUnit(clinic);
@@ -1026,9 +1072,21 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       return;
     }
 
-    const finalTotal = Math.max(Number(totalPt) || 0, (Number(adultPt) || 0) + (Number(childPt) || 0));
-    const calculatedChild = Number(childPt) || 0;
-    const calculatedAdult = isEchoClinic ? (Number(adultPt) || 0) : Math.max(0, finalTotal - calculatedChild);
+    const normalizedReferral = isReferralClinic
+      ? normalizeReferralData(referralInputs)
+      : undefined;
+    const finalTotal = isReferralClinic
+      ? getReferralTotalCount(normalizedReferral)
+      : Math.max(Number(totalPt) || 0, (Number(adultPt) || 0) + (Number(childPt) || 0));
+    const calculatedChild = isReferralClinic ? 0 : Number(childPt) || 0;
+    const calculatedAdult = isReferralClinic
+      ? 0
+      : isEchoClinic
+        ? Number(adultPt) || 0
+        : Math.max(0, finalTotal - calculatedChild);
+    const finalAdmit = isReferralClinic
+      ? getReferralAdmitCount(normalizedReferral)
+      : Number(admit) || 0;
 
     const newEntry: DailyWorkload = {
       id: `WL-${Date.now()}`,
@@ -1038,7 +1096,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       totalPt: finalTotal,
       adultPt: calculatedAdult,
       childPt: calculatedChild,
-      admit: Number(admit) || 0,
+      admit: finalAdmit,
       hn: Number(hn) || 0,
       rn: Number(rn) || 0,
       pn: Number(pn) || 0,
@@ -1051,6 +1109,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       clinicGroup: '',
       poolId: '',
       recordType: 'STANDARD',
+      ...(normalizedReferral ? { referralData: normalizedReferral } : {}),
       timestamp: new Date().toISOString(),
     };
 
@@ -1061,6 +1120,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setAdultPt(0);
     setChildPt(0);
     setAdmit(0);
+    setReferralInputs(createEmptyReferralData());
     setNote('');
     setHasStaffLeave(false);
     setSelectedLeaveItems([]);
@@ -1429,6 +1489,93 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               </div>
             ) : (
               <>
+            {isReferralClinic ? (
+              <div className="bg-indigo-50/50 border border-indigo-200 rounded-xl p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-200/80 pb-2.5">
+                  <div>
+                    <h4 className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                      <ClipboardPen className="w-4 h-4 text-indigo-600" />
+                      <span>ตารางเก็บข้อมูล ห้องรับ - ส่งต่อผู้ป่วย</span>
+                    </h4>
+                    <p className="text-[11px] text-indigo-800/80 mt-0.5">
+                      วันที่ {referralThaiDateParts.day} เดือน {referralThaiDateParts.month} พ.ศ. {referralThaiDateParts.beYear}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-900 font-bold border border-indigo-200">
+                      Admit รวม: {referralAdmit} ราย
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 font-bold border border-emerald-200">
+                      รวมทั้งหมด: {referralTotal} รายการ
+                    </span>
+                    {referralTotal > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setReferralInputs(createEmptyReferralData())}
+                        className="px-2 py-0.5 rounded-full bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 font-semibold cursor-pointer"
+                      >
+                        ล้างค่า
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto bg-white border border-indigo-200 rounded-xl">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-indigo-100/70 text-indigo-950 font-bold border-b border-indigo-200">
+                        <th className="py-2 px-3 text-left w-44 border-r border-indigo-200/70">รายการ</th>
+                        <th className="py-2 px-2.5 text-center w-28 border-r border-indigo-200/70">จำนวน</th>
+                        <th className="py-2 px-3 text-left">เหตุผล</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-indigo-100">
+                      {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+                        const row = referralInputs[key];
+                        return (
+                          <tr key={key} className="hover:bg-indigo-50/30">
+                            <td className="py-1.5 px-3 font-semibold text-gray-900 border-r border-indigo-100">
+                              {label}
+                            </td>
+                            <td className="py-1.5 px-2 border-r border-indigo-100">
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="-"
+                                value={row.count || ''}
+                                onChange={(e) => updateReferralInput(key, 'count', Number(e.target.value) || 0)}
+                                className="w-full text-center text-sm font-bold rounded-lg border border-indigo-200 bg-white text-indigo-950 py-1 px-2 focus:border-indigo-500 focus:ring-indigo-500"
+                              />
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              <input
+                                type="text"
+                                placeholder="ระบุเหตุผล (ถ้ามี)..."
+                                value={row.reason}
+                                onChange={(e) => updateReferralInput(key, 'reason', e.target.value)}
+                                className="w-full text-xs rounded-lg border border-gray-200 bg-white text-gray-800 py-1.5 px-2.5 focus:border-indigo-400"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-indigo-100/60 font-extrabold text-indigo-950 border-t-2 border-indigo-200">
+                        <td className="py-2 px-3 text-center border-r border-indigo-200/70">รวม</td>
+                        <td className="py-2 px-2 text-center text-base border-r border-indigo-200/70">
+                          {referralTotal}
+                        </td>
+                        <td className="py-2 px-3 text-[11px] font-medium text-indigo-900">
+                          Admit พิเศษ+สามัญ = {referralAdmit} ราย | Refer in {referralInputs.referIn.count} / Refer out {referralInputs.referOut.count}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Echo Notice */}
             {isEchoClinic && (
               <div className="bg-amber-50 border border-amber-200/90 rounded-xl p-3 flex items-start gap-2.5">
@@ -1521,6 +1668,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               </div>
             </div>
+              </>
+            )}
 
             {/* Row 3: Staff Counts with 0.5 Support */}
             <div className="border border-emerald-100 bg-emerald-50/30 rounded-xl p-4 space-y-3">
@@ -2639,6 +2788,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg ${
                   isPremiumClinic
                     ? 'bg-orange-600 hover:bg-orange-500 active:bg-orange-700'
+                    : isReferralClinic
+                    ? 'bg-indigo-700 hover:bg-indigo-600 active:bg-indigo-800'
                     : 'bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800'
                 }`}
               >
@@ -2646,6 +2797,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 <span>
                   {isPremiumClinic
                     ? 'บันทึกข้อมูลศูนย์ปัญญาภิรมย์ (กำลังคน + ยอดผู้ป่วย)'
+                    : isReferralClinic
+                    ? 'บันทึกข้อมูลห้องรับ - ส่งต่อผู้ป่วย'
                     : 'บันทึกภาระงานห้องตรวจนี้'}
                 </span>
               </button>
@@ -2680,6 +2833,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   const isSubRow =
                     item.recordType === 'PREMIUM_SUB' ||
                     (!isPoolRow && isPremiumGroupName(item.clinicGroup));
+                  const isReferralRow = isReferralWorkload(item);
                   return (
                   <div
                     key={item.id}
@@ -2688,6 +2842,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         ? 'border-orange-300 bg-orange-50/70'
                         : isSubRow
                         ? 'border-orange-200/80 bg-orange-50/30'
+                        : isReferralRow
+                        ? 'border-indigo-200 bg-indigo-50/35'
                         : 'border-gray-100 hover:border-emerald-200 bg-slate-50/70 hover:bg-emerald-50/20'
                     }`}
                   >
@@ -2707,6 +2863,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                               ศูนย์ปัญญาภิรมย์
                             </span>
                           )}
+                          {isReferralRow && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 font-semibold">
+                              รับ-ส่งต่อผู้ป่วย
+                            </span>
+                          )}
                         </div>
                         <div className="text-[11px] text-gray-500">{item.shift}</div>
                       </div>
@@ -2716,7 +2877,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                setEditingWorkload({ ...item, totalPt: getEffectiveTotalPt(item) });
+                                setEditingWorkload({
+                                  ...item,
+                                  totalPt: getEffectiveTotalPt(item),
+                                  ...(isReferralWorkload(item)
+                                    ? { referralData: normalizeReferralData(item.referralData) }
+                                    : {}),
+                                });
                                 setEditWorkloadReason('');
                                 setEditWorkloadReasonError('');
                                 setEditModalError('');
@@ -2745,7 +2912,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
                     <div className="grid grid-cols-3 gap-1.5 text-center my-2">
                       <div className="bg-white p-1.5 rounded border border-gray-200">
-                        <span className="block text-[10px] text-gray-500">ผู้ป่วย</span>
+                        <span className="block text-[10px] text-gray-500">
+                          {isReferralRow ? 'รวมรายการ' : 'ผู้ป่วย'}
+                        </span>
                         <span className="font-bold text-emerald-800 text-sm">
                           {isPoolRow ? '-' : getEffectiveTotalPt(item)}
                         </span>
@@ -2765,6 +2934,25 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         </span>
                       </div>
                     </div>
+
+                    {isReferralRow && item.referralData && (
+                      <div className="bg-white/90 border border-indigo-100 rounded-lg p-2 mb-2 grid grid-cols-2 gap-1 text-[10.5px]">
+                        {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+                          const entry = item.referralData?.[key];
+                          const cnt = Number(entry?.count) || 0;
+                          const reason = (entry?.reason || '').trim();
+                          return (
+                            <div key={key} className="flex items-center justify-between gap-1 px-1.5 py-0.5 rounded bg-indigo-50/40">
+                              <span className="text-gray-700 truncate">{label}:</span>
+                              <span className="font-bold text-indigo-950 shrink-0">
+                                {cnt > 0 ? cnt : '-'}
+                                {reason ? ` (${reason})` : ''}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
 
                     <div className="flex items-center justify-between text-[10px] text-gray-500 border-t border-gray-200/60 pt-1.5">
                       <span>ผู้รายงาน: {item.reporter}</span>
@@ -2883,7 +3071,88 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               </div>
 
-              {/* Row 2: Patient counts & Admit */}
+              {/* Row 2: Patient counts & Admit (or Referral Center 6-item Table) */}
+              {isReferralWorkload(editingWorkload) ? (
+                <div className="bg-indigo-50/60 border border-indigo-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-indigo-950">
+                      ข้อมูลห้องรับ - ส่งต่อผู้ป่วย (คำนวณยอดรวมและ Admit อัตโนมัติ)
+                    </span>
+                    <span className="text-[11px] font-bold text-indigo-800">
+                      รวม {getReferralTotalCount(normalizeReferralData(editingWorkload.referralData))} | Admit{' '}
+                      {getReferralAdmitCount(normalizeReferralData(editingWorkload.referralData))}
+                    </span>
+                  </div>
+                  <div className="bg-white border border-indigo-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-indigo-100/70 text-indigo-950 font-bold border-b border-indigo-200">
+                        <tr>
+                          <th className="py-1.5 px-2.5 text-left w-36">รายการ</th>
+                          <th className="py-1.5 px-2 text-center w-24">จำนวน</th>
+                          <th className="py-1.5 px-2.5 text-left">เหตุผล</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-indigo-100">
+                        {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+                          const currentRef = normalizeReferralData(editingWorkload.referralData);
+                          const entry = currentRef[key];
+                          return (
+                            <tr key={key}>
+                              <td className="py-1 px-2.5 font-semibold text-gray-800">{label}</td>
+                              <td className="py-1 px-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={entry.count || ''}
+                                  onChange={(e) => {
+                                    const nextRef: ReferralCenterData = {
+                                      ...currentRef,
+                                      [key]: {
+                                        ...entry,
+                                        count: Math.max(0, Number(e.target.value) || 0),
+                                      },
+                                    };
+                                    setEditingWorkload({
+                                      ...editingWorkload,
+                                      referralData: nextRef,
+                                      totalPt: getReferralTotalCount(nextRef),
+                                      adultPt: 0,
+                                      childPt: 0,
+                                      admit: getReferralAdmitCount(nextRef),
+                                    });
+                                  }}
+                                  className="w-full text-center font-bold border border-indigo-200 rounded py-1 px-1.5 text-xs"
+                                />
+                              </td>
+                              <td className="py-1 px-2">
+                                <input
+                                  type="text"
+                                  value={entry.reason}
+                                  onChange={(e) => {
+                                    const nextRef: ReferralCenterData = {
+                                      ...currentRef,
+                                      [key]: {
+                                        ...entry,
+                                        reason: e.target.value,
+                                      },
+                                    };
+                                    setEditingWorkload({
+                                      ...editingWorkload,
+                                      referralData: nextRef,
+                                    });
+                                  }}
+                                  placeholder="ระบุเหตุผล..."
+                                  className="w-full border border-gray-200 rounded py-1 px-2 text-xs"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-xl border border-gray-200">
                 <div>
                   <label className="block font-semibold text-blue-900 mb-1">ผู้ป่วยทั้งหมด</label>
@@ -2947,6 +3216,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   />
                 </div>
               </div>
+              )}
 
               {/* Row 3: Staffing (RN, PN, NA, Clerk, Service Worker) */}
               <div>

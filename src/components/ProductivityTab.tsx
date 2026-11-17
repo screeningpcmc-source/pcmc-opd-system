@@ -21,7 +21,13 @@ import {
   isTrainingLeaveType,
   parseLeavePeriodFromNote,
   stripLeavePeriodFromNote,
-  parseOtWorkClinic
+  parseOtWorkClinic,
+  REFERRAL_CLINIC_NAME,
+  REFERRAL_ITEM_DEFINITIONS,
+  isReferralClinicName,
+  isReferralWorkload,
+  formatReferralSummaryText,
+  normalizeReferralData
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate } from '../utils/thaiDate';
@@ -80,6 +86,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [selectedShift, setSelectedShift] = useState<string>('ALL');
   const [selectedClinic, setSelectedClinic] = useState<string>('ALL');
   const [excludeLasik, setExcludeLasik] = useState<boolean>(true); // Default exclude LASIK as per standard OPD nursing formula
+  const [excludeReferral, setExcludeReferral] = useState<boolean>(false);
   const [showAllVerificationDays, setShowAllVerificationDays] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
@@ -105,10 +112,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             clinicTrim === LEGACY_PREMIUM_CLINIC_GROUP
           : w.clinic === selectedClinic);
       const matchLasik = !(excludeLasik && selectedClinic === 'ALL' && w.clinic === 'ศูนย์เลสิก');
+      const matchReferral = !(excludeReferral && selectedClinic === 'ALL' && isReferralWorkload(w));
 
-      return matchMonth && matchShift && matchClinic && matchLasik;
+      return matchMonth && matchShift && matchClinic && matchLasik && matchReferral;
     });
-  }, [workloads, selectedMonth, selectedShift, selectedClinic, excludeLasik, premiumSubClinics]);
+  }, [workloads, selectedMonth, selectedShift, selectedClinic, excludeLasik, excludeReferral, premiumSubClinics]);
 
   // Working days count: unique dates in the filtered records
   const workingDays = useMemo(() => {
@@ -316,14 +324,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   };
 
   const isStaffActiveOnDate = (s: StaffMember, dateStr: string): boolean => {
-    if (s.status === 'Active') {
-      if (s.startDate && s.startDate > dateStr) return false;
-      if (s.endDate && s.endDate < dateStr) return false;
-      return true;
-    }
-    if (!s.endDate) return false;
+    // นับเฉพาะเจ้าหน้าที่ที่มีสถานะ Active เท่านั้น (ไม่นับผู้ที่ลาออก/เกษียณ)
+    if (s.status !== 'Active') return false;
     if (s.startDate && s.startDate > dateStr) return false;
-    return s.endDate >= dateStr;
+    if (s.endDate && s.endDate < dateStr) return false;
+    return true;
   };
 
   const staffClinicByName = useMemo(() => {
@@ -400,6 +405,16 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (w.shift === 'ในเวลา 08:00-16:00') {
         row.hasInTimeShift = true;
       }
+      if (isReferralWorkload(w) && w.referralData) {
+        const refSummary = formatReferralSummaryText(normalizeReferralData(w.referralData));
+        if (refSummary) {
+          const taggedSummary =
+            selectedClinic === 'ALL' ? `[${REFERRAL_CLINIC_NAME}] ${refSummary}` : refSummary;
+          if (!row.notes.includes(taggedSummary)) {
+            row.notes.push(taggedSummary);
+          }
+        }
+      }
       const cleanNote = (w.note || '').trim();
       if (cleanNote && !row.notes.includes(cleanNote)) {
         row.notes.push(cleanNote);
@@ -442,6 +457,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
 
           if (selectedClinic === 'ALL') {
             if (excludeLasik && unit === 'ศูนย์เลสิก') return;
+            if (excludeReferral && isReferralClinicName(unit)) return;
           } else if (unit !== selectedClinic) {
             return;
           }
@@ -490,6 +506,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
 
         if (selectedClinic === 'ALL') {
           if (excludeLasik && homeUnit === 'ศูนย์เลสิก' && workUnit === 'ศูนย์เลสิก') return;
+          if (excludeReferral && isReferralClinicName(homeUnit) && isReferralClinicName(workUnit)) return;
           if (homeUnit && workUnit && homeUnit !== workUnit) {
             const k = `MOVE|${o.staffName}|${homeUnit}|${workUnit}|${parsedWork.periodLabel}`;
             if (seenOtKeys.has(k)) return;
@@ -553,6 +570,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     selectedShift,
     selectedClinic,
     excludeLasik,
+    excludeReferral,
     staffClinicByName,
     monthHolidayMap,
     premiumSubClinics,
@@ -948,7 +966,64 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       fmtPct,
       blankRowCount,
     };
-  }, [selectedMonth, selectedClinic, selectedShift, excludeLasik, stats, dailyReportRows.length]);
+  }, [selectedMonth, selectedClinic, selectedShift, excludeLasik, excludeReferral, stats, dailyReportRows.length]);
+
+  // Monthly aggregation for Referral Center (ศูนย์รับ - ส่งต่อผู้ป่วย)
+  const referralMonthlySummary = useMemo(() => {
+    const records = filteredWorkloads
+      .filter((w) => isReferralWorkload(w))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.shift.localeCompare(b.shift, 'th'));
+
+    if (records.length === 0) return null;
+
+    const totals: Record<string, number> = {
+      admitPrivate: 0,
+      admitGeneral: 0,
+      referIn: 0,
+      referOut: 0,
+      reservePrivateRoom: 0,
+      cancelPrivateRoom: 0,
+    };
+
+    const dailyRows = records.map((w) => {
+      const ref = normalizeReferralData(w.referralData);
+      REFERRAL_ITEM_DEFINITIONS.forEach(({ key }) => {
+        totals[key] += Number(ref[key]?.count) || 0;
+      });
+      const rowTotal = REFERRAL_ITEM_DEFINITIONS.reduce(
+        (sum, { key }) => sum + (Number(ref[key]?.count) || 0),
+        0
+      );
+      const reasons = REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => {
+        const r = (ref[key]?.reason || '').trim();
+        return r ? `${label}: ${r}` : '';
+      }).filter(Boolean);
+      const extraNote = (w.note || '').trim();
+      if (extraNote) reasons.push(extraNote);
+
+      return {
+        id: w.id,
+        date: w.date,
+        day: Number(w.date.split('-')[2]) || 0,
+        shift: w.shift,
+        ref,
+        rowTotal,
+        reasonText: reasons.join(' | '),
+        reporter: w.reporter || '',
+      };
+    });
+
+    const grandTotal = REFERRAL_ITEM_DEFINITIONS.reduce((s, { key }) => s + totals[key], 0);
+    const totalAdmit = totals.admitPrivate + totals.admitGeneral;
+
+    return {
+      recordCount: records.length,
+      totals,
+      grandTotal,
+      totalAdmit,
+      dailyRows,
+    };
+  }, [filteredWorkloads]);
 
   const handlePrintOfficialReport = () => {
     window.print();
@@ -1062,21 +1137,34 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           </div>
         </div>
 
-        {/* LASIK exclusion checkbox */}
-        <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs">
-          <label className="flex items-center gap-2 cursor-pointer text-gray-700 font-medium">
-            <input
-              type="checkbox"
-              checked={excludeLasik}
-              onChange={(e) => setExcludeLasik(e.target.checked)}
-              className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
-            />
-            <span>
-              ไม่รวม <strong>"ศูนย์เลสิก"</strong> ในการคำนวณภาพรวม OPD (แยกหน่วยบริการพิเศษ)
-            </span>
-          </label>
+        {/* LASIK & Referral Center exclusion toggles */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-gray-100 text-xs">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <label className="flex items-center gap-2 cursor-pointer text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={excludeLasik}
+                onChange={(e) => setExcludeLasik(e.target.checked)}
+                className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
+              />
+              <span>
+                ไม่รวม <strong>"ศูนย์เลสิก"</strong> ในภาพรวม OPD
+              </span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={excludeReferral}
+                onChange={(e) => setExcludeReferral(e.target.checked)}
+                className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4"
+              />
+              <span>
+                ไม่รวม <strong>"{REFERRAL_CLINIC_NAME}"</strong> ในภาพรวม OPD
+              </span>
+            </label>
+          </div>
           <span className="text-gray-400 text-[11px]">
-            {excludeLasik ? '(คัดศูนย์เลสิกออกแล้ว)' : '(รวมศูนย์เลสิกด้วย)'}
+            {excludeLasik ? 'คัดศูนย์เลสิกออก' : 'รวมศูนย์เลสิก'} • {excludeReferral ? 'คัดศูนย์รับ-ส่งต่อออก' : 'รวมศูนย์รับ-ส่งต่อ'}
           </span>
         </div>
       </div>
@@ -1385,6 +1473,113 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Referral Center Monthly Summary Card (shown whenever Referral Center records exist) */}
+      {referralMonthlySummary && (
+        <div className="no-print bg-white rounded-2xl shadow-xs border border-indigo-200/90 p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-100 pb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <ArrowRightLeft className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-indigo-950">
+                  สรุปภาระงาน {REFERRAL_CLINIC_NAME} ประจำเดือน {officialReportMeta.monthLabel}
+                </h3>
+                <p className="text-[11px] text-indigo-700">
+                  บันทึกทั้งหมด {referralMonthlySummary.recordCount} เวร • รวม 6 รายการ {referralMonthlySummary.grandTotal.toLocaleString()} รายการ (Admit รวม {referralMonthlySummary.totalAdmit.toLocaleString()} ราย)
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-900 border border-indigo-200 font-bold">
+                Admit รวม: {referralMonthlySummary.totalAdmit.toLocaleString()}
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-bold">
+                รวมทั้งเดือน: {referralMonthlySummary.grandTotal.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+            {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => (
+              <div
+                key={key}
+                className="rounded-xl border border-indigo-100 bg-indigo-50/40 px-3 py-2.5 text-center"
+              >
+                <div className="text-[11px] font-semibold text-indigo-800">{label}</div>
+                <div className="text-xl font-black text-indigo-950 mt-0.5">
+                  {referralMonthlySummary.totals[key].toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border border-indigo-100 rounded-xl overflow-hidden">
+              <thead className="bg-indigo-50 text-indigo-950 font-semibold border-b border-indigo-200">
+                <tr>
+                  <th className="py-2 px-2.5 whitespace-nowrap">วันที่</th>
+                  <th className="py-2 px-2 whitespace-nowrap">กะเวลา</th>
+                  {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => (
+                    <th key={key} className="py-2 px-2 text-center whitespace-nowrap">
+                      {label}
+                    </th>
+                  ))}
+                  <th className="py-2 px-2 text-center bg-indigo-100/70">รวม</th>
+                  <th className="py-2 px-2.5">เหตุผล / หมายเหตุ</th>
+                  <th className="py-2 px-2.5 whitespace-nowrap">ผู้รายงาน</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-indigo-100/70">
+                {referralMonthlySummary.dailyRows.map((d) => (
+                  <tr key={d.id} className="hover:bg-indigo-50/30">
+                    <td className="py-1.5 px-2.5 font-semibold text-gray-900 whitespace-nowrap">
+                      {formatThaiShortDate(d.date)}
+                    </td>
+                    <td className="py-1.5 px-2 text-[11px] text-gray-600 whitespace-nowrap">
+                      {d.shift.replace(/\s*\([^)]*\)/g, '')}
+                    </td>
+                    {REFERRAL_ITEM_DEFINITIONS.map(({ key }) => {
+                      const val = Number(d.ref[key]?.count) || 0;
+                      return (
+                        <td key={key} className="py-1.5 px-2 text-center font-medium text-gray-800">
+                          {val > 0 ? val : '-'}
+                        </td>
+                      );
+                    })}
+                    <td className="py-1.5 px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/50">
+                      {d.rowTotal}
+                    </td>
+                    <td className="py-1.5 px-2.5 text-[11px] text-gray-600 max-w-[260px]">
+                      {d.reasonText || '-'}
+                    </td>
+                    <td className="py-1.5 px-2.5 text-[11px] text-gray-700 whitespace-nowrap">
+                      {d.reporter || '-'}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="bg-indigo-100/60 font-bold text-indigo-950 border-t border-indigo-200">
+                  <td colSpan={2} className="py-2 px-2.5 text-center">
+                    รวมประจำเดือน
+                  </td>
+                  {REFERRAL_ITEM_DEFINITIONS.map(({ key }) => (
+                    <td key={key} className="py-2 px-2 text-center">
+                      {referralMonthlySummary.totals[key]}
+                    </td>
+                  ))}
+                  <td className="py-2 px-2 text-center font-black">
+                    {referralMonthlySummary.grandTotal}
+                  </td>
+                  <td colSpan={2} className="py-2 px-2.5 text-[11px] font-medium">
+                    Admit รวม {referralMonthlySummary.totalAdmit} ราย
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Staffing Headcount vs Leave / Training / Cross-Coverage Verification Panel */}
       <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4">
@@ -1927,6 +2122,69 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* Official Formal Monthly Referral Table inside PDF / JPEG sheet */}
+            {referralMonthlySummary && (
+              <div className="mt-4 print:mt-3 pt-2">
+                <table className="w-full border-collapse border border-black text-[11.5px] print:text-[9.5px] leading-tight">
+                  <thead>
+                    <tr>
+                      <th
+                        colSpan={9}
+                        className="border border-black py-1 px-2 text-center font-bold bg-[#eef2ff]"
+                      >
+                        ตารางเก็บข้อมูล ห้องรับ - ส่งต่อผู้ป่วย ประจำเดือน {officialReportMeta.monthLabel}
+                      </th>
+                    </tr>
+                    <tr className="text-center font-bold bg-slate-50">
+                      <th className="border border-black py-1 px-1">วันที่</th>
+                      {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => (
+                        <th key={key} className="border border-black py-1 px-1">
+                          {label}
+                        </th>
+                      ))}
+                      <th className="border border-black py-1 px-1 bg-[#fef9c3]">รวม</th>
+                      <th className="border border-black py-1 px-1.5">เหตุผล / ผู้รายงาน</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {referralMonthlySummary.dailyRows.map((d) => (
+                      <tr key={d.id} className="text-center">
+                        <td className="border border-black py-0.5 px-1 font-semibold">{d.day}</td>
+                        {REFERRAL_ITEM_DEFINITIONS.map(({ key }) => {
+                          const cnt = Number(d.ref[key]?.count) || 0;
+                          return (
+                            <td key={key} className="border border-black py-0.5 px-1">
+                              {cnt > 0 ? cnt : '-'}
+                            </td>
+                          );
+                        })}
+                        <td className="border border-black py-0.5 px-1 font-bold bg-[#fef9c3]">
+                          {d.rowTotal}
+                        </td>
+                        <td className="border border-black py-0.5 px-1.5 text-left text-[10px] print:text-[8.5px] break-words">
+                          {d.reasonText ? `${d.reasonText}${d.reporter ? ` (${d.reporter})` : ''}` : d.reporter || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="text-center font-bold bg-[#d9f99d]">
+                      <td className="border border-black py-1 px-1">รวม</td>
+                      {REFERRAL_ITEM_DEFINITIONS.map(({ key }) => (
+                        <td key={key} className="border border-black py-1 px-1">
+                          {referralMonthlySummary.totals[key]}
+                        </td>
+                      ))}
+                      <td className="border border-black py-1 px-1">
+                        {referralMonthlySummary.grandTotal}
+                      </td>
+                      <td className="border border-black py-1 px-1.5 text-left text-[10px]">
+                        Admit รวม {referralMonthlySummary.totalAdmit} ราย ({referralMonthlySummary.recordCount} เวร)
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       </div>

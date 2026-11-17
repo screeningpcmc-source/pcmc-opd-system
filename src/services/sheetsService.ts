@@ -15,8 +15,12 @@ import {
   DEFAULT_PREMIUM_SUB_CLINICS,
   LEAVE_TYPES,
   WorkloadRecordType,
+  REFERRAL_CLINIC_NAME,
+  formatWorkloadNoteForSheet,
+  getCanonicalReferralSignature,
   getEffectiveTotalPt,
-  normalizeWorkloadRecord
+  normalizeWorkloadRecord,
+  parseReferralFromSheetNote
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -48,6 +52,41 @@ const OT_DIRTY_KEY = 'pcmc_ot_dirty_v1';
 const TOMBSTONES_STORAGE_KEY = 'pcmc_deleted_tombstones_v1';
 const PENDING_OUTBOX_KEY = 'pcmc_pending_outbox_v1';
 const DEMO_PURGED_KEY = 'pcmc_demo_data_purged_v1';
+export const REFERRAL_CLINIC_REMOVED_KEY = 'pcmc_referral_clinic_removed_v1';
+
+export function markReferralClinicRemovedByAdmin(removed: boolean): void {
+  try {
+    if (removed) {
+      localStorage.setItem(REFERRAL_CLINIC_REMOVED_KEY, 'true');
+    } else {
+      localStorage.removeItem(REFERRAL_CLINIC_REMOVED_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function ensureReferralInClinicList(list?: string[]): string[] {
+  const base = Array.isArray(list) && list.length > 0 ? [...list] : [...IN_TIME_CLINICS];
+  try {
+    if (localStorage.getItem(REFERRAL_CLINIC_REMOVED_KEY) === 'true') {
+      return base;
+    }
+  } catch {
+    // ignore
+  }
+  if (!base.includes(REFERRAL_CLINIC_NAME)) {
+    base.push(REFERRAL_CLINIC_NAME);
+  }
+  return base;
+}
+
+function prepareWorkloadForRemote(w: DailyWorkload): DailyWorkload {
+  return {
+    ...w,
+    note: formatWorkloadNoteForSheet(w.note, w.referralData),
+  };
+}
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
 const isDemoWorkloadId = (id?: string) => /^WL-\d{3}$/.test((id || '').trim());
@@ -581,10 +620,11 @@ export const loadLocalDatabase = (): AppDatabase => {
           Number(parsed.settings?.screeningNhppd) > 0
             ? Number(parsed.settings.screeningNhppd)
             : 0.1,
-        inTimeClinics:
+        inTimeClinics: ensureReferralInClinicList(
           Array.isArray(parsed.settings?.inTimeClinics) && parsed.settings.inTimeClinics.length > 0
             ? parsed.settings.inTimeClinics
-            : INITIAL_SETTINGS.inTimeClinics,
+            : INITIAL_SETTINGS.inTimeClinics
+        ),
         outTimeClinics:
           Array.isArray(parsed.settings?.outTimeClinics) && parsed.settings.outTimeClinics.length > 0
             ? parsed.settings.outTimeClinics
@@ -937,7 +977,11 @@ export const syncStaffMasterToSheet = async (
 };
 
 export function getWorkloadKey(w: DailyWorkload): string {
-  return [
+  const parsedNote = parseReferralFromSheetNote(w.note);
+  const effectiveNote = parsedNote.cleanNote;
+  const effectiveReferral = w.referralData || parsedNote.referralData;
+  const refSig = getCanonicalReferralSignature(effectiveReferral);
+  const parts: Array<string | number> = [
     (w.date || '').trim(),
     (w.shift || '').trim(),
     (w.clinic || '').trim(),
@@ -951,11 +995,15 @@ export function getWorkloadKey(w: DailyWorkload): string {
     Number(w.na !== undefined ? w.na : (w.pca || 0)),
     Number(w.clerk || 0),
     Number(w.serviceWorker || 0),
-    (w.note || '').trim(),
+    effectiveNote,
     (w.reporter || '').trim(),
     (w.clinicGroup || '').trim(),
     (w.recordType || 'STANDARD').trim(),
-  ].join('|');
+  ];
+  if (refSig) {
+    parts.push(refSig);
+  }
+  return parts.join('|');
 }
 
 function workloadKey(w: DailyWorkload): string {
@@ -1337,12 +1385,13 @@ export const syncAllWithGoogleSheet = async (
     stdHr: db.settings.stdHr || Number(settingsMap['Std_Hr']) || 7,
     annualHr: db.settings.annualHr || Number(settingsMap['Annual_Hr']) || 2080,
     workDays: db.settings.workDays || Number(settingsMap['Work_Days']) || 245,
-    inTimeClinics:
+    inTimeClinics: ensureReferralInClinicList(
       db.settings.inTimeClinics && db.settings.inTimeClinics.length > 0
         ? db.settings.inTimeClinics
         : settingsMap['In_Time_Clinics']
         ? settingsMap['In_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
-        : [...IN_TIME_CLINICS],
+        : [...IN_TIME_CLINICS]
+    ),
     outTimeClinics:
       db.settings.outTimeClinics && db.settings.outTimeClinics.length > 0
         ? db.settings.outTimeClinics
@@ -1455,7 +1504,7 @@ export const syncAllWithGoogleSheet = async (
           w.na ?? w.pca ?? 0,
           w.clerk,
           w.serviceWorker,
-          w.note,
+          formatWorkloadNoteForSheet(w.note, w.referralData),
           w.reporter,
           w.clinicGroup || '',
           w.poolId || '',
@@ -1625,7 +1674,7 @@ export const syncAllWithGoogleSheet = async (
             w.na ?? w.pca ?? 0,
             w.clerk,
             w.serviceWorker,
-            w.note,
+            formatWorkloadNoteForSheet(w.note, w.referralData),
             w.reporter,
             w.clinicGroup || '',
             w.poolId || '',
@@ -1760,7 +1809,7 @@ export const appendDailyWorkloadToSheet = async (
       entry.na ?? entry.pca ?? 0,
       entry.clerk,
       entry.serviceWorker,
-      entry.note,
+      formatWorkloadNoteForSheet(entry.note, entry.referralData),
       entry.reporter,
       entry.clinicGroup || '',
       entry.poolId || '',
@@ -2297,11 +2346,13 @@ function mergeRemoteDataRows(
     workDays: settingsDirty
       ? Number(db.settings.workDays) || 245
       : Number(settingsMap['Work_Days']) || db.settings.workDays || 245,
-    inTimeClinics: settingsDirty
-      ? db.settings.inTimeClinics
-      : settingsMap['In_Time_Clinics']
-      ? settingsMap['In_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
-      : db.settings.inTimeClinics,
+    inTimeClinics: ensureReferralInClinicList(
+      settingsDirty
+        ? db.settings.inTimeClinics
+        : settingsMap['In_Time_Clinics']
+        ? settingsMap['In_Time_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
+        : db.settings.inTimeClinics
+    ),
     outTimeClinics: settingsDirty
       ? db.settings.outTimeClinics
       : settingsMap['Out_Time_Clinics']
@@ -2442,14 +2493,20 @@ export const appendViaAppsScript = async (
   payload: unknown
 ): Promise<boolean> => {
   try {
+    const normalizedPayload =
+      action === 'appendWorkload'
+        ? Array.isArray(payload)
+          ? (payload as DailyWorkload[]).map(prepareWorkloadForRemote)
+          : prepareWorkloadForRemote(payload as DailyWorkload)
+        : payload;
     const bodyObj =
       action === 'appendWorkload'
         ? {
             action,
-            payload,
-            records: Array.isArray(payload) ? payload : [payload],
+            payload: normalizedPayload,
+            records: Array.isArray(normalizedPayload) ? normalizedPayload : [normalizedPayload],
           }
-        : { action, payload };
+        : { action, payload: normalizedPayload };
     const res = await fetch(gasUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -2706,7 +2763,7 @@ export const pushAdminTableViaAppsScript = async (params: {
       },
     };
     if (table === 'staff') payload.staff = db.staff;
-    if (table === 'workloads') payload.workloads = db.workloads;
+    if (table === 'workloads') payload.workloads = db.workloads.map(prepareWorkloadForRemote);
     if (table === 'leaves') payload.leaves = db.leaves;
     if (table === 'ot') payload.ot = db.ot;
     if (table === 'settings') payload.settings = db.settings;
@@ -2855,7 +2912,7 @@ export const pushAdminTableViaOAuth = async (params: {
           w.na ?? w.pca ?? 0,
           w.clerk,
           w.serviceWorker,
-          w.note,
+          formatWorkloadNoteForSheet(w.note, w.referralData),
           w.reporter,
           w.clinicGroup || '',
           w.poolId || '',
@@ -2993,6 +3050,11 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
   };
 
   try {
+    const serializedTarget =
+      table === 'workloads' ? prepareWorkloadForRemote(target as DailyWorkload) : target;
+    const serializedUpdated =
+      updated && table === 'workloads' ? prepareWorkloadForRemote(updated as DailyWorkload) : updated;
+
     const res = await fetch(gasUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -3000,8 +3062,8 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
         action,
         adminPin,
         payload: {
-          target,
-          updated,
+          target: serializedTarget,
+          updated: serializedUpdated,
           auditEntry,
         },
       }),
@@ -3094,7 +3156,7 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
       } else if (matchIdx >= 0) {
         remoteList.splice(matchIdx, 1);
       }
-      nextTableRows = remoteList;
+      nextTableRows = remoteList.map(prepareWorkloadForRemote);
     } else if (table === 'leaves') {
       const remoteList = parseRemoteLeavesOnly(freshData.leaveRows);
       const targetFullKey = leaveKey(target as LeaveRecord);
@@ -3261,7 +3323,7 @@ export const syncAdminViaAppsScript = async (
         payload: {
           dirty,
           staff: workingDb.staff,
-          workloads: workingDb.workloads,
+          workloads: workingDb.workloads.map(prepareWorkloadForRemote),
           leaves: workingDb.leaves,
           ot: workingDb.ot,
           auditLogs: pendingAudits,

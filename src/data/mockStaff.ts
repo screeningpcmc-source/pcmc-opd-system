@@ -43,7 +43,8 @@ export const INITIAL_SETTINGS: SystemSettings = {
     'AAIRC',
     'ODS',
     'ประกันสังคม',
-    'หน่วยคัดกรอง'
+    'หน่วยคัดกรอง',
+    'ศูนย์รับ - ส่งต่อผู้ป่วย'
   ],
   outTimeClinics: [
     'ตรวจโรคทั่วไป',
