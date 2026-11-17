@@ -1568,12 +1568,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   return (
     <div className="space-y-6">
       {/* Tab Header Banner (Hidden on Print) */}
-      <div className="no-print bg-gradient-to-r from-teal-50 via-cyan-50 to-emerald-50 border border-teal-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-        <div className="flex items-center gap-3">
+      <div className="no-print bg-gradient-to-r from-teal-50 via-cyan-50 to-emerald-50 border border-teal-200/80 rounded-xl p-4 flex flex-col xl:flex-row xl:items-center justify-between gap-3 shadow-xs">
+        <div className="flex items-center gap-3 min-w-0">
           <div className="w-10 h-10 rounded-lg bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-sm">
             <CalendarClock className="w-5 h-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h2 className="text-base font-bold text-teal-950">
               เมนูที่ 2: บันทึกเวรนอกเวลา & วันลา (Leave & OT Tracker)
             </h2>
@@ -1584,11 +1584,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         </div>
 
         {/* Sub Navigation Buttons */}
-        <div className="flex flex-wrap items-center gap-1 bg-white/90 p-1 rounded-xl border border-teal-200">
+        <div className="flex flex-nowrap items-center gap-1 bg-white/90 p-1 rounded-xl border border-teal-200 overflow-x-auto max-w-full shrink-0 self-start xl:self-auto">
           <button
             type="button"
             onClick={() => setActiveSubTab('leave')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+            className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               activeSubTab === 'leave'
                 ? 'bg-teal-700 text-white shadow-xs'
                 : 'text-gray-600 hover:text-teal-800'
@@ -1599,7 +1599,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           <button
             type="button"
             onClick={() => setActiveSubTab('ot')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+            className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               activeSubTab === 'ot'
                 ? 'bg-teal-700 text-white shadow-xs'
                 : 'text-gray-600 hover:text-teal-800'
@@ -1610,7 +1610,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           <button
             type="button"
             onClick={() => setActiveSubTab('fiscalSummary')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+            className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               activeSubTab === 'fiscalSummary'
                 ? 'bg-teal-700 text-white shadow-xs'
                 : 'text-gray-600 hover:text-teal-800'
@@ -1621,13 +1621,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           <button
             type="button"
             onClick={() => setActiveSubTab('otPayReport')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 ${
+            className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shrink-0 ${
               activeSubTab === 'otPayReport'
                 ? 'bg-indigo-700 text-white shadow-xs'
                 : 'text-gray-600 hover:text-indigo-800'
             }`}
           >
-            <ReceiptText className="w-3.5 h-3.5" />
+            <ReceiptText className="w-3.5 h-3.5 shrink-0" />
             <span>4) หลักฐานจ่ายค่าตอบแทน OT</span>
           </button>
         </div>
