@@ -80,7 +80,7 @@ function setupOpdDatabase() {
   var schemas = [
     {
       name: SHEET_NAMES.STAFF,
-      headers: ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+      headers: ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
       color: '#1e3a8a',
       rows: []
     },
@@ -98,7 +98,7 @@ function setupOpdDatabase() {
     },
     {
       name: SHEET_NAMES.OT,
-      headers: ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+      headers: ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'],
       color: '#6d28d9',
       rows: []
     },
@@ -444,13 +444,32 @@ function ensureWorkloadColumns_(sheet) {
   }
 }
 
+function ensureStaffColumns_(sheet) {
+  if (!sheet || sheet.getLastRow() === 0) return;
+  var col8 = String(sheet.getRange(1, 8).getValue() || '').trim();
+  if (col8 !== 'Employee_Code') {
+    sheet.getRange(1, 8).setValue('Employee_Code');
+  }
+}
+
+function ensureOtColumns_(sheet) {
+  if (!sheet || sheet.getLastRow() === 0) return;
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var baseCol = (firstHeader === 'OT_ID') ? 7 : 6;
+  var hHours = String(sheet.getRange(1, baseCol + 1).getValue() || '').trim();
+  var hCode = String(sheet.getRange(1, baseCol + 2).getValue() || '').trim();
+  if (hHours !== 'Hours' || hCode !== 'Employee_Code') {
+    sheet.getRange(1, baseCol + 1, 1, 2).setValues([['Hours', 'Employee_Code']]);
+  }
+}
+
 function buildPublicReadAllPayload_() {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
+    var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 8);
     var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
     var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 8);
-    var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 6);
+    var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 9);
     var settingsData = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
     var auditData = getSheetRowsNormalized_(SHEET_NAMES.AUDIT, 6);
 
@@ -494,7 +513,7 @@ function buildPublicReadAllPayload_() {
       success: true,
       spreadsheetId: ss.getId(),
       gasUrl: activeGasUrl,
-      staffRows: nonEmptyStaff.map(function(r) { return r.slice(0, 7); }),
+      staffRows: nonEmptyStaff.map(function(r) { return r.slice(0, 8); }),
       workloadRows: nonEmptyWorkloads.map(function(r) {
         return workloadHasId ? r.slice(1, 19) : r.slice(0, 18);
       }),
@@ -502,7 +521,7 @@ function buildPublicReadAllPayload_() {
         return leaveHasId ? r.slice(1, 9) : r.slice(0, 8);
       }),
       otRows: nonEmptyOt.map(function(r) {
-        return otHasId ? r.slice(1, 7) : r.slice(0, 6);
+        return otHasId ? r.slice(1, 9) : r.slice(0, 8);
       }),
       settingsRows: settingsRows,
       auditRows: nonEmptyAudit.map(function(r) { return r.slice(0, 6); })
@@ -612,8 +631,9 @@ function appendLeaveFromApi_(payload) {
 function appendOTFromApi_(payload) {
   var list = Array.isArray(payload) ? payload : [payload];
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
-    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'
   ]);
+  ensureOtColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
   var rowsToAppend = [];
 
@@ -625,11 +645,13 @@ function appendOTFromApi_(payload) {
       String(ot.staffName || ''),
       String(ot.position || 'RN'),
       String(ot.homeClinic || ''),
-      String(ot.workClinic || '')
+      String(ot.workClinic || ''),
+      ot.hours !== undefined && ot.hours !== null && ot.hours !== '' ? Number(ot.hours) : '',
+      String(ot.employeeCode || '')
     ];
     if (firstHeader === 'OT_ID') {
       var otId = ot.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
-      rowsToAppend.push([otId].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']));
+      rowsToAppend.push([otId].concat(baseRow));
     } else {
       rowsToAppend.push(baseRow);
     }
@@ -716,8 +738,9 @@ function replaceSheetBodyRows_(sheet, rows) {
 
 function writeStaffRowsToSheet_(staffList) {
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
-    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'
+    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'
   ]);
+  ensureStaffColumns_(sheet);
   var rows = (staffList || []).map(function(s) {
     return [
       String(s.staffId || ''),
@@ -726,7 +749,8 @@ function writeStaffRowsToSheet_(staffList) {
       String(s.homeClinic || ''),
       String(s.status || 'Active'),
       String(s.startDate || ''),
-      String(s.endDate || '')
+      String(s.endDate || ''),
+      String(s.employeeCode || '')
     ];
   });
   replaceSheetBodyRows_(sheet, rows);
@@ -794,8 +818,9 @@ function writeLeaveRowsToSheet_(leaves) {
 
 function writeOtRowsToSheet_(otList) {
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
-    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'
   ]);
+  ensureOtColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
   var rows = (otList || []).map(function(ot, idx) {
     var baseRow = [
@@ -804,10 +829,12 @@ function writeOtRowsToSheet_(otList) {
       String(ot.staffName || ''),
       String(ot.position || 'RN'),
       String(ot.homeClinic || ''),
-      String(ot.workClinic || '')
+      String(ot.workClinic || ''),
+      ot.hours !== undefined && ot.hours !== null && ot.hours !== '' ? Number(ot.hours) : '',
+      String(ot.employeeCode || '')
     ];
     if (firstHeader === 'OT_ID') {
-      return [String(ot.id || ('OT-' + idx))].concat(baseRow).concat([ot.isExternal ? 'External' : 'OPD']);
+      return [String(ot.id || ('OT-' + idx))].concat(baseRow);
     }
     return baseRow;
   });
@@ -824,6 +851,18 @@ function writeSettingsToSheet_(settings) {
 
   var resolvedGasUrl = String(settings.gasUrl || existingMap['Gas_Web_App_URL'] || getSavedGasUrl_() || '').trim();
   var resolvedPin = String(settings.adminPin || existingMap['Admin_Pin'] || '').trim();
+  var resolvedDefaultCostCenter = String(settings.defaultCostCenter || existingMap['Default_Cost_Center'] || '2012000000').trim();
+  var resolvedClinicCostCenters = settings.clinicCostCenters
+    ? JSON.stringify(settings.clinicCostCenters)
+    : (existingMap['Clinic_Cost_Centers'] || '{}');
+  var resolvedOtHourlyRates = settings.otHourlyRates
+    ? JSON.stringify(settings.otHourlyRates)
+    : (existingMap['OT_Hourly_Rates'] || '{}');
+  var resolvedOtControllerName = String(settings.otControllerName || existingMap['OT_Controller_Name'] || 'นางสาว ประภัสสร พันธุ์วา').trim();
+  var resolvedStaffEmployeeCodes = settings.staffEmployeeCodes
+    ? JSON.stringify(settings.staffEmployeeCodes)
+    : (existingMap['Staff_Employee_Codes'] || '');
+
   var entries = [
     ['NHPPD', String(settings.nhppd || 0.4)],
     ['Screening_NHPPD', String(settings.screeningNhppd || 0.1)],
@@ -837,8 +876,15 @@ function writeSettingsToSheet_(settings) {
     ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
     ['Primary_Admin_Owner', String(settings.primaryAdminOwner || 'หัวหน้าพยาบาล')],
     ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || [])],
-    ['Gas_Web_App_URL', resolvedGasUrl]
+    ['Gas_Web_App_URL', resolvedGasUrl],
+    ['Default_Cost_Center', resolvedDefaultCostCenter],
+    ['Clinic_Cost_Centers', resolvedClinicCostCenters],
+    ['OT_Hourly_Rates', resolvedOtHourlyRates],
+    ['OT_Controller_Name', resolvedOtControllerName]
   ];
+  if (resolvedStaffEmployeeCodes && resolvedStaffEmployeeCodes !== '{}') {
+    entries.push(['Staff_Employee_Codes', resolvedStaffEmployeeCodes]);
+  }
   if (resolvedPin) {
     entries.push(['Admin_Pin', resolvedPin]);
   }
@@ -1176,19 +1222,25 @@ function deleteLeaveRowFromApi_(payload) {
   return res;
 }
 
+function stripOtHourTagGas_(workClinic) {
+  return String(workClinic || '')
+    .replace(/\s*\(\d+(?:\.\d+)?\s*ชม\.\)\s*$/, '')
+    .trim();
+}
+
 function buildOtKeyGas_(date, shift, staffName, homeClinic, workClinic) {
   return [
     String(date || '').trim(),
     String(shift || '').trim(),
     String(staffName || '').trim(),
     String(homeClinic || '').trim(),
-    String(workClinic || '').trim()
+    stripOtHourTagGas_(workClinic)
   ].join('|');
 }
 
 function findOtSheetRowIndex_(sheet, targetObj) {
   if (!targetObj || sheet.getLastRow() <= 1) return -1;
-  var lastCol = Math.max(7, sheet.getLastColumn());
+  var lastCol = Math.max(9, sheet.getLastColumn());
   var allValues = sheet.getRange(1, 1, sheet.getLastRow(), lastCol).getValues();
   var hasId = String(allValues[0][0] || '').trim() === 'OT_ID';
   var offset = hasId ? 1 : 0;
@@ -1214,8 +1266,9 @@ function updateOtRowFromApi_(payload) {
   if (!updated) return { success: false, error: 'ไม่มีข้อมูลเวร OT ที่จะแก้ไข' };
 
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
-    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'
   ]);
+  ensureOtColumns_(sheet);
   var hasId = String(sheet.getRange(1, 1).getValue() || '').trim() === 'OT_ID';
   var rowIdx = findOtSheetRowIndex_(sheet, target || updated);
 
@@ -1234,11 +1287,13 @@ function updateOtRowFromApi_(payload) {
     String(updated.staffName || ''),
     String(updated.position || 'RN'),
     String(updated.homeClinic || ''),
-    String(updated.workClinic || '')
+    String(updated.workClinic || ''),
+    updated.hours !== undefined && updated.hours !== null && updated.hours !== '' ? Number(updated.hours) : '',
+    String(updated.employeeCode || '')
   ];
   var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
   var rowValues = hasId
-    ? [String(existingId || updated.id || ('OT-' + Date.now()))].concat(baseRow).concat([updated.isExternal ? 'External' : 'OPD'])
+    ? [String(existingId || updated.id || ('OT-' + Date.now()))].concat(baseRow)
     : baseRow;
   sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
   SpreadsheetApp.flush();
@@ -1255,7 +1310,7 @@ function deleteOtRowFromApi_(payload) {
   var target = payload.target;
   var auditEntry = payload.auditEntry;
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.OT, [
-    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'
+    'Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'
   ]);
   var rowIdx = findOtSheetRowIndex_(sheet, target);
   if (rowIdx !== -1) {

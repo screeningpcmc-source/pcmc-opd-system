@@ -595,78 +595,152 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 </tr>
               ) : (
                 <>
-                  {regularWorkloads.map((w, index) => (
-                    <tr key={w.id} className="hover:bg-slate-50/80">
-                      <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
-                      <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
-                      <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
-                      <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
-                      <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
-                      <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
-                      <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
-                      <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
-                      <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
-                      <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
-                      <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
-                      <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
-                      <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
-                      <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
-                      <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[200px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
-                        {isReferralWorkload(w) && w.referralData && (
-                          <div className="mb-0.5 text-[10px] text-indigo-900 font-medium leading-snug print:text-[7.5px]">
-                            {formatReferralSummaryText(w.referralData)}
-                          </div>
-                        )}
-                        <div className="truncate print:whitespace-normal print:overflow-visible">{w.note || (!w.referralData ? '-' : '')}</div>
-                        {(w.lastEditReason || w.lastEditedAt) && (
-                          <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
-                            แก้ไข: {w.lastEditReason || '-'}
-                          </div>
-                        )}
-                      </td>
-                      {isAdmin && (
-                        <td className="py-2 px-2 text-center whitespace-nowrap no-print">
-                          <div className="flex items-center justify-center gap-1">
-                            {onUpdateWorkload && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingWorkload({
-                                    ...w,
-                                    totalPt: getEffectiveTotalPt(w),
-                                    ...(isReferralWorkload(w)
-                                      ? { referralData: normalizeReferralData(w.referralData) }
-                                      : {}),
-                                  });
-                                  setEditWorkloadReason('');
-                                  setEditWorkloadReasonError('');
-                                  setEditModalError('');
-                                }}
-                                className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
-                                title="แก้ไขข้อมูลภาระงาน"
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </button>
+                  {regularWorkloads.map((w, index) => {
+                    const hasRefDetails = isReferralWorkload(w) && Boolean(w.referralData);
+                    const refData = hasRefDetails ? normalizeReferralData(w.referralData) : null;
+                    const refTotal = refData ? getReferralTotalCount(refData) : 0;
+                    const refDateMatch = (w.date || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+                    const refDay = refDateMatch ? String(Number(refDateMatch[3])) : '-';
+                    const refMonth = refDateMatch ? THAI_SHORT_MONTHS[Number(refDateMatch[2]) - 1] || '-' : '-';
+                    const refBeYear = refDateMatch ? String(Number(refDateMatch[1]) + 543) : '-';
+                    const leftRefDefs = REFERRAL_ITEM_DEFINITIONS.slice(0, 3);
+                    const rightRefDefs = REFERRAL_ITEM_DEFINITIONS.slice(3, 6);
+
+                    return (
+                      <React.Fragment key={w.id}>
+                        <tr className="hover:bg-slate-50/80">
+                          <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
+                          <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
+                          <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
+                          <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
+                          <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
+                          <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
+                          <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
+                          <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
+                          <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
+                          <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
+                          <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
+                          <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
+                          <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
+                          <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
+                          <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[200px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
+                            <div className="truncate print:whitespace-normal print:overflow-visible">
+                              {w.note || (hasRefDetails ? 'รายละเอียดตามตารางย่อยด้านล่าง' : '-')}
+                            </div>
+                            {(w.lastEditReason || w.lastEditedAt) && (
+                              <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
+                                แก้ไข: {w.lastEditReason || '-'}
+                              </div>
                             )}
-                            {onDeleteWorkload && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setDeletingWorkload(w);
-                                  setDeleteWorkloadReason('');
-                                  setDeleteWorkloadReasonError('');
-                                }}
-                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
-                                title="ลบรายการ"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
+                          </td>
+                          {isAdmin && (
+                            <td className="py-2 px-2 text-center whitespace-nowrap no-print">
+                              <div className="flex items-center justify-center gap-1">
+                                {onUpdateWorkload && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingWorkload({
+                                        ...w,
+                                        totalPt: getEffectiveTotalPt(w),
+                                        ...(isReferralWorkload(w)
+                                          ? { referralData: normalizeReferralData(w.referralData) }
+                                          : {}),
+                                      });
+                                      setEditWorkloadReason('');
+                                      setEditWorkloadReasonError('');
+                                      setEditModalError('');
+                                    }}
+                                    className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
+                                    title="แก้ไขข้อมูลภาระงาน"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {onDeleteWorkload && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeletingWorkload(w);
+                                      setDeleteWorkloadReason('');
+                                      setDeleteWorkloadReasonError('');
+                                    }}
+                                    className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                    title="ลบรายการ"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                        {refData && (
+                          <tr className="bg-indigo-50/35 print:bg-indigo-50/20">
+                            <td className="py-1.5 px-2 text-center text-indigo-500 font-bold align-top print:px-0.5 print:py-1">
+                              ↳
+                            </td>
+                            <td colSpan={isAdmin ? 15 : 14} className="py-2 px-3 print:px-1.5 print:py-1">
+                              <div className="border border-indigo-300 print:border-gray-700 rounded bg-white overflow-hidden">
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1 bg-indigo-50/70 print:bg-slate-100 border-b border-indigo-200 print:border-gray-700 text-[11px] print:text-[8px] font-bold text-indigo-950 print:text-gray-900">
+                                  <span>
+                                    รายละเอียดห้องรับ - ส่งต่อผู้ป่วย (วันที่ {refDay} เดือน {refMonth} พ.ศ. {refBeYear})
+                                  </span>
+                                  <span>
+                                    รวมทั้งหมด <strong className="text-indigo-700 print:text-gray-900">{refTotal.toLocaleString()}</strong> รายการ
+                                    <span className="mx-2 text-gray-400">|</span>
+                                    ผู้รายงาน: {w.reporter || '-'}
+                                  </span>
+                                </div>
+                                <table className="w-full text-[11px] print:text-[8px] border-collapse">
+                                  <thead>
+                                    <tr className="bg-slate-50 border-b border-gray-300 print:border-gray-700 text-gray-700 font-semibold">
+                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[16%]">รายการ</th>
+                                      <th className="py-1 px-2 text-center border-r border-gray-300 print:border-gray-700 w-[8%]">จำนวน</th>
+                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[26%]">เหตุผล</th>
+                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[16%]">รายการ</th>
+                                      <th className="py-1 px-2 text-center border-r border-gray-300 print:border-gray-700 w-[8%]">จำนวน</th>
+                                      <th className="py-1 px-2 text-left w-[26%]">เหตุผล</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-200 print:divide-gray-400">
+                                    {[0, 1, 2].map((rowIdx) => {
+                                      const lDef = leftRefDefs[rowIdx];
+                                      const rDef = rightRefDefs[rowIdx];
+                                      const lItem = refData[lDef.key];
+                                      const rItem = refData[rDef.key];
+                                      return (
+                                        <tr key={rowIdx}>
+                                          <td className="py-1 px-2 font-medium text-gray-800 border-r border-gray-300 print:border-gray-700">
+                                            {lDef.label}
+                                          </td>
+                                          <td className="py-1 px-2 text-center font-bold text-gray-900 border-r border-gray-300 print:border-gray-700">
+                                            {lItem.count > 0 ? lItem.count.toLocaleString() : '-'}
+                                          </td>
+                                          <td className="py-1 px-2 text-gray-700 border-r border-gray-300 print:border-gray-700">
+                                            {lItem.reason || '-'}
+                                          </td>
+                                          <td className="py-1 px-2 font-medium text-gray-800 border-r border-gray-300 print:border-gray-700">
+                                            {rDef.label}
+                                          </td>
+                                          <td className="py-1 px-2 text-center font-bold text-gray-900 border-r border-gray-300 print:border-gray-700">
+                                            {rItem.count > 0 ? rItem.count.toLocaleString() : '-'}
+                                          </td>
+                                          <td className="py-1 px-2 text-gray-700">
+                                            {rItem.reason || '-'}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
 
                   {premiumGroups.map((grp, grpIdx) => {
                     const poolRec = grp.primaryPoolRecord;
@@ -890,55 +964,6 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             </tfoot>
           </table>
         </div>
-
-        {/* Dedicated Referral Center Form Block (matches paper form & exports into Print/PDF/JPEG) */}
-        {referralSummarySheet && (
-          <div className="pt-2">
-            <div className="max-w-xl mx-auto border-2 border-gray-800 rounded-sm overflow-hidden bg-white text-gray-950">
-              <div className="text-center font-bold text-sm py-2 px-3 border-b border-gray-800 underline underline-offset-4 bg-indigo-50/40 print:bg-white">
-                ตารางเก็บข้อมูล ห้องรับ - ส่งต่อผู้ป่วย
-              </div>
-              <div className="grid grid-cols-3 text-xs font-semibold border-b border-gray-800 py-1.5 px-3 text-center bg-white">
-                <span>วันที่ <strong className="ml-1 font-extrabold">{referralSummarySheet.day}</strong></span>
-                <span>เดือน <strong className="ml-1 font-extrabold">{referralSummarySheet.month}</strong></span>
-                <span>พ.ศ. <strong className="ml-1 font-extrabold">{referralSummarySheet.beYear}</strong></span>
-              </div>
-              <table className="w-full text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-gray-800 bg-slate-100 print:bg-slate-50 font-bold">
-                    <th className="py-1.5 px-3 text-center border-r border-gray-800 w-44">รายการ</th>
-                    <th className="py-1.5 px-3 text-center border-r border-gray-800 w-24">จำนวน</th>
-                    <th className="py-1.5 px-3 text-center">เหตุผล</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {referralSummarySheet.rows.map((r) => (
-                    <tr key={r.key} className="border-b border-gray-800">
-                      <td className="py-1.5 px-3 font-medium border-r border-gray-800">{r.label}</td>
-                      <td className="py-1.5 px-3 text-center font-bold border-r border-gray-800">
-                        {r.count > 0 ? r.count.toLocaleString() : '-'}
-                      </td>
-                      <td className="py-1.5 px-3 text-gray-800">{r.reason}</td>
-                    </tr>
-                  ))}
-                  <tr className="border-b border-gray-800 font-extrabold bg-slate-50">
-                    <td className="py-1.5 px-3 text-center border-r border-gray-800">รวม</td>
-                    <td className="py-1.5 px-3 text-center border-r border-gray-800 text-sm">
-                      {referralSummarySheet.totalCount.toLocaleString()}
-                    </td>
-                    <td className="py-1.5 px-3"></td>
-                  </tr>
-                  <tr>
-                    <td className="py-2 px-3 font-bold border-r border-gray-800">ผู้รายงาน</td>
-                    <td colSpan={2} className="py-2 px-3 text-center font-semibold">
-                      {referralSummarySheet.reporterText}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
 
         {/* Printable Official Signatures */}
         <div className="pt-8 pb-4 print:pt-12 grid grid-cols-2 gap-8 text-center text-xs text-gray-700">

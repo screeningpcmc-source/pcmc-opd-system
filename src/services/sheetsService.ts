@@ -17,11 +17,17 @@ import {
   WorkloadRecordType,
   REFERRAL_CLINIC_NAME,
   formatWorkloadNoteForSheet,
+  formatOtWorkClinicForSheet,
+  formatOtWorkClinicValue,
   getCanonicalReferralSignature,
+  getEffectiveOtHours,
   getEffectiveTotalPt,
   normalizeWorkloadRecord,
   normalizeStaffPosition,
-  parseReferralFromSheetNote
+  parseOtWorkClinic,
+  parseReferralFromSheetNote,
+  DEFAULT_OT_COST_CENTER,
+  DEFAULT_OT_CONTROLLER_NAME,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -87,6 +93,101 @@ function prepareWorkloadForRemote(w: DailyWorkload): DailyWorkload {
     ...w,
     note: formatWorkloadNoteForSheet(w.note, w.referralData),
   };
+}
+
+function prepareOtForRemote(o: OTAttendance): OTAttendance {
+  return {
+    ...o,
+    workClinic: formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
+    hours: getEffectiveOtHours(o),
+  };
+}
+
+function buildStaffEmployeeCodesMap(staff: StaffMember[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  (staff || []).forEach((s) => {
+    const code = (s.employeeCode || '').trim();
+    if (code && s.name) {
+      out[s.staffId || s.name] = code;
+      out[s.name.trim()] = code;
+    }
+  });
+  return out;
+}
+
+function parseJsonRecordSafe<T = Record<string, any>>(raw?: string): T | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseSheetOtRecord(r: string[], fallbackId: string, staffList?: StaffMember[]): OTAttendance {
+  const rawPos = (r[3] || 'RN').trim();
+  const shift = String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift;
+  const rawWorkClinic = String(r[5] || '').trim();
+  const parsedClinic = parseOtWorkClinic(rawWorkClinic);
+  const cleanWorkClinic = formatOtWorkClinicValue(
+    parsedClinic.clinic,
+    parsedClinic.amount,
+    parsedClinic.periodLabel
+  );
+  const colHours = Number(r[6]);
+  const hours =
+    Number.isFinite(colHours) && colHours > 0
+      ? colHours
+      : parsedClinic.hours;
+  const rawCode = String(r[7] || '').trim();
+  const staffName = String(r[2] || '').trim();
+  const matchedStaffCode = staffList?.find((s) => s.name.trim() === staffName)?.employeeCode;
+  const employeeCode =
+    rawCode && rawCode !== 'External' && rawCode !== 'OPD'
+      ? rawCode
+      : matchedStaffCode || undefined;
+
+  return {
+    id: fallbackId,
+    date: String(r[0] || '').trim(),
+    shift,
+    staffName,
+    employeeCode,
+    position: normalizeStaffPosition(rawPos),
+    homeClinic: String(r[4] || '').trim(),
+    workClinic: cleanWorkClinic,
+    ...(hours !== undefined ? { hours } : {}),
+  };
+}
+
+function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMember[]): string[][] {
+  const rows: string[][] = [
+    ['Key', 'Value'],
+    ['NHPPD', settings.nhppd.toString()],
+    ['Screening_NHPPD', (settings.screeningNhppd ?? 0.1).toString()],
+    ['Std_Hr', settings.stdHr.toString()],
+    ['Annual_Hr', settings.annualHr.toString()],
+    ['Work_Days', settings.workDays.toString()],
+    ['Admin_Emails', settings.adminEmails.join(', ')],
+    ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
+    ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
+    ['Premium_Sub_Clinics', (settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
+    ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
+    ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
+    ['Primary_Admin_Owner', settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
+    ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
+    ['Gas_Web_App_URL', settings.gasUrl || ''],
+    ['Default_Cost_Center', (settings.defaultCostCenter || DEFAULT_OT_COST_CENTER).trim()],
+    ['Clinic_Cost_Centers', JSON.stringify(settings.clinicCostCenters || {})],
+    ['OT_Hourly_Rates', JSON.stringify(settings.otHourlyRates || {})],
+    ['OT_Controller_Name', (settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME).trim()],
+  ];
+  const codeMap = buildStaffEmployeeCodesMap(staffList || []);
+  if (Object.keys(codeMap).length > 0) {
+    rows.push(['Staff_Employee_Codes', JSON.stringify(codeMap)]);
+  }
+  return rows;
 }
 
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
@@ -824,32 +925,17 @@ export const createGoogleSpreadsheet = async (
     s.status,
     s.startDate || '',
     s.endDate || '',
+    s.employeeCode || '',
   ]);
-  const settingsRows = [
-    ['Key', 'Value'],
-    ['NHPPD', settings.nhppd.toString()],
-    ['Screening_NHPPD', (settings.screeningNhppd ?? 0.1).toString()],
-    ['Std_Hr', settings.stdHr.toString()],
-    ['Annual_Hr', settings.annualHr.toString()],
-    ['Work_Days', settings.workDays.toString()],
-    ['Admin_Emails', settings.adminEmails.join(', ')],
-    ['In_Time_Clinics', (settings.inTimeClinics || []).join(', ')],
-    ['Out_Time_Clinics', (settings.outTimeClinics || []).join(', ')],
-    ['Premium_Sub_Clinics', (settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
-    ['Leave_Types', (settings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
-    ['Custom_Holidays', JSON.stringify(settings.customHolidays || [])],
-    ['Primary_Admin_Owner', settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
-    ['Additional_Admin_Pins', JSON.stringify(settings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
-    ['Gas_Web_App_URL', settings.gasUrl || ''],
-  ];
+  const settingsRows = buildSettingsSheetRows(settings, staffList);
 
   const batchUpdateValues = {
     valueInputOption: 'USER_ENTERED',
     data: [
       {
-        range: 'Staff_Master!A1:G',
+        range: 'Staff_Master!A1:H',
         values: [
-          ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+          ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
           ...staffRows,
         ],
       },
@@ -883,8 +969,8 @@ export const createGoogleSpreadsheet = async (
         values: [['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note']],
       },
       {
-        range: 'OT_Attendance!A1:F1',
-        values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
+        range: 'OT_Attendance!A1:H1',
+        values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code']],
       },
       {
         range: `Settings!A1:B${settingsRows.length}`,
@@ -929,7 +1015,7 @@ export const syncStaffMasterToSheet = async (
     await ensureSpreadsheetTabs(accessToken, spreadsheetId);
 
     const clearRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:G:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:H:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -941,7 +1027,7 @@ export const syncStaffMasterToSheet = async (
     }
 
     const rows = [
-      ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+      ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
       ...staffList.map((s) => [
         s.staffId,
         s.name,
@@ -950,11 +1036,12 @@ export const syncStaffMasterToSheet = async (
         s.status,
         s.startDate || '',
         s.endDate || '',
+        s.employeeCode || '',
       ]),
     ];
 
     const putRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A1:G${rows.length}?valueInputOption=USER_ENTERED`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A1:H${rows.length}?valueInputOption=USER_ENTERED`,
       {
         method: 'PUT',
         headers: {
@@ -1028,12 +1115,20 @@ function leaveKey(l: LeaveRecord): string {
 }
 
 export function getOtKey(o: OTAttendance): string {
+  const parsedClinic = parseOtWorkClinic(o.workClinic);
+  const normalizedWorkClinic = formatOtWorkClinicValue(
+    parsedClinic.clinic,
+    parsedClinic.amount,
+    parsedClinic.periodLabel
+  );
+  const effHours = getEffectiveOtHours(o);
   return [
     (o.date || '').trim(),
     (o.shift || '').trim(),
     (o.staffName || '').trim(),
     (o.homeClinic || '').trim(),
-    (o.workClinic || '').trim(),
+    normalizedWorkClinic,
+    String(effHours),
   ].join('|');
 }
 
@@ -1068,10 +1163,10 @@ export const syncAllWithGoogleSheet = async (
 
   const batchGetRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?ranges=${encodeURIComponent(
-      'Staff_Master!A:G'
+      'Staff_Master!A:H'
     )}&ranges=${encodeURIComponent('Daily_Workload!A:R')}&ranges=${encodeURIComponent(
       'Leave_Records!A:H'
-    )}&ranges=${encodeURIComponent('OT_Attendance!A:F')}&ranges=${encodeURIComponent(
+    )}&ranges=${encodeURIComponent('OT_Attendance!A:H')}&ranges=${encodeURIComponent(
       'Settings!A:B'
     )}&ranges=${encodeURIComponent('Audit_Logs!A:F')}`,
     {
@@ -1094,6 +1189,14 @@ export const syncAllWithGoogleSheet = async (
   const settingsRawRows: string[][] = valueRanges[4]?.values || [];
   const auditRawRows: string[][] = valueRanges[5]?.values || [];
 
+  const earlySettingsMap: Record<string, string> = {};
+  settingsRawRows.slice(1).forEach((r) => {
+    if (r[0]) earlySettingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
+  });
+  const remoteStaffCodeMap = parseJsonRecordSafe<Record<string, string>>(
+    earlySettingsMap['Staff_Employee_Codes']
+  );
+
   // 1. Parse Staff_Master from sheet
   const sheetStaffRows = staffRawRows
     .slice(1)
@@ -1104,9 +1207,18 @@ export const syncAllWithGoogleSheet = async (
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
+      const staffId = (r[0] || `STF-GS-${idx + 1}`).trim();
+      const name = (r[1] || '').trim();
+      const colCode = (r[7] || '').trim();
+      const prevMatch = db.staff.find((s) => s.staffId === staffId || s.name.trim() === name);
+      const fallbackCode =
+        remoteStaffCodeMap?.[staffId] ||
+        remoteStaffCodeMap?.[name] ||
+        prevMatch?.employeeCode;
       return {
-        staffId: (r[0] || `STF-GS-${idx + 1}`).trim(),
-        name: (r[1] || '').trim(),
+        staffId,
+        employeeCode: colCode || fallbackCode || undefined,
+        name,
         position: pos,
         homeClinic: (r[3] || '').trim(),
         status,
@@ -1262,18 +1374,7 @@ export const syncAllWithGoogleSheet = async (
   const sheetOt: OTAttendance[] = otRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r, idx) => {
-      const rawPos = (r[3] || 'RN').trim();
-      return {
-        id: `OT-GS-${Date.now()}-${idx}`,
-        date: String(r[0] || '').trim(),
-        shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
-        staffName: String(r[2] || '').trim(),
-        position: normalizeStaffPosition(rawPos),
-        homeClinic: String(r[4] || '').trim(),
-        workClinic: String(r[5] || '').trim(),
-      };
-    });
+    .map((r, idx) => parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, finalStaff));
 
   const shouldOverwriteOt = isOtDirty();
   const sheetOKeys = new Set(sheetOt.map(otKey));
@@ -1302,6 +1403,10 @@ export const syncAllWithGoogleSheet = async (
             return {
               ...so,
               id: prev.id,
+              hours: so.hours ?? prev.hours,
+              employeeCode: so.employeeCode || prev.employeeCode,
+              isExternal: prev.isExternal,
+              affiliation: prev.affiliation,
               lastEditedAt: prev.lastEditedAt,
               lastEditReason: prev.lastEditReason,
               lastEditedBy: prev.lastEditedBy,
@@ -1430,6 +1535,26 @@ export const syncAllWithGoogleSheet = async (
     gasUrl: settingsDirty
       ? db.settings.gasUrl || ''
       : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
+    defaultCostCenter: settingsDirty
+      ? db.settings.defaultCostCenter || DEFAULT_OT_COST_CENTER
+      : settingsMap['Default_Cost_Center'] ||
+        db.settings.defaultCostCenter ||
+        DEFAULT_OT_COST_CENTER,
+    clinicCostCenters: settingsDirty
+      ? db.settings.clinicCostCenters || {}
+      : parseJsonRecordSafe<Record<string, string>>(settingsMap['Clinic_Cost_Centers']) ||
+        db.settings.clinicCostCenters ||
+        {},
+    otHourlyRates: settingsDirty
+      ? db.settings.otHourlyRates || {}
+      : parseJsonRecordSafe<Partial<Record<StaffPosition, number>>>(settingsMap['OT_Hourly_Rates']) ||
+        db.settings.otHourlyRates ||
+        {},
+    otControllerName: settingsDirty
+      ? db.settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME
+      : settingsMap['OT_Controller_Name'] ||
+        db.settings.otControllerName ||
+        DEFAULT_OT_CONTROLLER_NAME,
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -1437,16 +1562,16 @@ export const syncAllWithGoogleSheet = async (
 
   if (shouldPushStaff) {
     await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:G:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:H:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
       }
     );
     writeData.push({
-      range: 'Staff_Master!A1:G',
+      range: 'Staff_Master!A1:H',
       values: [
-        ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date'],
+        ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
         ...finalStaff.map((s) => [
           s.staffId,
           s.name,
@@ -1455,6 +1580,7 @@ export const syncAllWithGoogleSheet = async (
           s.status,
           s.startDate || '',
           s.endDate || '',
+          s.employeeCode || '',
         ]),
       ],
     });
@@ -1574,30 +1700,32 @@ export const syncAllWithGoogleSheet = async (
 
   if (shouldOverwriteOt) {
     await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/OT_Attendance!A:F:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/OT_Attendance!A:H:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
       }
     );
     writeData.push({
-      range: 'OT_Attendance!A1:F',
+      range: 'OT_Attendance!A1:H',
       values: [
-        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'],
         ...mergedOt.map((o) => [
           o.date,
           o.shift,
           o.staffName,
           o.position,
           o.homeClinic,
-          o.workClinic,
+          formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
+          getEffectiveOtHours(o),
+          o.employeeCode || '',
         ]),
       ],
     });
   } else if (otRawRows.length === 0) {
     writeData.push({
-      range: 'OT_Attendance!A1:F1',
-      values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic']],
+      range: 'OT_Attendance!A1:H1',
+      values: [['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code']],
     });
   }
 
@@ -1608,25 +1736,17 @@ export const syncAllWithGoogleSheet = async (
     });
   }
 
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Settings!A:B:clear`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+  const fullSettingsRows = buildSettingsSheetRows(finalSettings, finalStaff);
   writeData.push({
-    range: 'Settings!A1:B15',
-    values: [
-      ['Key', 'Value'],
-      ['NHPPD', finalSettings.nhppd.toString()],
-      ['Screening_NHPPD', (finalSettings.screeningNhppd ?? 0.1).toString()],
-      ['Std_Hr', finalSettings.stdHr.toString()],
-      ['Annual_Hr', finalSettings.annualHr.toString()],
-      ['Work_Days', finalSettings.workDays.toString()],
-      ['Admin_Emails', finalSettings.adminEmails.join(', ')],
-      ['In_Time_Clinics', (finalSettings.inTimeClinics || []).join(', ')],
-      ['Out_Time_Clinics', (finalSettings.outTimeClinics || []).join(', ')],
-      ['Premium_Sub_Clinics', (finalSettings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
-      ['Leave_Types', (finalSettings.leaveTypes || [...LEAVE_TYPES]).join(', ')],
-      ['Custom_Holidays', JSON.stringify(finalSettings.customHolidays || [])],
-      ['Primary_Admin_Owner', finalSettings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
-      ['Additional_Admin_Pins', JSON.stringify(finalSettings.additionalAdminPins || buildDefaultAdditionalAdminPins())],
-      ['Gas_Web_App_URL', finalSettings.gasUrl || ''],
-    ],
+    range: `Settings!A1:B${fullSettingsRows.length}`,
+    values: fullSettingsRows,
   });
 
   if (writeData.length > 0) {
@@ -1727,7 +1847,9 @@ export const syncAllWithGoogleSheet = async (
             o.staffName,
             o.position,
             o.homeClinic,
-            o.workClinic,
+            formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
+            getEffectiveOtHours(o),
+            o.employeeCode || '',
           ]),
         }),
       }
@@ -1882,7 +2004,16 @@ export const appendOTToSheet = async (
   ot: OTAttendance
 ): Promise<boolean> => {
   try {
-    const row = [ot.date, ot.shift, ot.staffName, ot.position, ot.homeClinic, ot.workClinic];
+    const row = [
+      ot.date,
+      ot.shift,
+      ot.staffName,
+      ot.position,
+      ot.homeClinic,
+      formatOtWorkClinicForSheet(ot.workClinic, ot.hours, ot.shift),
+      getEffectiveOtHours(ot),
+      ot.employeeCode || '',
+    ];
 
     const res = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/OT_Attendance!A1:append?valueInputOption=USER_ENTERED`,
@@ -2033,6 +2164,14 @@ function mergeRemoteDataRows(
   db: AppDatabase,
   extra?: MergeRemoteExtraOptions
 ): AppDatabase {
+  const settingsMap: Record<string, string> = {};
+  (params.settingsRows || []).forEach((r) => {
+    if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
+  });
+  const remoteStaffCodeMap = parseJsonRecordSafe<Record<string, string>>(
+    settingsMap['Staff_Employee_Codes']
+  );
+
   const sheetStaff: StaffMember[] = (params.staffRows || [])
     .filter((r) => (r[1] || '').trim().length > 0)
     .map((r, idx) => {
@@ -2041,9 +2180,18 @@ function mergeRemoteDataRows(
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
+      const staffId = (r[0] || `STF-GS-${idx + 1}`).trim();
+      const name = (r[1] || '').trim();
+      const colCode = (r[7] || '').trim();
+      const prevMatch = db.staff.find((s) => s.staffId === staffId || s.name.trim() === name);
+      const fallbackCode =
+        remoteStaffCodeMap?.[staffId] ||
+        remoteStaffCodeMap?.[name] ||
+        prevMatch?.employeeCode;
       return {
-        staffId: (r[0] || `STF-GS-${idx + 1}`).trim(),
-        name: (r[1] || '').trim(),
+        staffId,
+        employeeCode: colCode || fallbackCode || undefined,
+        name,
         position: pos,
         homeClinic: (r[3] || '').trim(),
         status,
@@ -2053,11 +2201,6 @@ function mergeRemoteDataRows(
     });
 
   const finalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
-
-  const settingsMap: Record<string, string> = {};
-  (params.settingsRows || []).forEach((r) => {
-    if (r[0]) settingsMap[String(r[0]).trim()] = String(r[1] || '').trim();
-  });
   const remotePremiumClinics = settingsMap['Premium_Sub_Clinics']
     ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
     : db.settings.premiumSubClinics;
@@ -2220,22 +2363,17 @@ function mergeRemoteDataRows(
     const sheetOt: OTAttendance[] = params.otRows
       .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
       .map((r, idx) => {
-        const rawPos = (r[3] || 'RN').trim();
-        const item: OTAttendance = {
-          id: `OT-GS-${Date.now()}-${idx}`,
-          date: String(r[0] || '').trim(),
-          shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
-          staffName: String(r[2] || '').trim(),
-          position: normalizeStaffPosition(rawPos),
-          homeClinic: String(r[4] || '').trim(),
-          workClinic: String(r[5] || '').trim(),
-        };
+        const item = parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, finalStaff);
         const matches = existingOtQueue.get(otKey(item));
         const prev = matches && matches.length > 0 ? matches.shift() : undefined;
         if (!prev) return item;
         return {
           ...item,
           id: prev.id,
+          hours: item.hours ?? prev.hours,
+          employeeCode: item.employeeCode || prev.employeeCode,
+          isExternal: prev.isExternal,
+          affiliation: prev.affiliation,
           lastEditedAt: prev.lastEditedAt,
           lastEditReason: prev.lastEditReason,
           lastEditedBy: prev.lastEditedBy,
@@ -2389,6 +2527,26 @@ function mergeRemoteDataRows(
       : settingsDirty
       ? db.settings.gasUrl || INITIAL_SETTINGS.gasUrl || ''
       : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || INITIAL_SETTINGS.gasUrl || '',
+    defaultCostCenter: settingsDirty
+      ? db.settings.defaultCostCenter || DEFAULT_OT_COST_CENTER
+      : settingsMap['Default_Cost_Center'] ||
+        db.settings.defaultCostCenter ||
+        DEFAULT_OT_COST_CENTER,
+    clinicCostCenters: settingsDirty
+      ? db.settings.clinicCostCenters || {}
+      : parseJsonRecordSafe<Record<string, string>>(settingsMap['Clinic_Cost_Centers']) ||
+        db.settings.clinicCostCenters ||
+        {},
+    otHourlyRates: settingsDirty
+      ? db.settings.otHourlyRates || {}
+      : parseJsonRecordSafe<Partial<Record<StaffPosition, number>>>(settingsMap['OT_Hourly_Rates']) ||
+        db.settings.otHourlyRates ||
+        {},
+    otControllerName: settingsDirty
+      ? db.settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME
+      : settingsMap['OT_Controller_Name'] ||
+        db.settings.otControllerName ||
+        DEFAULT_OT_CONTROLLER_NAME,
   };
 
   return {
@@ -2499,6 +2657,10 @@ export const appendViaAppsScript = async (
         ? Array.isArray(payload)
           ? (payload as DailyWorkload[]).map(prepareWorkloadForRemote)
           : prepareWorkloadForRemote(payload as DailyWorkload)
+        : action === 'appendOT'
+        ? Array.isArray(payload)
+          ? (payload as OTAttendance[]).map(prepareOtForRemote)
+          : prepareOtForRemote(payload as OTAttendance)
         : payload;
     const bodyObj =
       action === 'appendWorkload'
@@ -2722,18 +2884,7 @@ function parseRemoteOtOnly(otRows: unknown): OTAttendance[] {
   if (!Array.isArray(otRows)) return [];
   return otRows
     .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r: string[], idx: number) => {
-      const rawPos = (r[3] || 'RN').trim();
-      return {
-        id: `OT-CHK-${idx}`,
-        date: String(r[0] || '').trim(),
-        shift: String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift,
-        staffName: String(r[2] || '').trim(),
-        position: normalizeStaffPosition(rawPos),
-        homeClinic: String(r[4] || '').trim(),
-        workClinic: String(r[5] || '').trim(),
-      };
-    });
+    .map((r: string[], idx: number) => parseSheetOtRecord(r, `OT-CHK-${idx}`));
 }
 
 /**
@@ -2757,17 +2908,28 @@ export const pushAdminTableViaAppsScript = async (params: {
     const payload: Record<string, unknown> = {
       dirty: {
         staff: table === 'staff',
-        settings: table === 'settings',
+        settings: table === 'settings' || table === 'staff',
         workloads: table === 'workloads',
         leaves: table === 'leaves',
         ot: table === 'ot',
       },
     };
-    if (table === 'staff') payload.staff = db.staff;
+    if (table === 'staff') {
+      payload.staff = db.staff;
+      payload.settings = {
+        ...db.settings,
+        staffEmployeeCodes: buildStaffEmployeeCodesMap(db.staff),
+      };
+    }
     if (table === 'workloads') payload.workloads = db.workloads.map(prepareWorkloadForRemote);
     if (table === 'leaves') payload.leaves = db.leaves;
-    if (table === 'ot') payload.ot = db.ot;
-    if (table === 'settings') payload.settings = db.settings;
+    if (table === 'ot') payload.ot = db.ot.map(prepareOtForRemote);
+    if (table === 'settings') {
+      payload.settings = {
+        ...db.settings,
+        staffEmployeeCodes: buildStaffEmployeeCodesMap(db.staff),
+      };
+    }
     if (auditEntry) payload.auditLogs = [auditEntry];
 
     const res = await fetch(gasUrl, {
@@ -2942,17 +3104,19 @@ export const pushAdminTableViaOAuth = async (params: {
       if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
     } else if (table === 'ot') {
       const rows = [
-        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic'],
+        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'],
         ...db.ot.map((o) => [
           o.date,
           o.shift,
           o.staffName,
           o.position,
           o.homeClinic,
-          o.workClinic,
+          formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
+          getEffectiveOtHours(o),
+          o.employeeCode || '',
         ]),
       ];
-      await clearAndPut('OT_Attendance!A:F', `OT_Attendance!A1:F${rows.length}`, rows);
+      await clearAndPut('OT_Attendance!A:H', `OT_Attendance!A1:H${rows.length}`, rows);
       clearOtDirty(expectedDirtyVersion);
       if (getOtDirtyVersion() === 0) clearAllOtTombstones();
     } else if (table === 'staff') {
@@ -2960,24 +3124,7 @@ export const pushAdminTableViaOAuth = async (params: {
       if (!ok) return { ok: false, error: 'อัปเดต Staff_Master ไม่สำเร็จ' };
       clearStaffMasterDirty(expectedDirtyVersion);
     } else if (table === 'settings') {
-      const s = db.settings;
-      const rows = [
-        ['Key', 'Value'],
-        ['NHPPD', s.nhppd.toString()],
-        ['Screening_NHPPD', (s.screeningNhppd ?? 0.1).toString()],
-        ['Std_Hr', s.stdHr.toString()],
-        ['Annual_Hr', s.annualHr.toString()],
-        ['Work_Days', s.workDays.toString()],
-        ['Admin_Emails', s.adminEmails.join(', ')],
-        ['In_Time_Clinics', (s.inTimeClinics || []).join(', ')],
-        ['Out_Time_Clinics', (s.outTimeClinics || []).join(', ')],
-        ['Premium_Sub_Clinics', (s.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS]).join(', ')],
-        ['Leave_Types', (s.leaveTypes || [...LEAVE_TYPES]).join(', ')],
-        ['Custom_Holidays', JSON.stringify(s.customHolidays || [])],
-        ['Primary_Admin_Owner', s.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER],
-        ['Additional_Admin_Pins', JSON.stringify(s.additionalAdminPins || buildDefaultAdditionalAdminPins())],
-        ['Gas_Web_App_URL', s.gasUrl || ''],
-      ];
+      const rows = buildSettingsSheetRows(db.settings, db.staff);
       await clearAndPut('Settings!A:B', `Settings!A1:B${rows.length}`, rows);
       clearSettingsDirty(expectedDirtyVersion);
     }
@@ -3052,9 +3199,17 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
 
   try {
     const serializedTarget =
-      table === 'workloads' ? prepareWorkloadForRemote(target as DailyWorkload) : target;
+      table === 'workloads'
+        ? prepareWorkloadForRemote(target as DailyWorkload)
+        : table === 'ot'
+        ? prepareOtForRemote(target as OTAttendance)
+        : target;
     const serializedUpdated =
-      updated && table === 'workloads' ? prepareWorkloadForRemote(updated as DailyWorkload) : updated;
+      updated && table === 'workloads'
+        ? prepareWorkloadForRemote(updated as DailyWorkload)
+        : updated && table === 'ot'
+        ? prepareOtForRemote(updated as OTAttendance)
+        : updated;
 
     const res = await fetch(gasUrl, {
       method: 'POST',
@@ -3185,7 +3340,7 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
       } else if (matchIdx >= 0) {
         remoteList.splice(matchIdx, 1);
       }
-      nextTableRows = remoteList;
+      nextTableRows = remoteList.map(prepareOtForRemote);
     }
 
     const rmwRes = await fetch(gasUrl, {
@@ -3322,13 +3477,19 @@ export const syncAdminViaAppsScript = async (
         action: 'syncAdminAll',
         adminPin,
         payload: {
-          dirty,
+          dirty: {
+            ...dirty,
+            settings: dirty.settings || dirty.staff,
+          },
           staff: workingDb.staff,
           workloads: workingDb.workloads.map(prepareWorkloadForRemote),
           leaves: workingDb.leaves,
-          ot: workingDb.ot,
+          ot: workingDb.ot.map(prepareOtForRemote),
           auditLogs: pendingAudits,
-          settings: workingDb.settings,
+          settings: {
+            ...workingDb.settings,
+            staffEmployeeCodes: buildStaffEmployeeCodesMap(workingDb.staff),
+          },
         },
       }),
     });

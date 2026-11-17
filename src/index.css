@@ -19,6 +19,17 @@
     margin: 8mm;
   }
 
+  @page landscapeSheet {
+    size: A4 landscape;
+    margin: 6mm;
+  }
+
+  .print-landscape-sheet {
+    page: landscapeSheet;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
   html,
   body {
     width: 100%;

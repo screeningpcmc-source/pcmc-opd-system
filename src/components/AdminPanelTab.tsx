@@ -16,7 +16,11 @@ import {
   AdminPinEntry,
   compareStaffByPositionAndStartDate,
   REFERRAL_CLINIC_NAME,
-  isDailyWorkloadExcludedPosition
+  isDailyWorkloadExcludedPosition,
+  DEFAULT_OT_COST_CENTER,
+  DEFAULT_OT_CONTROLLER_NAME,
+  DEFAULT_OT_HOURLY_RATES,
+  getOtHourlyRate
 } from '../types';
 import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
 import { formatThaiShortDate } from '../utils/thaiDate';
@@ -126,9 +130,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [clinicFilter, setClinicFilter] = useState<string>('ALL');
 
-  // Add new staff form state (No visible Staff ID)
+  // Add new staff form state (No visible internal Staff ID, with Employee Code)
   const todayStr = new Date().toISOString().split('T')[0];
   const [showAddForm, setShowAddForm] = useState<boolean>(false);
+  const [newEmployeeCode, setNewEmployeeCode] = useState<string>('');
   const [newName, setNewName] = useState<string>('');
   const [newPosition, setNewPosition] = useState<StaffPosition>('RN');
   const [newClinic, setNewClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
@@ -175,6 +180,34 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [adminEmailsStr, setAdminEmailsStr] = useState<string>(settings.adminEmails.join(', '));
   const [customSheetUrl, setCustomSheetUrl] = useState<string>(settings.spreadsheetUrl || '');
   const [customGasUrl, setCustomGasUrl] = useState<string>(settings.gasUrl || '');
+  const [defaultCostCenter, setDefaultCostCenter] = useState<string>(
+    settings.defaultCostCenter || DEFAULT_OT_COST_CENTER
+  );
+  const [otControllerName, setOtControllerName] = useState<string>(
+    settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME
+  );
+  const [clinicCostCenters, setClinicCostCenters] = useState<Record<string, string>>(
+    settings.clinicCostCenters || {}
+  );
+  const [selectedCostCenterClinic, setSelectedCostCenterClinic] = useState<string>(
+    inTimeClinics[0] || IN_TIME_CLINICS[0]
+  );
+  const [clinicCostCenterDraft, setClinicCostCenterDraft] = useState<string>('');
+  const [otRateNurse, setOtRateNurse] = useState<number>(() =>
+    getOtHourlyRate('RN', settings.otHourlyRates)
+  );
+  const [otRatePn, setOtRatePn] = useState<number>(() =>
+    getOtHourlyRate('PN', settings.otHourlyRates)
+  );
+  const [otRateNa, setOtRateNa] = useState<number>(() =>
+    getOtHourlyRate('NA', settings.otHourlyRates)
+  );
+  const [otRateClerk, setOtRateClerk] = useState<number>(() =>
+    getOtHourlyRate('Clerk', settings.otHourlyRates)
+  );
+  const [otRateServiceWorker, setOtRateServiceWorker] = useState<number>(() =>
+    getOtHourlyRate('Service Worker', settings.otHourlyRates)
+  );
   const [settingsSaved, setSettingsSaved] = useState<boolean>(false);
 
   useEffect(() => {
@@ -193,6 +226,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     );
     setCustomSheetUrl(settings.spreadsheetUrl || '');
     setCustomGasUrl(settings.gasUrl || '');
+    setDefaultCostCenter(settings.defaultCostCenter || DEFAULT_OT_COST_CENTER);
+    setOtControllerName(settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME);
+    setClinicCostCenters(settings.clinicCostCenters || {});
+    setOtRateNurse(getOtHourlyRate('RN', settings.otHourlyRates));
+    setOtRatePn(getOtHourlyRate('PN', settings.otHourlyRates));
+    setOtRateNa(getOtHourlyRate('NA', settings.otHourlyRates));
+    setOtRateClerk(getOtHourlyRate('Clerk', settings.otHourlyRates));
+    setOtRateServiceWorker(getOtHourlyRate('Service Worker', settings.otHourlyRates));
   }, [settings]);
 
   useEffect(() => {
@@ -249,6 +290,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         const posLabel = formatPositionLabel(s.position).toLowerCase();
         const matchSearch = !q ||
           s.name.toLowerCase().includes(q) ||
+          (s.employeeCode || '').toLowerCase().includes(q) ||
           s.position.toLowerCase().includes(q) ||
           posLabel.includes(q) ||
           s.homeClinic.toLowerCase().includes(q);
@@ -277,6 +319,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
     const staff: StaffMember = {
       staffId: `STF-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      employeeCode: newEmployeeCode.trim() || undefined,
       name: newName.trim(),
       position: newPosition,
       homeClinic: newClinic,
@@ -285,6 +328,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     };
 
     onAddStaff(staff);
+    setNewEmployeeCode('');
     setNewName('');
     setNewStatus('Active');
     setNewStartDate(new Date().toISOString().split('T')[0]);
@@ -568,6 +612,15 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       };
     });
 
+    const nurseRate = Number(otRateNurse) > 0 ? Number(otRateNurse) : DEFAULT_OT_HOURLY_RATES.RN;
+    const pnRate = Number(otRatePn) > 0 ? Number(otRatePn) : DEFAULT_OT_HOURLY_RATES.PN;
+    const naRate = Number(otRateNa) > 0 ? Number(otRateNa) : DEFAULT_OT_HOURLY_RATES.NA;
+    const clerkRate = Number(otRateClerk) > 0 ? Number(otRateClerk) : DEFAULT_OT_HOURLY_RATES.Clerk;
+    const swRate =
+      Number(otRateServiceWorker) > 0
+        ? Number(otRateServiceWorker)
+        : DEFAULT_OT_HOURLY_RATES['Service Worker'];
+
     const updated: SystemSettings = {
       ...settings,
       nhppd: Number(nhppd) > 0 ? Number(nhppd) : 0.4,
@@ -585,6 +638,23 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       leaveTypes,
       gasUrl: settings.isUnlinked ? undefined : customGasUrl.trim() || settings.gasUrl || undefined,
       isUnlinked: settings.isUnlinked,
+      defaultCostCenter: defaultCostCenter.trim() || DEFAULT_OT_COST_CENTER,
+      clinicCostCenters,
+      otControllerName: otControllerName.trim() || DEFAULT_OT_CONTROLLER_NAME,
+      otHourlyRates: {
+        HN: nurseRate,
+        RN: nurseRate,
+        'RN (Daily Wage)': nurseRate,
+        PN: pnRate,
+        'PN (Daily Wage)': pnRate,
+        NA: naRate,
+        PCA: naRate,
+        'NA (Daily Wage)': naRate,
+        Clerk: clerkRate,
+        'Clerk (Daily Wage)': clerkRate,
+        'Service Worker': swRate,
+        'Service Worker (Daily Wage)': swRate,
+      },
     };
 
     onSaveSettings(updated);
@@ -982,7 +1052,20 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               กรอกข้อมูลบุคลากรใหม่
             </h4>
 
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-6 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                  รหัสบุคลากร
+                </label>
+                <input
+                  type="text"
+                  placeholder="เช่น 20708302"
+                  value={newEmployeeCode}
+                  onChange={(e) => setNewEmployeeCode(e.target.value)}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border font-mono font-semibold bg-white"
+                />
+              </div>
+
               <div className="sm:col-span-2">
                 <label className="block text-[11px] font-semibold text-gray-700 mb-1">
                   ชื่อ - นามสกุล (พร้อมคำนำหน้า) <span className="text-red-500">*</span>
@@ -1060,7 +1143,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2.5" />
             <input
               type="text"
-              placeholder="ค้นหาชื่อ, ตำแหน่ง, คลินิก..."
+              placeholder="ค้นหารหัส, ชื่อ, ตำแหน่ง, คลินิก..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full text-xs rounded-lg border-gray-200 pl-8 pr-3 py-1.5 border"
@@ -1107,11 +1190,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           </div>
         </div>
 
-        {/* Staff Table (Staff ID Column Removed) */}
+        {/* Staff Table */}
         <div className="overflow-x-auto max-h-[500px]">
           <table className="w-full text-left text-xs border border-gray-100 rounded-lg">
             <thead className="bg-slate-50 text-slate-700 font-semibold border-b sticky top-0 z-10">
               <tr>
+                <th className="py-2.5 px-2.5 whitespace-nowrap">รหัสบุคลากร</th>
                 <th className="py-2.5 px-3">ชื่อ - นามสกุล</th>
                 <th className="py-2.5 px-2">ตำแหน่งวิชาชีพ</th>
                 <th className="py-2.5 px-3">ห้องตรวจสังกัด</th>
@@ -1123,13 +1207,26 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <tbody className="divide-y divide-gray-100">
               {filteredStaff.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-400">
+                  <td colSpan={7} className="py-8 text-center text-gray-400">
                     ไม่พบบุคลากรตามเงื่อนไขที่ค้นหา
                   </td>
                 </tr>
               ) : (
                 filteredStaff.map((staff) => (
                   <tr key={staff.staffId} className="hover:bg-slate-50/80">
+                    <td className="py-2 px-2.5 font-mono text-[11px] font-semibold text-gray-700 whitespace-nowrap">
+                      {staff.employeeCode ? (
+                        <span>{staff.employeeCode}</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEditingStaff({ ...staff })}
+                          className="text-[10px] text-gray-400 hover:text-blue-600 hover:underline cursor-pointer font-sans"
+                        >
+                          + ระบุรหัส
+                        </button>
+                      )}
+                    </td>
                     <td className="py-2 px-3 font-bold text-gray-900">{staff.name}</td>
                     <td className="py-2 px-2">
                       <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -1739,6 +1836,187 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </div>
           </div>
 
+          {/* OT Compensation & Cost Center Settings */}
+          <div className="bg-violet-50/50 border border-violet-200/80 rounded-xl p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-bold text-violet-950">
+                  ตั้งค่าค่าตอบแทน OT & Cost Center (สำหรับออกหลักฐานการจ่ายเงินค่าตอบแทน OT)
+                </h4>
+                <p className="text-[11px] text-violet-800/80 mt-0.5">
+                  ใช้อ้างอิงอัตราค่าตอบแทนรายชั่วโมง ภาษี 5% และรหัส Cost Center ในแบบฟอร์มเบิกจ่ายเมนูที่ 2
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                  Cost Center หลัก (มุมขวาบนแบบฟอร์ม)
+                </label>
+                <input
+                  type="text"
+                  value={defaultCostCenter}
+                  onChange={(e) => setDefaultCostCenter(e.target.value)}
+                  placeholder="เช่น 2012000000"
+                  className="w-full text-xs rounded-lg border border-violet-200 py-1.5 px-2.5 font-mono font-bold text-gray-900 bg-white"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-[11px] font-semibold text-gray-700 mb-1">
+                  ชื่อผู้ควบคุม (หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก บนแบบฟอร์มจ่าย OT)
+                </label>
+                <input
+                  type="text"
+                  value={otControllerName}
+                  onChange={(e) => setOtControllerName(e.target.value)}
+                  placeholder={DEFAULT_OT_CONTROLLER_NAME}
+                  className="w-full text-xs rounded-lg border border-violet-200 py-1.5 px-2.5 font-semibold text-gray-900 bg-white"
+                />
+              </div>
+            </div>
+
+            <div>
+              <span className="block text-[11px] font-bold text-violet-950 mb-2">
+                อัตราค่าตอบแทน OT ต่อชั่วโมง (บาท/ชั่วโมง • ครอบคลุมทั้งประจำและจ้างรายวัน)
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">พยาบาล (HN/RN)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={otRateNurse}
+                    onChange={(e) => setOtRateNurse(Number(e.target.value))}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-bold text-blue-900 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">ผู้ช่วยพยาบาล (PN)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={otRatePn}
+                    onChange={(e) => setOtRatePn(Number(e.target.value))}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-bold text-teal-900 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">ผู้ช่วยคนไข้ (NA)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={otRateNa}
+                    onChange={(e) => setOtRateNa(Number(e.target.value))}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-bold text-emerald-900 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">ผู้ปฏิบัติงานทั่วไป</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={otRateClerk}
+                    onChange={(e) => setOtRateClerk(Number(e.target.value))}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-bold text-amber-900 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-700 mb-1">พนักงานบริการ</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={otRateServiceWorker}
+                    onChange={(e) => setOtRateServiceWorker(Number(e.target.value))}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-bold text-gray-900 bg-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white/90 rounded-lg border border-violet-200/80 p-3 space-y-2">
+              <div className="text-[11px] font-bold text-gray-800">
+                กำหนด Cost Center เฉพาะห้องตรวจ (ถ้าต่างจากค่าหลัก)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                <div className="sm:col-span-5">
+                  <select
+                    value={selectedCostCenterClinic}
+                    onChange={(e) => {
+                      const c = e.target.value;
+                      setSelectedCostCenterClinic(c);
+                      setClinicCostCenterDraft(clinicCostCenters[c] || '');
+                    }}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium"
+                  >
+                    {allClinicsForFilter.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="sm:col-span-5">
+                  <input
+                    type="text"
+                    value={clinicCostCenterDraft}
+                    onChange={(e) => setClinicCostCenterDraft(e.target.value)}
+                    placeholder={`ระบุ Cost Center ของ ${selectedCostCenterClinic}`}
+                    className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-mono bg-white"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!selectedCostCenterClinic) return;
+                      const trimmed = clinicCostCenterDraft.trim();
+                      setClinicCostCenters((prev) => {
+                        const next = { ...prev };
+                        if (trimmed) next[selectedCostCenterClinic] = trimmed;
+                        else delete next[selectedCostCenterClinic];
+                        return next;
+                      });
+                    }}
+                    className="w-full py-1.5 px-2.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold rounded-lg cursor-pointer"
+                  >
+                    กำหนด/อัปเดต
+                  </button>
+                </div>
+              </div>
+              {Object.keys(clinicCostCenters).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {Object.entries(clinicCostCenters).map(([cl, cc]) => (
+                    <span
+                      key={cl}
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-violet-100 text-violet-900 text-[11px] font-medium"
+                    >
+                      <span>{cl}: <strong className="font-mono">{cc}</strong></span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setClinicCostCenters((prev) => {
+                            const next = { ...prev };
+                            delete next[cl];
+                            return next;
+                          })
+                        }
+                        className="text-violet-600 hover:text-red-600 cursor-pointer"
+                        title="ลบ Cost Center เฉพาะห้องนี้"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div>
             <label className="block text-xs font-semibold text-gray-700 mb-1">
               Admin_Emails (อีเมลผู้มีสิทธิ์ดูแลระบบ คั่นด้วยเครื่องหมายจุลภาค ,)
@@ -1954,7 +2232,19 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </div>
 
             <div className="space-y-3 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">รหัสบุคลากร</label>
+                  <input
+                    type="text"
+                    placeholder="เช่น 20708302"
+                    value={editingStaff.employeeCode || ''}
+                    onChange={(e) =>
+                      setEditingStaff({ ...editingStaff, employeeCode: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-mono font-semibold"
+                  />
+                </div>
                 <div className="sm:col-span-2">
                   <label className="block font-semibold text-gray-700 mb-1">ชื่อ - นามสกุล</label>
                   <input
@@ -2073,6 +2363,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   if (!editingStaff.name.trim()) return;
                   onUpdateStaff({
                     ...editingStaff,
+                    employeeCode: (editingStaff.employeeCode || '').trim() || undefined,
                     name: editingStaff.name.trim(),
                   });
                   setEditingStaff(null);

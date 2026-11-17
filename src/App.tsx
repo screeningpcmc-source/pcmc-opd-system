@@ -2019,6 +2019,7 @@ export default function App() {
             outTimeClinics={outTimeClinics}
             leaveTypes={leaveTypes}
             customHolidays={db.settings.customHolidays || []}
+            settings={db.settings}
             isAdmin={isAdmin}
             onSaveLeave={handleSaveLeave}
             onSaveBatchOT={handleSaveBatchOT}

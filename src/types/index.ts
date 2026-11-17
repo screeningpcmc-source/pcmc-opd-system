@@ -115,6 +115,7 @@ export type LeaveType = string;
 
 export interface StaffMember {
   staffId: string;
+  employeeCode?: string; // รหัสบุคลากร (เช่น 20708302)
   name: string;
   position: StaffPosition;
   homeClinic: string;
@@ -328,9 +329,11 @@ export interface OTAttendance {
   date: string;
   shift: WorkShift;
   staffName: string;
+  employeeCode?: string; // รหัสบุคลากร
   position: StaffPosition;
   homeClinic: string;
   workClinic: string;
+  hours?: number; // จำนวนชั่วโมงที่ปฏิบัติงานจริง (เช่น 4, 4.5, 5, 6, 7, 8)
   isExternal?: boolean; // true if substitute staff from outside OPD
   affiliation?: string; // สังกัด / หน่วยงานต้นสังกัด
   lastEditedAt?: string;
@@ -379,6 +382,59 @@ export interface SystemSettings {
   leaveTypes?: string[];
   customHolidays?: CustomHoliday[];
   autoSync?: boolean;
+  defaultCostCenter?: string;
+  clinicCostCenters?: Record<string, string>;
+  otHourlyRates?: Partial<Record<StaffPosition, number>>;
+  otControllerName?: string;
+}
+
+export const DEFAULT_OT_COST_CENTER = '2012000000';
+export const DEFAULT_OT_CONTROLLER_NAME = 'นางสาว ประภัสสร พันธุ์วา';
+
+export const DEFAULT_OT_HOURLY_RATES: Record<StaffPosition, number> = {
+  HN: 150,
+  RN: 150,
+  'RN (Daily Wage)': 150,
+  PN: 95,
+  'PN (Daily Wage)': 95,
+  NA: 95,
+  PCA: 95,
+  'NA (Daily Wage)': 95,
+  Clerk: 75,
+  'Clerk (Daily Wage)': 75,
+  'Service Worker': 75,
+  'Service Worker (Daily Wage)': 75,
+};
+
+export function getOtHourlyRate(
+  position: StaffPosition | string,
+  customRates?: Partial<Record<StaffPosition, number>>
+): number {
+  const norm = normalizeStaffPosition(position);
+  const custom = Number(customRates?.[norm]);
+  if (Number.isFinite(custom) && custom > 0) return custom;
+  return DEFAULT_OT_HOURLY_RATES[norm] ?? 95;
+}
+
+export function getDefaultOtHoursForShift(shift?: WorkShift | string, stdHr: number = 7): number {
+  const s = (shift || '').trim();
+  if (s === 'นอกเวลาเย็น 16:00-20:00' || s === 'นอกเวลาวันหยุด 08:00-12:00') {
+    return 4;
+  }
+  if (s === 'OT ในเวลาราชการ 08:00-16:00' || s === 'ในเวลา 08:00-16:00') {
+    return Number.isFinite(stdHr) && stdHr > 0 ? stdHr : 7;
+  }
+  return 4;
+}
+
+export function formatOtPaySheetPositionLabel(pos: StaffPosition | string): string {
+  const norm = normalizeStaffPosition(pos);
+  if (norm === 'HN' || norm === 'RN' || norm === 'RN (Daily Wage)') return 'พยาบาล';
+  if (norm === 'PN' || norm === 'PN (Daily Wage)') return 'ผู้ช่วยพยาบาล';
+  if (norm === 'NA' || norm === 'PCA' || norm === 'NA (Daily Wage)') return 'ผู้ช่วยคนไข้';
+  if (norm === 'Clerk' || norm === 'Clerk (Daily Wage)') return 'ผู้ปฏิบัติงานทั่วไป';
+  if (norm === 'Service Worker' || norm === 'Service Worker (Daily Wage)') return 'พนักงานบริการ';
+  return pos;
 }
 
 export const SCREENING_CLINIC_NAME = 'หน่วยคัดกรอง';
@@ -673,16 +729,38 @@ export function parseOtWorkClinic(raw?: string): {
   clinic: string;
   amount: number;
   periodLabel: HalfDayPeriod;
+  hours?: number;
 } {
-  const txt = (raw || '').trim();
+  let txt = (raw || '').trim();
   if (!txt) return { clinic: '', amount: 1, periodLabel: '' };
+
+  let parsedHours: number | undefined;
+  const hrMatch = txt.match(/^(.*?)\s*\((\d+(?:\.\d+)?)\s*ชม\.\)\s*$/);
+  if (hrMatch) {
+    const h = Number(hrMatch[2]);
+    if (Number.isFinite(h) && h > 0) {
+      parsedHours = h;
+      txt = hrMatch[1].trim();
+    }
+  }
+
   const m = txt.match(/^(.*?)\s*\(0\.5\s*(ครึ่งวันเช้า|ครึ่งวันบ่าย|เช้า|บ่าย)\)\s*$/);
   if (m) {
     const clinic = m[1].trim();
     const p: HalfDayPeriod = m[2].includes('บ่าย') ? 'ครึ่งวันบ่าย' : 'ครึ่งวันเช้า';
-    return { clinic, amount: 0.5, periodLabel: p };
+    return {
+      clinic,
+      amount: 0.5,
+      periodLabel: p,
+      ...(parsedHours !== undefined ? { hours: parsedHours } : {}),
+    };
   }
-  return { clinic: txt, amount: 1, periodLabel: '' };
+  return {
+    clinic: txt,
+    amount: 1,
+    periodLabel: '',
+    ...(parsedHours !== undefined ? { hours: parsedHours } : {}),
+  };
 }
 
 export function formatOtWorkClinicValue(
@@ -690,12 +768,43 @@ export function formatOtWorkClinicValue(
   amount: number = 1,
   periodLabel?: HalfDayPeriod
 ): string {
-  const clean = (clinic || '').trim();
+  const parsed = parseOtWorkClinic(clinic);
+  const clean = parsed.clinic;
   if (!clean) return '';
   if (amount === 0.5 && (periodLabel === 'ครึ่งวันเช้า' || periodLabel === 'ครึ่งวันบ่าย')) {
     return `${clean} (0.5 ${periodLabel})`;
   }
   return clean;
+}
+
+export function formatOtWorkClinicForSheet(
+  rawWorkClinic: string,
+  hours?: number,
+  shift?: WorkShift | string
+): string {
+  const parsed = parseOtWorkClinic(rawWorkClinic);
+  const baseClinic = formatOtWorkClinicValue(parsed.clinic, parsed.amount, parsed.periodLabel);
+  if (!baseClinic) return '';
+  const defaultHrs = getDefaultOtHoursForShift(shift);
+  const effectiveHrs =
+    hours !== undefined && Number.isFinite(Number(hours)) && Number(hours) > 0
+      ? Number(hours)
+      : parsed.hours;
+  if (effectiveHrs !== undefined && Math.abs(effectiveHrs - defaultHrs) > 0.001) {
+    return `${baseClinic} (${effectiveHrs} ชม.)`;
+  }
+  return baseClinic;
+}
+
+export function getEffectiveOtHours(
+  ot: Pick<OTAttendance, 'hours' | 'shift' | 'workClinic'>,
+  stdHr: number = 7
+): number {
+  const explicit = Number(ot.hours);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const parsed = parseOtWorkClinic(ot.workClinic);
+  if (parsed.hours !== undefined && parsed.hours > 0) return parsed.hours;
+  return getDefaultOtHoursForShift(ot.shift, stdHr);
 }
 
 export interface WorkloadLeavePayload {

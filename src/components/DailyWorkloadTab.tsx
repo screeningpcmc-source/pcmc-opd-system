@@ -163,13 +163,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [childPt, setChildPt] = useState<number>(0);
   const [admit, setAdmit] = useState<number>(0);
 
-  // Staff on duty (supports 0.5 steps)
+  // Staff on duty (supports 0.5 steps; automatically defaulted from active clinic roster)
   const [hn, setHn] = useState<number>(0);
-  const [rn, setRn] = useState<number>(2);
-  const [pn, setPn] = useState<number>(1);
-  const [na, setNa] = useState<number>(1);
-  const [clerk, setClerk] = useState<number>(1);
-  const [serviceWorker, setServiceWorker] = useState<number>(1);
+  const [rn, setRn] = useState<number>(0);
+  const [pn, setPn] = useState<number>(0);
+  const [na, setNa] = useState<number>(0);
+  const [clerk, setClerk] = useState<number>(0);
+  const [serviceWorker, setServiceWorker] = useState<number>(0);
 
   // Notes & Reporter (empty by default & required)
   const [note, setNote] = useState<string>('');
@@ -378,6 +378,65 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       },
     }));
   };
+
+  const baselinePositionCounts = useMemo(() => {
+    const normalizeUnit = (c?: string) => {
+      const trimmed = (c || '').trim();
+      if (!trimmed) return '';
+      if (
+        isPremiumGroupName(trimmed) ||
+        isPremiumPoolClinicName(trimmed) ||
+        /-Premium$/i.test(trimmed) ||
+        premiumSubClinics.includes(trimmed)
+      ) {
+        return PREMIUM_CLINIC_GROUP;
+      }
+      return trimmed;
+    };
+    const targetUnit = normalizeUnit(clinic);
+    const counts = { hn: 0, rn: 0, pn: 0, na: 0, clerk: 0, serviceWorker: 0 };
+    staffList.forEach(s => {
+      if (s.status !== 'Active') return;
+      if (s.startDate && s.startDate > date) return;
+      if (s.endDate && s.endDate < date) return;
+      if (isDailyWorkloadExcludedPosition(s.position)) return;
+      if (normalizeUnit(s.homeClinic) !== targetUnit) return;
+      const pos = normalizeStaffPosition(s.position);
+      if (pos === 'RN') counts.rn += 1;
+      else if (pos === 'PN') counts.pn += 1;
+      else if (pos === 'NA') counts.na += 1;
+      else if (pos === 'Clerk') counts.clerk += 1;
+      else if (pos === 'Service Worker') counts.serviceWorker += 1;
+    });
+    return counts;
+  }, [staffList, clinic, date, premiumSubClinics]);
+
+  useEffect(() => {
+    if (isOutTime) {
+      setHn(0);
+      setRn(0);
+      setPn(0);
+      setNa(0);
+      setClerk(0);
+      setServiceWorker(0);
+      return;
+    }
+    if (isPremiumClinic && existingPremiumPool) {
+      setHn(0);
+      setRn(existingPremiumPool.rn || 0);
+      setPn(existingPremiumPool.pn || 0);
+      setNa(existingPremiumPool.na ?? existingPremiumPool.pca ?? 0);
+      setClerk(existingPremiumPool.clerk || 0);
+      setServiceWorker(existingPremiumPool.serviceWorker || 0);
+      return;
+    }
+    setHn(0);
+    setRn(baselinePositionCounts.rn);
+    setPn(baselinePositionCounts.pn);
+    setNa(baselinePositionCounts.na);
+    setClerk(baselinePositionCounts.clerk);
+    setServiceWorker(baselinePositionCounts.serviceWorker);
+  }, [isOutTime, isPremiumClinic, existingPremiumPool, baselinePositionCounts]);
 
   useEffect(() => {
     if (
@@ -1139,11 +1198,17 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
     onSaveWorkload(newEntry, leaveData, crossCoverageData, trainingData);
 
-    // Reset sensitive fields
+    // Reset sensitive fields & restore active clinic roster defaults
     setTotalPt(0);
     setAdultPt(0);
     setChildPt(0);
     setAdmit(0);
+    setHn(0);
+    setRn(isOutTime ? 0 : baselinePositionCounts.rn);
+    setPn(isOutTime ? 0 : baselinePositionCounts.pn);
+    setNa(isOutTime ? 0 : baselinePositionCounts.na);
+    setClerk(isOutTime ? 0 : baselinePositionCounts.clerk);
+    setServiceWorker(isOutTime ? 0 : baselinePositionCounts.serviceWorker);
     setReferralInputs(createEmptyReferralData());
     setNote('');
     setHasStaffLeave(false);

@@ -27,6 +27,15 @@ import {
   parseOtWorkClinic,
   formatOtWorkClinicValue,
   HalfDayPeriod,
+  SystemSettings,
+  DEFAULT_OT_COST_CENTER,
+  DEFAULT_OT_CONTROLLER_NAME,
+  getOtHourlyRate,
+  getDefaultOtHoursForShift,
+  formatOtPaySheetPositionLabel,
+  getEffectiveOtHours,
+  normalizeStaffPosition,
+  compareStaffByPositionAndStartDate as _compareRoster,
 } from '../types';
 import {
   CalendarClock,
@@ -57,6 +66,7 @@ import {
   Printer,
   History,
   List,
+  ReceiptText,
 } from 'lucide-react';
 import {
   formatThaiLeaveRange,
@@ -71,6 +81,7 @@ import {
   countGovernmentWorkdaysInRange,
   getHolidaysForYear,
 } from '../utils/thaiHolidays';
+import { numberToThaiBahtText } from '../utils/thaiBahtText';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
 
@@ -154,6 +165,7 @@ interface LeaveAndOTTabProps {
   outTimeClinics?: string[];
   leaveTypes?: string[];
   customHolidays?: CustomHoliday[];
+  settings?: SystemSettings;
   isAdmin?: boolean;
   onSaveLeave: (leave: LeaveRecord) => void;
   onSaveBatchOT: (records: OTAttendance[]) => void;
@@ -165,10 +177,42 @@ interface LeaveAndOTTabProps {
 
 interface ExternalOtDraft {
   tempId: string;
+  employeeCode?: string;
   name: string;
   position: StaffPosition;
   affiliation: string;
+  hours: number;
 }
+
+const formatOtHourNum = (h: number): string => {
+  const rounded = Math.round(h * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+};
+
+const formatOtMoney = (amt: number): string => {
+  return (Math.round(amt * 100) / 100).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
+const formatOtOfficialClinicName = (clinic: string): string => {
+  const c = (clinic || '').trim();
+  if (!c || c === 'ALL') return 'ทุกห้องตรวจ';
+  if (c.startsWith('ตรวจ')) return `ห้อง${c}`;
+  if (/^(ห้อง|หน่วย|ศูนย์|คลินิก)/.test(c)) return c;
+  return `ห้องตรวจ${c}`;
+};
+
+const getOtPayGroupRank = (pos: StaffPosition | string): number => {
+  const norm = normalizeStaffPosition(pos);
+  if (norm === 'HN' || norm === 'RN' || norm === 'RN (Daily Wage)') return 1;
+  if (norm === 'PN' || norm === 'PN (Daily Wage)') return 2;
+  if (norm === 'NA' || norm === 'PCA' || norm === 'NA (Daily Wage)') return 3;
+  if (norm === 'Clerk' || norm === 'Clerk (Daily Wage)') return 4;
+  if (norm === 'Service Worker' || norm === 'Service Worker (Daily Wage)') return 5;
+  return 9;
+};
 
 export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   staffList,
@@ -180,6 +224,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   outTimeClinics = [...OUT_TIME_CLINICS],
   leaveTypes = [...LEAVE_TYPES],
   customHolidays = [],
+  settings,
   isAdmin = false,
   onSaveLeave,
   onSaveBatchOT,
@@ -190,12 +235,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
 
-  const [activeSubTab, setActiveSubTab] = useState<'leave' | 'ot' | 'fiscalSummary'>('leave');
+  const [activeSubTab, setActiveSubTab] = useState<'leave' | 'ot' | 'fiscalSummary' | 'otPayReport'>('leave');
   const [summaryReportMode, setSummaryReportMode] = useState<'ALL' | 'WORK_OT' | 'LEAVE_REPORT'>('ALL');
   const [onlyStaffWithLeaves, setOnlyStaffWithLeaves] = useState<boolean>(false);
   const [isExportingLeaveJpeg, setIsExportingLeaveJpeg] = useState<boolean>(false);
-  const [printTarget, setPrintTarget] = useState<'NONE' | 'LEAVE_REPORT'>('NONE');
+  const [isExportingOtPayJpeg, setIsExportingOtPayJpeg] = useState<boolean>(false);
+  const [printTarget, setPrintTarget] = useState<'NONE' | 'LEAVE_REPORT' | 'OT_PAY_REPORT'>('NONE');
   const leaveReportRef = useRef<HTMLDivElement | null>(null);
+  const otPaymentReportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const handleAfterPrint = () => setPrintTarget('NONE');
@@ -386,18 +433,26 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     setLeaveFormError('');
   };
 
-  // --- Sub-Tab 2: OT Entry State (Multi-Select + External Substitute) ---
+  // --- Sub-Tab 2: OT Entry State (Multi-Select + Exact Hours + External Substitute) ---
   const [otDate, setOtDate] = useState<string>(todayStr);
   const [otShift, setOtShift] = useState<WorkShift>('นอกเวลาเย็น 16:00-20:00');
+  const [otHours, setOtHours] = useState<number>(() =>
+    getDefaultOtHoursForShift('นอกเวลาเย็น 16:00-20:00', settings?.stdHr)
+  );
   const [selectedStaffIds, setSelectedStaffIds] = useState<string[]>([]);
+  const [selectedOtHoursByStaffId, setSelectedOtHoursByStaffId] = useState<Record<string, number>>({});
   const [workClinic, setWorkClinic] = useState<string>(outTimeClinics[0] || OUT_TIME_CLINICS[0]);
   const [otSearch, setOtSearch] = useState<string>('');
   const [otFormError, setOtFormError] = useState<string>('');
 
   // External substitute staff state
+  const [extEmployeeCode, setExtEmployeeCode] = useState<string>('');
   const [extName, setExtName] = useState<string>('');
   const [extPosition, setExtPosition] = useState<StaffPosition>('RN');
   const [extAffiliation, setExtAffiliation] = useState<string>('');
+  const [extOtHours, setExtOtHours] = useState<number>(() =>
+    getDefaultOtHoursForShift('นอกเวลาเย็น 16:00-20:00', settings?.stdHr)
+  );
   const [extError, setExtError] = useState<string>('');
   const [externalOtStaff, setExternalOtStaff] = useState<ExternalOtDraft[]>([]);
 
@@ -414,6 +469,20 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [deleteOtReason, setDeleteOtReason] = useState<string>('');
   const [deleteOtReasonError, setDeleteOtReasonError] = useState<string>('');
   const [showOtAuditLog, setShowOtAuditLog] = useState<boolean>(false);
+
+  // --- Sub-Tab 4: OT Payment Sheet (Image 4 Form) State ---
+  const todayParts = parseIsoParts(todayStr);
+  const [otPayMonth, setOtPayMonth] = useState<number>(todayParts.m);
+  const [otPayYearBE, setOtPayYearBE] = useState<number>(todayParts.y + 543);
+  const [otPayClinic, setOtPayClinic] = useState<string>(
+    outTimeClinics[0] || OUT_TIME_CLINICS[0] || 'ตรวจโรคทั่วไป'
+  );
+  const [otPayShiftScope, setOtPayShiftScope] = useState<
+    'OUT_TIME' | 'ALL_OT' | WorkShift
+  >('OUT_TIME');
+  const [otPaySearch, setOtPaySearch] = useState<string>('');
+  const [otPayCostCenterOverride, setOtPayCostCenterOverride] = useState<string>('');
+  const [otPayControllerOverride, setOtPayControllerOverride] = useState<string>('');
 
   const otWorkClinicOptions = useMemo(() => {
     return allClinics;
@@ -550,10 +619,49 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     setLeaveStaffQuery('');
   };
 
+  const handleOtShiftChange = (nextShift: WorkShift) => {
+    setOtShift(nextShift);
+    const nextDefault = getDefaultOtHoursForShift(nextShift, settings?.stdHr);
+    setOtHours((prevBatch) => {
+      setSelectedOtHoursByStaffId((prevMap) => {
+        const nextMap = { ...prevMap };
+        selectedStaffIds.forEach((id) => {
+          if (nextMap[id] === undefined || Math.abs(nextMap[id] - prevBatch) < 0.001) {
+            nextMap[id] = nextDefault;
+          }
+        });
+        return nextMap;
+      });
+      return nextDefault;
+    });
+    setExtOtHours(nextDefault);
+  };
+
+  const handleBatchOtHoursChange = (rawVal: number) => {
+    const safeVal =
+      Number.isFinite(rawVal) && rawVal > 0 ? Math.min(24, Math.max(0.5, rawVal)) : 4;
+    setOtHours((prevBatch) => {
+      setSelectedOtHoursByStaffId((prevMap) => {
+        const nextMap = { ...prevMap };
+        selectedStaffIds.forEach((id) => {
+          if (nextMap[id] === undefined || Math.abs(nextMap[id] - prevBatch) < 0.001) {
+            nextMap[id] = safeVal;
+          }
+        });
+        return nextMap;
+      });
+      return safeVal;
+    });
+    setExtOtHours((prevExt) => (Math.abs(prevExt - otHours) < 0.001 ? safeVal : prevExt));
+  };
+
   // Handle Add External Staff to Batch OT
   const handleAddExternalStaff = () => {
     const trimmedName = extName.trim();
     const trimmedAff = extAffiliation.trim();
+    const trimmedCode = extEmployeeCode.trim();
+    const numericHours =
+      Number.isFinite(extOtHours) && extOtHours > 0 ? Math.min(24, extOtHours) : otHours;
     if (!trimmedName || !trimmedAff) {
       setExtError('กรุณากรอกทั้ง ชื่อ-สกุล และ สังกัด / หน่วยงานต้นสังกัด');
       return;
@@ -564,13 +672,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       ...prev,
       {
         tempId: `EXT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        ...(trimmedCode ? { employeeCode: trimmedCode } : {}),
         name: trimmedName,
         position: extPosition,
         affiliation: trimmedAff,
+        hours: numericHours,
       },
     ]);
+    setExtEmployeeCode('');
     setExtName('');
     setExtAffiliation('');
+    setExtOtHours(otHours);
   };
 
   // Handle Save Batch OT
@@ -584,14 +696,22 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
     const opdRecords: OTAttendance[] = selectedStaffIds.map((id) => {
       const staff = staffList.find((s) => s.staffId === id);
+      const pickedHrs = Number(selectedOtHoursByStaffId[id] ?? otHours);
+      const effectiveHrs =
+        Number.isFinite(pickedHrs) && pickedHrs > 0
+          ? pickedHrs
+          : getDefaultOtHoursForShift(otShift, settings?.stdHr);
+      const empCode = (staff?.employeeCode || '').trim();
       return {
         id: `OT-${Date.now()}-${id}`,
         date: otDate,
         shift: otShift,
         staffName: staff ? staff.name : id,
+        ...(empCode ? { employeeCode: empCode } : {}),
         position: staff ? staff.position : 'RN',
         homeClinic: staff ? staff.homeClinic : 'OPD',
         workClinic,
+        hours: effectiveHrs,
         isExternal: false,
       };
     });
@@ -601,27 +721,39 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       date: otDate,
       shift: otShift,
       staffName: ext.name,
+      ...(ext.employeeCode ? { employeeCode: ext.employeeCode } : {}),
       position: ext.position,
       homeClinic: ext.affiliation,
       workClinic,
+      hours: Number.isFinite(ext.hours) && ext.hours > 0 ? ext.hours : otHours,
       isExternal: true,
       affiliation: ext.affiliation,
     }));
 
     onSaveBatchOT([...opdRecords, ...extRecords]);
     setSelectedStaffIds([]);
+    setSelectedOtHoursByStaffId({});
     setExternalOtStaff([]);
   };
 
   const toggleSelectStaff = (id: string) => {
     setOtFormError('');
-    setSelectedStaffIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
+    setSelectedStaffIds((prev) => {
+      const exists = prev.includes(id);
+      if (exists) {
+        return prev.filter((x) => x !== id);
+      }
+      setSelectedOtHoursByStaffId((prevMap) => ({
+        ...prevMap,
+        [id]: prevMap[id] ?? otHours,
+      }));
+      return [...prev, id];
+    });
   };
 
   const clearSelectedStaff = () => {
     setSelectedStaffIds([]);
+    setSelectedOtHoursByStaffId({});
     setExternalOtStaff([]);
   };
 
@@ -1167,6 +1299,272 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }, 60);
   };
 
+  // --- Sub-Tab 4: OT Payment Report Calculation (Image 4 Official Form) ---
+  const otPayYearBEOptions = useMemo(() => {
+    const years = new Set<number>([2568, 2569, 2570, 2571, 2572, todayParts.y + 543]);
+    otRecords.forEach((o) => {
+      const y = Number((o.date || '').slice(0, 4));
+      if (Number.isFinite(y) && y > 2000) years.add(y + 543);
+    });
+    return Array.from(years).sort((a, b) => a - b);
+  }, [otRecords, todayParts.y]);
+
+  const otPayClinicOptions = useMemo(() => {
+    const fromRecords = otRecords
+      .map((o) => parseOtWorkClinic(o.workClinic).clinic)
+      .filter(Boolean);
+    return Array.from(new Set([...outTimeClinics, ...allClinics, ...fromRecords]));
+  }, [otRecords, outTimeClinics, allClinics]);
+
+  const resolvedOtPayCostCenter = useMemo(() => {
+    if (otPayCostCenterOverride.trim()) return otPayCostCenterOverride.trim();
+    if (otPayClinic !== 'ALL') {
+      const mapped = (settings?.clinicCostCenters?.[otPayClinic] || '').trim();
+      if (mapped) return mapped;
+    }
+    return (settings?.defaultCostCenter || '').trim() || DEFAULT_OT_COST_CENTER;
+  }, [otPayCostCenterOverride, otPayClinic, settings]);
+
+  const resolvedOtPayControllerName = useMemo(() => {
+    if (otPayControllerOverride.trim()) return otPayControllerOverride.trim();
+    return (settings?.otControllerName || '').trim() || DEFAULT_OT_CONTROLLER_NAME;
+  }, [otPayControllerOverride, settings]);
+
+  const otPaymentReportData = useMemo(() => {
+    const yearAD = otPayYearBE - 543;
+    const monthStr = String(otPayMonth).padStart(2, '0');
+    const monthPrefix = `${yearAD}-${monthStr}-`;
+    const daysInMonth = new Date(yearAD, otPayMonth, 0).getDate();
+    const holidayMap = getHolidaysForYear(yearAD, customHolidays);
+
+    const dayColumns = Array.from({ length: daysInMonth }, (_, i) => {
+      const dayNum = i + 1;
+      const iso = `${yearAD}-${monthStr}-${String(dayNum).padStart(2, '0')}`;
+      const dow = new Date(Date.UTC(yearAD, otPayMonth - 1, dayNum)).getUTCDay();
+      const holiday = holidayMap.get(iso);
+      const isShaded = dow === 0 || dow === 6 || Boolean(holiday);
+      return {
+        dayNum,
+        iso,
+        dow,
+        isShaded,
+        holidayName: holiday?.name || '',
+      };
+    });
+
+    const staffByName = new Map<string, StaffMember>();
+    const rosterRankMap = new Map<string, number>();
+    [...staffList].sort(_compareRoster).forEach((s, idx) => {
+      const key = (s.name || '').trim();
+      if (key) {
+        if (!staffByName.has(key)) staffByName.set(key, s);
+        if (!rosterRankMap.has(key)) rosterRankMap.set(key, idx);
+      }
+    });
+
+    const grouped = new Map<
+      string,
+      {
+        staffName: string;
+        employeeCode: string;
+        position: StaffPosition;
+        positionLabel: string;
+        dayHours: Record<number, number>;
+      }
+    >();
+
+    otRecords.forEach((o) => {
+      if (!(o.date || '').startsWith(monthPrefix)) return;
+      if (otPayShiftScope === 'OUT_TIME') {
+        if (
+          o.shift !== 'นอกเวลาเย็น 16:00-20:00' &&
+          o.shift !== 'นอกเวลาวันหยุด 08:00-12:00'
+        ) {
+          return;
+        }
+      } else if (otPayShiftScope !== 'ALL_OT' && o.shift !== otPayShiftScope) {
+        return;
+      }
+
+      const parsedWork = parseOtWorkClinic(o.workClinic);
+      if (otPayClinic !== 'ALL' && parsedWork.clinic !== otPayClinic) return;
+
+      const dayNum = Number((o.date || '').slice(8, 10));
+      if (!Number.isFinite(dayNum) || dayNum < 1 || dayNum > daysInMonth) return;
+
+      const cleanName = (o.staffName || '').trim();
+      const normPos = normalizeStaffPosition(o.position);
+      const posLabel = formatOtPaySheetPositionLabel(normPos);
+      const groupKey = `${cleanName}::${posLabel}`;
+      const hrs = getEffectiveOtHours(o, settings?.stdHr);
+      const matchedStaff = staffByName.get(cleanName);
+      const empCode =
+        (o.employeeCode || '').trim() || (matchedStaff?.employeeCode || '').trim();
+
+      let entry = grouped.get(groupKey);
+      if (!entry) {
+        entry = {
+          staffName: cleanName,
+          employeeCode: empCode,
+          position: normPos,
+          positionLabel: posLabel,
+          dayHours: {},
+        };
+        grouped.set(groupKey, entry);
+      } else if (!entry.employeeCode && empCode) {
+        entry.employeeCode = empCode;
+      }
+      entry.dayHours[dayNum] = Math.round(((entry.dayHours[dayNum] || 0) + hrs) * 100) / 100;
+    });
+
+    const q = otPaySearch.trim().toLowerCase();
+    const rows = Array.from(grouped.values())
+      .filter((r) => {
+        if (!q) return true;
+        return (
+          r.staffName.toLowerCase().includes(q) ||
+          r.employeeCode.toLowerCase().includes(q) ||
+          r.positionLabel.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => {
+        const rankDiff = getOtPayGroupRank(a.position) - getOtPayGroupRank(b.position);
+        if (rankDiff !== 0) return rankDiff;
+        const idxA = rosterRankMap.get(a.staffName) ?? 99999;
+        const idxB = rosterRankMap.get(b.staffName) ?? 99999;
+        if (idxA !== idxB) return idxA - idxB;
+        return a.staffName.localeCompare(b.staffName, 'th');
+      })
+      .map((r) => {
+        const totalHours =
+          Math.round(
+            Object.values(r.dayHours).reduce((sum, h) => sum + (Number(h) || 0), 0) * 100
+          ) / 100;
+        const hourlyRate = getOtHourlyRate(r.position, settings?.otHourlyRates);
+        const grossAmount = Math.round(totalHours * hourlyRate * 100) / 100;
+        const taxAmount = Math.round(grossAmount * 0.05 * 100) / 100;
+        const netAmount = Math.round((grossAmount - taxAmount) * 100) / 100;
+        return {
+          ...r,
+          totalHours,
+          hourlyRate,
+          grossAmount,
+          taxAmount,
+          netAmount,
+        };
+      });
+
+    const grandTotalHours =
+      Math.round(rows.reduce((s, r) => s + r.totalHours, 0) * 100) / 100;
+    const grandTotalGross =
+      Math.round(rows.reduce((s, r) => s + r.grossAmount, 0) * 100) / 100;
+    const grandTotalTax =
+      Math.round(rows.reduce((s, r) => s + r.taxAmount, 0) * 100) / 100;
+    const grandTotalNet =
+      Math.round(rows.reduce((s, r) => s + r.netAmount, 0) * 100) / 100;
+    const missingCodeCount = rows.filter((r) => !r.employeeCode).length;
+
+    return {
+      yearAD,
+      daysInMonth,
+      dayColumns,
+      rows,
+      grandTotalHours,
+      grandTotalGross,
+      grandTotalTax,
+      grandTotalNet,
+      bahtText: numberToThaiBahtText(grandTotalGross),
+      missingCodeCount,
+    };
+  }, [
+    otPayYearBE,
+    otPayMonth,
+    otPayClinic,
+    otPayShiftScope,
+    otPaySearch,
+    otRecords,
+    staffList,
+    customHolidays,
+    settings?.stdHr,
+    settings?.otHourlyRates,
+  ]);
+
+  const exportOtPayReportCsv = () => {
+    const monthName = THAI_MONTHS[otPayMonth - 1] || String(otPayMonth);
+    const headers = [
+      'ลำดับที่',
+      'รหัสบุคลากร',
+      'ชื่อ สกุล',
+      'ตำแหน่ง',
+      ...otPaymentReportData.dayColumns.map((d) => String(d.dayNum)),
+      'อัตรา/ชั่วโมง',
+      'จำนวนชั่วโมง',
+      'จำนวนเงินที่เบิก',
+      'หักภาษี 5%',
+      'จำนวนเงินคงเหลือ',
+    ];
+    const rows = otPaymentReportData.rows.map((r, i) => [
+      i + 1,
+      `"${r.employeeCode}"`,
+      `"${r.staffName}"`,
+      `"${r.positionLabel}"`,
+      ...otPaymentReportData.dayColumns.map((d) =>
+        r.dayHours[d.dayNum] ? formatOtHourNum(r.dayHours[d.dayNum]) : ''
+      ),
+      r.hourlyRate,
+      formatOtHourNum(r.totalHours),
+      r.grossAmount.toFixed(2),
+      r.taxAmount.toFixed(2),
+      r.netAmount.toFixed(2),
+    ]);
+    const totalRow = [
+      `"รวม (${otPaymentReportData.bahtText})"`,
+      '""',
+      '""',
+      '""',
+      ...otPaymentReportData.dayColumns.map(() => ''),
+      '"รวม"',
+      formatOtHourNum(otPaymentReportData.grandTotalHours),
+      otPaymentReportData.grandTotalGross.toFixed(2),
+      otPaymentReportData.grandTotalTax.toFixed(2),
+      otPaymentReportData.grandTotalNet.toFixed(2),
+    ];
+    const csvContent =
+      '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(',')), totalRow.join(',')].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute(
+      'download',
+      `หลักฐานจ่ายค่าตอบแทนOT_${otPayClinic === 'ALL' ? 'ทุกห้องตรวจ' : otPayClinic}_${monthName}_${otPayYearBE}.csv`
+    );
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleExportOtPayJpeg = async () => {
+    if (!otPaymentReportRef.current || isExportingOtPayJpeg) return;
+    setIsExportingOtPayJpeg(true);
+    try {
+      const monthName = THAI_MONTHS[otPayMonth - 1] || String(otPayMonth);
+      await exportElementAsJpeg(
+        otPaymentReportRef.current,
+        `หลักฐานจ่ายค่าตอบแทนOT_${otPayClinic === 'ALL' ? 'ทุกห้องตรวจ' : otPayClinic}_${monthName}_${otPayYearBE}.jpeg`
+      );
+    } finally {
+      setIsExportingOtPayJpeg(false);
+    }
+  };
+
+  const handlePrintOtPayReport = () => {
+    setPrintTarget('OT_PAY_REPORT');
+    setTimeout(() => {
+      window.print();
+    }, 60);
+  };
+
   return (
     <div className="space-y-6">
       {/* Tab Header Banner (Hidden on Print) */}
@@ -1186,7 +1584,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         </div>
 
         {/* Sub Navigation Buttons */}
-        <div className="flex items-center gap-1 bg-white/90 p-1 rounded-xl border border-teal-200">
+        <div className="flex flex-wrap items-center gap-1 bg-white/90 p-1 rounded-xl border border-teal-200">
           <button
             type="button"
             onClick={() => setActiveSubTab('leave')}
@@ -1219,6 +1617,18 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             }`}
           >
             3) สรุป 12 เดือนปีงบประมาณ
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('otPayReport')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 ${
+              activeSubTab === 'otPayReport'
+                ? 'bg-indigo-700 text-white shadow-xs'
+                : 'text-gray-600 hover:text-indigo-800'
+            }`}
+          >
+            <ReceiptText className="w-3.5 h-3.5" />
+            <span>4) หลักฐานจ่ายค่าตอบแทน OT</span>
           </button>
         </div>
       </div>
@@ -2337,7 +2747,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     </label>
                     <select
                       value={otShift}
-                      onChange={(e) => setOtShift(e.target.value as WorkShift)}
+                      onChange={(e) => handleOtShiftChange(e.target.value as WorkShift)}
                       required
                       className="w-full text-xs rounded-lg border-gray-300 py-2 px-2.5 border bg-white font-medium"
                     >
@@ -2356,23 +2766,62 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   </div>
                 )}
 
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">
-                    ห้องตรวจที่ไปปฏิบัติงานจริง (Work Clinic) <span className="text-red-500">*</span>
-                  </label>
-                  <select
-                    value={workClinic}
-                    onChange={(e) => setWorkClinic(e.target.value)}
-                    required
-                    className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-teal-900"
-                  >
-                    {otWorkClinicOptions.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      ห้องตรวจที่ไปปฏิบัติงานจริง (Work Clinic) <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={workClinic}
+                      onChange={(e) => setWorkClinic(e.target.value)}
+                      required
+                      className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-teal-900"
+                    >
+                      {otWorkClinicOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-teal-700" />
+                      <span>จำนวนชั่วโมงปฏิบัติงานจริง (ชม./คน) *</span>
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="0.5"
+                        max="24"
+                        value={otHours}
+                        onChange={(e) => handleBatchOtHoursChange(Number(e.target.value))}
+                        className="w-20 text-xs font-extrabold text-center rounded-lg border border-teal-300 bg-teal-50/40 py-2 px-2 text-teal-950 focus:ring-2 focus:ring-teal-500 outline-none"
+                      />
+                      <div className="flex flex-wrap gap-1">
+                        {[4, 4.5, 5, 6, 7, 8].map((hPreset) => (
+                          <button
+                            key={hPreset}
+                            type="button"
+                            onClick={() => handleBatchOtHoursChange(hPreset)}
+                            className={`px-2 py-1 text-[11px] font-bold rounded-md border transition-colors cursor-pointer ${
+                              Math.abs(otHours - hPreset) < 0.001
+                                ? 'bg-teal-700 text-white border-teal-700'
+                                : 'bg-white text-gray-700 border-gray-300 hover:bg-teal-50'
+                            }`}
+                          >
+                            {hPreset}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
+                <p className="text-[10.5px] text-teal-800/90 -mt-2">
+                  กรณีปฏิบัติงานเกินเวลา (เช่น 4.5, 5 หรือ 6 ชม.) สามารถตั้งค่าหลักด้านบน หรือปรับชั่วโมงรายคนในรายการฝั่งขวาได้
+                </p>
 
                 {/* Ad-hoc External Substitute Staff Box */}
                 <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200/90 space-y-2.5">
@@ -2381,21 +2830,30 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     <span>เจ้าหน้าที่เฉพาะกิจ (กรณีที่ไม่ใช่คนของ OPD)</span>
                   </div>
                   <p className="text-[11px] text-indigo-800/90">
-                    ระบุชื่อ-สกุล และหน่วยงานต้นสังกัดของเจ้าหน้าที่ภายนอกที่มาช่วยปฏิบัติหน้าที่
+                    ระบุชื่อ-สกุล, รหัสบุคลากร (ถ้ามี), จำนวนชั่วโมง และหน่วยงานต้นสังกัดของเจ้าหน้าที่ภายนอก
                   </p>
 
                   <div className="space-y-2">
-                    <input
-                      type="text"
-                      value={extName}
-                      onChange={(e) => {
-                        setExtName(e.target.value);
-                        setExtError('');
-                      }}
-                      placeholder="ชื่อ-สกุล * (เช่น พว.สุภาภรณ์ ดีมาก)"
-                      className="w-full text-xs rounded-lg border-indigo-200 py-1.5 px-2.5 border bg-white"
-                    />
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        value={extName}
+                        onChange={(e) => {
+                          setExtName(e.target.value);
+                          setExtError('');
+                        }}
+                        placeholder="ชื่อ-สกุล * (เช่น พว.สุภาภรณ์ ดีมาก)"
+                        className="sm:col-span-2 w-full text-xs rounded-lg border-indigo-200 py-1.5 px-2.5 border bg-white"
+                      />
+                      <input
+                        type="text"
+                        value={extEmployeeCode}
+                        onChange={(e) => setExtEmployeeCode(e.target.value)}
+                        placeholder="รหัสบุคลากร (ถ้ามี)"
+                        className="w-full text-xs rounded-lg border-indigo-200 py-1.5 px-2.5 border bg-white font-mono"
+                      />
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
                       <select
                         value={extPosition}
                         onChange={(e) => setExtPosition(e.target.value as StaffPosition)}
@@ -2414,9 +2872,21 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                           setExtAffiliation(e.target.value);
                           setExtError('');
                         }}
-                        placeholder="สังกัด * (เช่น ER, ICU, Ward 5)"
+                        placeholder="สังกัด * (เช่น ER, ICU)"
                         className="w-full text-xs rounded-lg border-indigo-200 py-1.5 px-2.5 border bg-white"
                       />
+                      <div className="flex items-center gap-1 bg-white border border-indigo-200 rounded-lg px-2 py-1">
+                        <span className="text-[10px] font-bold text-indigo-800 shrink-0">ชม.:</span>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.5"
+                          max="24"
+                          value={extOtHours}
+                          onChange={(e) => setExtOtHours(Number(e.target.value) || 4)}
+                          className="w-full text-xs font-bold text-center outline-none"
+                        />
+                      </div>
                     </div>
                     {extError && (
                       <p className="text-[11px] text-red-600 flex items-center gap-1">
@@ -2447,9 +2917,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                           <div className="min-w-0">
                             <span className="font-bold text-gray-900 block truncate">
                               {ext.name}
+                              {ext.employeeCode ? (
+                                <span className="ml-1.5 text-[10px] font-mono text-indigo-700">
+                                  ({ext.employeeCode})
+                                </span>
+                              ) : null}
                             </span>
                             <span className="text-[10px] text-indigo-700">
-                              {formatPositionLabel(ext.position)} • สังกัด: {ext.affiliation}
+                              {formatPositionLabel(ext.position)} • สังกัด: {ext.affiliation} •{' '}
+                              <strong>{formatOtHourNum(ext.hours)} ชม.</strong>
                             </span>
                           </div>
                           <button
@@ -2521,7 +2997,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2.5" />
                     <input
                       type="text"
-                      placeholder="ค้นหาชื่อ, ตำแหน่ง, คลินิก..."
+                      placeholder="ค้นหาชื่อ, รหัส, ตำแหน่ง, คลินิก..."
                       value={otSearch}
                       onChange={(e) => setOtSearch(e.target.value)}
                       className="text-xs rounded-lg border-gray-200 pl-8 pr-3 py-1.5 border w-56"
@@ -2532,56 +3008,87 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 {/* Staff Items List */}
                 <div className="flex-1 min-h-0 max-h-[540px] lg:max-h-none overflow-y-auto space-y-1.5 pr-1">
                   {activeStaff
-                    .filter(
-                      (s) =>
-                        s.name.toLowerCase().includes(otSearch.toLowerCase()) ||
-                        s.position.toLowerCase().includes(otSearch.toLowerCase()) ||
-                        formatPositionLabel(s.position)
-                          .toLowerCase()
-                          .includes(otSearch.toLowerCase()) ||
-                        s.homeClinic.toLowerCase().includes(otSearch.toLowerCase())
-                    )
+                    .filter((s) => {
+                      const q = otSearch.toLowerCase().trim();
+                      if (!q) return true;
+                      return (
+                        s.name.toLowerCase().includes(q) ||
+                        (s.employeeCode || '').toLowerCase().includes(q) ||
+                        s.position.toLowerCase().includes(q) ||
+                        formatPositionLabel(s.position).toLowerCase().includes(q) ||
+                        s.homeClinic.toLowerCase().includes(q)
+                      );
+                    })
                     .map((s) => {
                       const isSelected = selectedStaffIds.includes(s.staffId);
+                      const personHours = selectedOtHoursByStaffId[s.staffId] ?? otHours;
                       return (
                         <div
                           key={s.staffId}
                           onClick={() => toggleSelectStaff(s.staffId)}
-                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-all ${
+                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 cursor-pointer transition-all ${
                             isSelected
                               ? 'bg-teal-50 border-teal-300 text-teal-950 font-medium'
                               : 'bg-slate-50/50 border-gray-100 hover:border-teal-200 text-gray-700'
                           }`}
                         >
-                          <div className="flex items-center gap-2.5">
+                          <div className="flex items-center gap-2.5 min-w-0">
                             {isSelected ? (
                               <CheckSquare className="w-4 h-4 text-teal-600 shrink-0" />
                             ) : (
                               <Square className="w-4 h-4 text-gray-300 shrink-0" />
                             )}
-                            <div>
-                              <span className="text-xs font-bold block">{s.name}</span>
-                              <span className="text-[11px] text-gray-500">
+                            <div className="min-w-0">
+                              <span className="text-xs font-bold block truncate">{s.name}</span>
+                              <span className="text-[11px] text-gray-500 block truncate">
+                                {s.employeeCode ? `รหัส: ${s.employeeCode} • ` : ''}
                                 สังกัด: {s.homeClinic}
                               </span>
                             </div>
                           </div>
 
-                          <span
-                            className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
-                              s.position === 'RN'
-                                ? 'bg-blue-100 text-blue-800'
-                                : s.position === 'PN'
-                                  ? 'bg-teal-100 text-teal-800'
-                                  : s.position === 'NA' || s.position === 'PCA'
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : isDailyWorkloadExcludedPosition(s.position)
-                                      ? 'bg-sky-100 text-sky-800'
-                                      : 'bg-gray-100 text-gray-800'
-                            }`}
-                          >
-                            {formatPositionLabel(s.position)}
-                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isSelected && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex items-center gap-1 bg-white border border-teal-300 rounded-lg px-1.5 py-0.5 shadow-2xs"
+                                title="ปรับจำนวนชั่วโมงปฏิบัติงานเฉพาะรายบุคคล"
+                              >
+                                <input
+                                  type="number"
+                                  step="0.5"
+                                  min="0.5"
+                                  max="24"
+                                  value={personHours}
+                                  onChange={(e) => {
+                                    const val = Number(e.target.value);
+                                    setSelectedOtHoursByStaffId((prev) => ({
+                                      ...prev,
+                                      [s.staffId]:
+                                        Number.isFinite(val) && val > 0 ? Math.min(24, val) : 0.5,
+                                    }));
+                                  }}
+                                  className="w-11 text-[11px] font-extrabold text-center text-teal-900 outline-none"
+                                />
+                                <span className="text-[10px] font-semibold text-teal-700">ชม.</span>
+                              </div>
+                            )}
+                            <span
+                              className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                                s.position === 'RN'
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : s.position === 'PN'
+                                    ? 'bg-teal-100 text-teal-800'
+                                    : s.position === 'NA' || s.position === 'PCA'
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : isDailyWorkloadExcludedPosition(s.position)
+                                        ? 'bg-sky-100 text-sky-800'
+                                        : 'bg-gray-100 text-gray-800'
+                              }`}
+                            >
+                              {formatPositionLabel(s.position)}
+                            </span>
+                          </div>
                         </div>
                       );
                     })}
@@ -2796,6 +3303,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                   {dayOts.slice(0, 3).map((o) => {
                                     const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
                                     const parsedWork = parseOtWorkClinic(o.workClinic);
+                                    const effHrs = getEffectiveOtHours(o, settings?.stdHr);
                                     return (
                                       <div
                                         key={o.id}
@@ -2804,10 +3312,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                             ? 'bg-cyan-50 text-cyan-900 border-cyan-200'
                                             : 'bg-purple-50 text-purple-900 border-purple-200'
                                         }`}
-                                        title={`${o.staffName} • ${o.shift} • ${o.workClinic}`}
+                                        title={`${o.staffName} • ${o.shift} • ${parsedWork.clinic} (${formatOtHourNum(effHrs)} ชม.)`}
                                       >
                                         {o.staffName.split(' ')[0]} → {parsedWork.clinic}
                                         {parsedWork.amount === 0.5 ? ' (0.5)' : ''}
+                                        {` • ${formatOtHourNum(effHrs)}ชม.`}
                                       </div>
                                     );
                                   })}
@@ -2846,6 +3355,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
                             const origin = o.affiliation || o.homeClinic;
                             const parsedWork = parseOtWorkClinic(o.workClinic);
+                            const effHrs = getEffectiveOtHours(o, settings?.stdHr);
                             return (
                               <div
                                 key={o.id}
@@ -2854,6 +3364,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 <div className="min-w-0 space-y-0.5">
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <span className="font-bold text-gray-900">{o.staffName}</span>
+                                    {o.employeeCode && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
+                                        {o.employeeCode}
+                                      </span>
+                                    )}
                                     {o.isExternal && (
                                       <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-100 text-indigo-800">
                                         เฉพาะกิจ
@@ -2878,6 +3393,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       {parsedWork.amount === 0.5 && parsedWork.periodLabel
                                         ? ` (0.5 ${parsedWork.periodLabel})`
                                         : ''}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                      {formatOtHourNum(effHrs)} ชม.
                                     </span>
                                   </div>
                                 </div>
@@ -2954,6 +3472,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               dayOts.map((o) => {
                                 const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
                                 const parsedWork = parseOtWorkClinic(o.workClinic);
+                                const effHrs = getEffectiveOtHours(o, settings?.stdHr);
                                 return (
                                   <div
                                     key={o.id}
@@ -2967,7 +3486,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                     <div className="text-[9px] opacity-80 truncate">{o.shift}</div>
                                     <div className="font-bold text-teal-900 truncate">
                                       → {parsedWork.clinic}
-                                      {parsedWork.amount === 0.5 ? ` (0.5)` : ''}
+                                      {parsedWork.amount === 0.5 ? ` (0.5)` : ''} • {formatOtHourNum(effHrs)} ชม.
                                     </div>
                                   </div>
                                 );
@@ -2993,6 +3512,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                           const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
                           const origin = o.affiliation || o.homeClinic;
                           const parsedWork = parseOtWorkClinic(o.workClinic);
+                          const effHrs = getEffectiveOtHours(o, settings?.stdHr);
                           return (
                             <div
                               key={o.id}
@@ -3003,6 +3523,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               <div className="space-y-1 min-w-0">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   <span className="text-xs font-bold text-gray-900">{o.staffName}</span>
+                                  {o.employeeCode && (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
+                                      รหัส: {o.employeeCode}
+                                    </span>
+                                  )}
                                   {o.isExternal && (
                                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
                                       เฉพาะกิจนอก OPD
@@ -3027,6 +3552,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                     {parsedWork.amount === 0.5 && parsedWork.periodLabel
                                       ? ` (0.5 ${parsedWork.periodLabel})`
                                       : ''}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                    {formatOtHourNum(effHrs)} ชม.
                                   </span>
                                 </div>
                               </div>
@@ -3085,6 +3613,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             <th className="py-2.5 px-2">ตำแหน่ง</th>
                             <th className="py-2.5 px-2">สังกัด / หน่วยงานต้นทาง</th>
                             <th className="py-2.5 px-2">ห้องตรวจที่ปฏิบัติงาน</th>
+                            <th className="py-2.5 px-2 text-center">ชั่วโมง</th>
                             <th className="py-2.5 px-2 text-center">จัดการ</th>
                           </tr>
                         </thead>
@@ -3093,6 +3622,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             const isInTimeOT = o.shift === 'OT ในเวลาราชการ 08:00-16:00';
                             const origin = o.affiliation || o.homeClinic;
                             const parsedWork = parseOtWorkClinic(o.workClinic);
+                            const effHrs = getEffectiveOtHours(o, settings?.stdHr);
                             return (
                               <tr key={o.id} className="hover:bg-slate-50/80">
                                 <td className="py-2 px-3 text-gray-700 font-medium whitespace-nowrap">
@@ -3112,6 +3642,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 <td className="py-2 px-3">
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <span className="font-semibold text-gray-900">{o.staffName}</span>
+                                    {o.employeeCode && (
+                                      <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
+                                        {o.employeeCode}
+                                      </span>
+                                    )}
                                     {o.isExternal && (
                                       <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
                                         เฉพาะกิจนอก OPD
@@ -3139,6 +3674,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       0.5 {parsedWork.periodLabel}
                                     </span>
                                   )}
+                                </td>
+                                <td className="py-2 px-2 text-center whitespace-nowrap">
+                                  <span className="inline-block px-2 py-0.5 rounded text-[11px] font-extrabold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                    {formatOtHourNum(effHrs)} ชม.
+                                  </span>
                                 </td>
                                 <td className="py-2 px-2 text-center">
                                   <div className="flex items-center justify-center gap-1">
@@ -4005,6 +4545,415 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         </div>
       )}
 
+      {/* --- SUB-TAB 4: OT PAYMENT EVIDENCE REPORT (IMAGE 4 OFFICIAL FORM) --- */}
+      {activeSubTab === 'otPayReport' && (
+        <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4 print:border-none print:shadow-none print:p-0">
+          {/* Header & Export Controls (Hidden on Print) */}
+          <div className="no-print flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b pb-4">
+            <div>
+              <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                <ReceiptText className="w-5 h-5 text-indigo-700" />
+                <span>4. หลักฐานการจ่ายเงินค่าตอบแทนการปฏิบัติงานคลินิกนอกเวลาราชการ</span>
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                สรุปชั่วโมงปฏิบัติงาน OT รายวัน คำนวณค่าตอบแทน หักภาษี 5% และคงเหลือ พร้อมคำอ่านจำนวนเงินภาษาไทย
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={exportOtPayReportCsv}
+                disabled={otPaymentReportData.rows.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg shadow-2xs cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>ส่งออก CSV</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleExportOtPayJpeg}
+                disabled={isExportingOtPayJpeg}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white rounded-lg shadow-2xs cursor-pointer"
+              >
+                <ImageDown className="w-3.5 h-3.5" />
+                <span>{isExportingOtPayJpeg ? 'กำลังสร้างรูป...' : 'บันทึกเป็น .JPEG'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePrintOtPayReport}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg shadow-2xs cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>พิมพ์ / PDF (A4 แนวนอน)</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Filter & Form Overrides Bar (Hidden on Print) */}
+          <div className="no-print bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">ประจำเดือน:</label>
+                <select
+                  value={otPayMonth}
+                  onChange={(e) => setOtPayMonth(Number(e.target.value))}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-semibold text-gray-900"
+                >
+                  {THAI_MONTHS.map((mName, idx) => (
+                    <option key={mName} value={idx + 1}>
+                      {mName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">ปี พ.ศ.:</label>
+                <select
+                  value={otPayYearBE}
+                  onChange={(e) => setOtPayYearBE(Number(e.target.value))}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-semibold text-gray-900"
+                >
+                  {otPayYearBEOptions.map((yBE) => (
+                    <option key={yBE} value={yBE}>
+                      พ.ศ. {yBE}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">ห้องตรวจที่ปฏิบัติงาน:</label>
+                <select
+                  value={otPayClinic}
+                  onChange={(e) => setOtPayClinic(e.target.value)}
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-semibold text-teal-950"
+                >
+                  <option value="ALL">-- ทุกห้องตรวจ OPD --</option>
+                  {otPayClinicOptions.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">ประเภทเวร OT:</label>
+                <select
+                  value={otPayShiftScope}
+                  onChange={(e) =>
+                    setOtPayShiftScope(e.target.value as 'OUT_TIME' | 'ALL_OT' | WorkShift)
+                  }
+                  className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-semibold text-gray-900"
+                >
+                  <option value="OUT_TIME">คลินิกนอกเวลาราชการ (เย็น + วันหยุด)</option>
+                  <option value="ALL_OT">ทุกประเภท OT (รวมปฏิบัติแทนในเวลา)</option>
+                  {OT_SHIFTS.map((sh) => (
+                    <option key={sh.value} value={sh.value}>
+                      เฉพาะ: {sh.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-200/70">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  ค้นหาชื่อ / รหัสบุคลากร:
+                </label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2" />
+                  <input
+                    type="text"
+                    value={otPaySearch}
+                    onChange={(e) => setOtPaySearch(e.target.value)}
+                    placeholder="พิมพ์ชื่อ หรือ รหัส..."
+                    className="w-full text-xs rounded-lg border border-gray-300 pl-8 pr-2.5 py-1.5 bg-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  Cost Center (ระบุชั่วคราวหรือแก้ถาวรที่เมนู 5):
+                </label>
+                <input
+                  type="text"
+                  value={otPayCostCenterOverride}
+                  onChange={(e) => setOtPayCostCenterOverride(e.target.value)}
+                  placeholder={`ค่าตั้งต้น: ${resolvedOtPayCostCenter}`}
+                  className="w-full text-xs rounded-lg border border-gray-300 px-2.5 py-1.5 bg-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  ชื่อผู้ควบคุม (หัวหน้าหน่วยฯ):
+                </label>
+                <input
+                  type="text"
+                  value={otPayControllerOverride}
+                  onChange={(e) => setOtPayControllerOverride(e.target.value)}
+                  placeholder={`ค่าตั้งต้น: ${resolvedOtPayControllerName}`}
+                  className="w-full text-xs rounded-lg border border-gray-300 px-2.5 py-1.5 bg-white"
+                />
+              </div>
+            </div>
+
+            {otPaymentReportData.missingCodeCount > 0 && (
+              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                หมายเหตุ: พบรายชื่อที่ยังไม่มีรหัสบุคลากร {otPaymentReportData.missingCodeCount} ราย — สามารถเพิ่มรหัสบุคลากรและปรับอัตราค่าตอบแทน OT ได้ที่{' '}
+                <strong>เมนู 5: จัดการบุคลากร &amp; ตั้งค่า</strong>
+              </div>
+            )}
+          </div>
+
+          {/* Official Printable / JPEG OT Payment Evidence Form (Image 4 Exact Layout) */}
+          <div className="overflow-x-auto border border-gray-200 rounded-xl print:border-none print:overflow-visible">
+            <div
+              ref={otPaymentReportRef}
+              className="print-landscape-sheet min-w-[1180px] bg-white p-4 sm:p-5 text-black font-sarabun print:min-w-0 print:w-full print:p-0"
+            >
+              {/* Top Right Cost Center */}
+              <div className="text-right text-[12px] font-bold leading-tight mb-0.5 print:text-[10px]">
+                Cost Center {resolvedOtPayCostCenter}
+              </div>
+
+              {/* Centered Header Titles */}
+              <div className="text-center space-y-0.5 mb-2.5">
+                <div className="text-[15px] font-bold leading-snug print:text-[12px]">
+                  หลักฐานการจ่ายเงินค่าตอบแทนการปฏิบัติงานคลินิกนอกเวลาราชการ
+                </div>
+                <div className="text-[14px] font-bold leading-snug print:text-[11px]">
+                  <span>หน่วยงาน การพยาบาลผู้ป่วยนอก {formatOtOfficialClinicName(otPayClinic)}</span>
+                  <span className="inline-block w-8" />
+                  <span>ประจำเดือน</span>
+                  <span className="inline-block w-4" />
+                  <span className="underline decoration-dotted underline-offset-4">
+                    {THAI_MONTHS[otPayMonth - 1]}
+                  </span>
+                  <span className="inline-block w-4" />
+                  <span>{otPayYearBE}</span>
+                </div>
+              </div>
+
+              {/* Official 2-Row Header Monthly OT Grid Table */}
+              <table className="w-full border-collapse border border-black text-[11px] print:text-[8px]">
+                <thead>
+                  <tr className="bg-white font-bold text-center">
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1 py-1 leading-tight w-[34px] print:w-[24px]"
+                    >
+                      ลำดับ
+                      <br />
+                      ที่
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1.5 py-1 whitespace-nowrap w-[66px] print:w-[46px]"
+                    >
+                      รหัสบุคลากร
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-2 py-1 whitespace-nowrap min-w-[138px] print:min-w-0 print:w-[105px]"
+                    >
+                      ชื่อ สกุล
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1.5 py-1 whitespace-nowrap w-[76px] print:w-[56px]"
+                    >
+                      ตำแหน่ง
+                    </th>
+                    <th
+                      colSpan={otPaymentReportData.daysInMonth}
+                      className="border border-black px-1 py-0.5 text-center font-bold"
+                    >
+                      วันที่ปฏิบัติงาน
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1 py-1 leading-tight w-[42px] print:w-[30px]"
+                    >
+                      อัตรา/
+                      <br />
+                      ชั่วโมง
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1 py-1 leading-tight w-[44px] print:w-[32px]"
+                    >
+                      จำนวน
+                      <br />
+                      ชั่วโมง
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1.5 py-1 leading-tight w-[68px] print:w-[48px]"
+                    >
+                      จำนวนเงินที่
+                      <br />
+                      เบิก
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1 py-1 leading-tight whitespace-nowrap w-[58px] print:w-[40px]"
+                    >
+                      หักภาษี 5%
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1.5 py-1 leading-tight w-[68px] print:w-[48px]"
+                    >
+                      จำนวนเงิน
+                      <br />
+                      คงเหลือ
+                    </th>
+                    <th
+                      rowSpan={2}
+                      className="border border-black px-1.5 py-1 leading-tight w-[72px] print:w-[54px]"
+                    >
+                      ลายมือชื่อผู้รับ
+                      <br />
+                      เงิน
+                    </th>
+                  </tr>
+                  <tr className="bg-white text-center font-semibold">
+                    {otPaymentReportData.dayColumns.map((d) => (
+                      <th
+                        key={d.dayNum}
+                        className="border border-black py-0.5 px-0 text-center w-[20px] min-w-[18px] print:w-auto print:min-w-0"
+                        title={d.holidayName || d.iso}
+                      >
+                        {d.dayNum}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {otPaymentReportData.rows.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={10 + otPaymentReportData.daysInMonth}
+                        className="border border-black py-8 text-center text-gray-500 text-xs"
+                      >
+                        ไม่พบข้อมูลการปฏิบัติงานนอกเวลา (OT) ในเดือน {THAI_MONTHS[otPayMonth - 1]} พ.ศ. {otPayYearBE}
+                        {otPayClinic !== 'ALL' ? ` สำหรับ ${otPayClinic}` : ''}
+                      </td>
+                    </tr>
+                  ) : (
+                    otPaymentReportData.rows.map((row, idx) => (
+                      <tr key={`${row.staffName}-${row.positionLabel}-${idx}`}>
+                        <td className="border border-black py-1 px-1 text-center">{idx + 1}</td>
+                        <td className="border border-black py-1 px-1.5 text-center font-mono whitespace-nowrap">
+                          {row.employeeCode || ''}
+                        </td>
+                        <td className="border border-black py-1 px-2 text-left whitespace-nowrap">
+                          {row.staffName}
+                        </td>
+                        <td className="border border-black py-1 px-1.5 text-center whitespace-nowrap">
+                          {row.positionLabel}
+                        </td>
+                        {otPaymentReportData.dayColumns.map((d) => {
+                          const hrs = row.dayHours[d.dayNum] || 0;
+                          return (
+                            <td
+                              key={d.dayNum}
+                              className={`border border-black py-1 px-0 text-center ${
+                                d.isShaded ? 'bg-[#d1d5db]' : 'bg-white'
+                              }`}
+                              title={d.holidayName || d.iso}
+                            >
+                              {hrs > 0 ? formatOtHourNum(hrs) : ''}
+                            </td>
+                          );
+                        })}
+                        <td className="border border-black py-1 px-1 text-center">
+                          {row.hourlyRate}
+                        </td>
+                        <td className="border border-black py-1 px-1 text-center">
+                          {formatOtHourNum(row.totalHours)}
+                        </td>
+                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                          {formatOtMoney(row.grossAmount)}
+                        </td>
+                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                          {formatOtMoney(row.taxAmount)}
+                        </td>
+                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                          {formatOtMoney(row.netAmount)}
+                        </td>
+                        <td className="border border-black py-1 px-1" />
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                {(() => {
+                  const leftPart = Math.min(9, Math.floor(otPaymentReportData.daysInMonth / 3));
+                  const rightPart = otPaymentReportData.daysInMonth - leftPart;
+                  return (
+                    <tfoot>
+                      <tr className="font-bold">
+                        <td
+                          colSpan={4 + leftPart}
+                          className="border border-black py-1.5 px-2 text-right"
+                        >
+                          (ตัวอักษร)
+                        </td>
+                        <td
+                          colSpan={rightPart}
+                          className="border border-black py-1.5 px-2 text-center"
+                        >
+                          {otPaymentReportData.bahtText}
+                        </td>
+                        <td className="border border-black py-1.5 px-1 text-center bg-white">
+                          รวม
+                        </td>
+                        <td className="border border-black py-1.5 px-1 text-center bg-[#fef08a]">
+                          {formatOtHourNum(otPaymentReportData.grandTotalHours)}
+                        </td>
+                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                          {formatOtMoney(otPaymentReportData.grandTotalGross)}
+                        </td>
+                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                          {formatOtMoney(otPaymentReportData.grandTotalTax)}
+                        </td>
+                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                          {formatOtMoney(otPaymentReportData.grandTotalNet)}
+                        </td>
+                        <td className="border border-black py-1.5 px-1 bg-white" />
+                      </tr>
+                    </tfoot>
+                  );
+                })()}
+              </table>
+
+              {/* Two Bordered Signature Boxes at Bottom (Image 4 Exact Style) */}
+              <div className="grid grid-cols-2 border border-black mt-3 text-[12px] print:text-[9.5px] print:break-inside-avoid">
+                <div className="border-r border-black p-4 flex flex-col items-center justify-center text-center space-y-2.5 print:p-2.5 print:space-y-1.5">
+                  <div>ได้ตรวจสอบจำนวนเงินถูกต้องแล้ว</div>
+                  <div>ลงชื่อ....................................................ผู้ตรวจ</div>
+                </div>
+                <div className="p-3 flex flex-col items-center justify-center text-center space-y-1 print:p-2">
+                  <div>ขอรับรองว่าผู้มีรายชื่อข้างต้นได้ปฏิบัติงานนอกเวลาจริง</div>
+                  <div>ลงชื่อ....................................................ผู้ควบคุม</div>
+                  <div>({resolvedOtPayControllerName})</div>
+                  <div>หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก</div>
+                  <div>วันที่............................................................</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Admin Edit Leave Modal (Mandatory Reason + Timestamp) */}
       {editingLeave && onUpdateLeave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
@@ -4413,17 +5362,31 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             </div>
 
             <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">ชื่อ-สกุล</label>
-                <input
-                  type="text"
-                  value={editingOT.staffName}
-                  onChange={(e) => setEditingOT({ ...editingOT, staffName: e.target.value })}
-                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-gray-700 mb-1">ชื่อ-สกุล</label>
+                  <input
+                    type="text"
+                    value={editingOT.staffName}
+                    onChange={(e) => setEditingOT({ ...editingOT, staffName: e.target.value })}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">รหัสบุคลากร</label>
+                  <input
+                    type="text"
+                    value={editingOT.employeeCode || ''}
+                    onChange={(e) =>
+                      setEditingOT({ ...editingOT, employeeCode: e.target.value })
+                    }
+                    placeholder="เช่น 20708302"
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-mono"
+                  />
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-semibold text-gray-700 mb-1">ตำแหน่ง</label>
                   <select
@@ -4455,6 +5418,27 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       })
                     }
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-gray-700 mb-1">
+                    จำนวนชั่วโมงปฏิบัติงานจริง (ชม.)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0.5"
+                    max="24"
+                    value={getEffectiveOtHours(editingOT, settings?.stdHr)}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setEditingOT({
+                        ...editingOT,
+                        hours:
+                          Number.isFinite(val) && val > 0 ? Math.min(24, val) : 0.5,
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-teal-300 bg-teal-50/40 rounded-lg text-xs font-extrabold text-teal-950"
                   />
                 </div>
               </div>
