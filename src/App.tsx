@@ -26,7 +26,10 @@ import {
   WorkloadTrainingPayload,
   formatLeaveNoteWithPeriod,
   formatOtWorkClinicValue,
-  isTrainingLeaveType
+  isTrainingLeaveType,
+  getStaffEmployeeCode,
+  isLegacyGeneratedStaffId,
+  isValidEmployeeCodeValue
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -1661,8 +1664,34 @@ export default function App() {
     mutationSeqRef.current += 1;
     const opSeq = mutationSeqRef.current;
     const dirtyVer = markOtDirty();
+    const stampedEmpCode = (stamped.employeeCode || '').trim();
+    let nextStaffList = baseDb.staff;
+    let promotedStaffDirtyVer: number | null = null;
+    if (!stamped.isExternal && isValidEmployeeCodeValue(stampedEmpCode)) {
+      const targetName = stamped.staffName.trim();
+      const matchedIdx = baseDb.staff.findIndex((s) => s.name.trim() === targetName);
+      if (matchedIdx >= 0) {
+        const matched = baseDb.staff[matchedIdx];
+        const existingCode = getStaffEmployeeCode(matched);
+        const codeTakenByOther = baseDb.staff.some(
+          (s, i) =>
+            i !== matchedIdx &&
+            (s.staffId === stampedEmpCode || getStaffEmployeeCode(s) === stampedEmpCode)
+        );
+        if (!existingCode && isLegacyGeneratedStaffId(matched.staffId) && !codeTakenByOther) {
+          promotedStaffDirtyVer = markStaffMasterDirty();
+          nextStaffList = baseDb.staff.map((s, i) =>
+            i === matchedIdx
+              ? { ...s, staffId: stampedEmpCode, employeeCode: stampedEmpCode }
+              : s
+          );
+        }
+      }
+    }
+
     const nextDb = {
       ...baseDb,
+      staff: nextStaffList,
       ot: nextOt,
       auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
     };
@@ -1677,6 +1706,9 @@ export default function App() {
         ? { action: 'updateOT', target: prevItem, updated: stamped, opSeq }
         : undefined
     );
+    if (promotedStaffDirtyVer !== null) {
+      enqueueAdminSync('staff', promotedStaffDirtyVer);
+    }
   };
 
   // Handler: Delete OT (Admin, mandatory reason + timestamp)
@@ -1740,17 +1772,43 @@ export default function App() {
       return;
     }
     const baseDb = dbRef.current;
-    const nextStaff = [...baseDb.staff, staff];
+    const resolvedCode = getStaffEmployeeCode(staff);
+    const normalizedStaff: StaffMember = {
+      ...staff,
+      staffId: resolvedCode || staff.staffId,
+      employeeCode: resolvedCode || undefined,
+    };
+    const nextStaff = [...baseDb.staff, normalizedStaff];
+    let otChanged = false;
+    const nextOt = resolvedCode
+      ? baseDb.ot.map((o) => {
+          if (
+            !o.isExternal &&
+            o.staffName.trim() === normalizedStaff.name.trim() &&
+            (o.employeeCode || '').trim() !== resolvedCode
+          ) {
+            otChanged = true;
+            return { ...o, employeeCode: resolvedCode };
+          }
+          return o;
+        })
+      : baseDb.ot;
+
     mutationSeqRef.current += 1;
     const dirtyVer = markStaffMasterDirty();
+    const otDirtyVer = otChanged ? markOtDirty() : null;
     const nextDb = {
       ...baseDb,
       staff: nextStaff,
+      ot: nextOt,
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    showToast(`เพิ่มเจ้าหน้าที่ ${staff.name} เข้าสู่ระบบแล้ว`, 'success');
+    showToast(`เพิ่มเจ้าหน้าที่ ${normalizedStaff.name} เข้าสู่ระบบแล้ว`, 'success');
     enqueueAdminSync('staff', dirtyVer);
+    if (otDirtyVer !== null) {
+      enqueueAdminSync('ot', otDirtyVer);
+    }
   };
 
   // Handler: Delete Staff Member
@@ -1775,23 +1833,64 @@ export default function App() {
   };
 
   // Handler: Update Staff Member (Admin)
-  const handleUpdateStaff = async (updatedStaff: StaffMember) => {
+  const handleUpdateStaff = async (updatedStaff: StaffMember, previousStaffId?: string) => {
     if (!isAdmin) {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return;
     }
     const baseDb = dbRef.current;
-    const nextStaff = baseDb.staff.map(s => s.staffId === updatedStaff.staffId ? updatedStaff : s);
+    const matchId = previousStaffId || updatedStaff.staffId;
+    const targetIdx = baseDb.staff.findIndex(
+      (s) => s.staffId === matchId || s.staffId === updatedStaff.staffId
+    );
+    if (targetIdx < 0) return;
+
+    const prevStaff = baseDb.staff[targetIdx];
+    const resolvedCode = getStaffEmployeeCode(updatedStaff);
+    const normalizedStaff: StaffMember = {
+      ...updatedStaff,
+      staffId: resolvedCode || prevStaff.staffId,
+      employeeCode: resolvedCode || undefined,
+    };
+    const nextStaff = baseDb.staff.map((s, idx) =>
+      idx === targetIdx ? normalizedStaff : s
+    );
+
+    const prevNameTrimmed = prevStaff.name.trim();
+    const nextNameTrimmed = normalizedStaff.name.trim();
+    let otChanged = false;
+    const nextOt = resolvedCode
+      ? baseDb.ot.map((o) => {
+          if (o.isExternal) return o;
+          const oName = o.staffName.trim();
+          if (oName !== prevNameTrimmed && oName !== nextNameTrimmed) return o;
+          if ((o.employeeCode || '').trim() === resolvedCode && oName === nextNameTrimmed) {
+            return o;
+          }
+          otChanged = true;
+          return {
+            ...o,
+            staffName: nextNameTrimmed,
+            employeeCode: resolvedCode,
+          };
+        })
+      : baseDb.ot;
+
     mutationSeqRef.current += 1;
     const dirtyVer = markStaffMasterDirty();
+    const otDirtyVer = otChanged ? markOtDirty() : null;
     const nextDb = {
       ...baseDb,
       staff: nextStaff,
+      ot: nextOt,
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    showToast(`อัปเดตข้อมูลบุคลากร ${updatedStaff.name} เรียบร้อยแล้ว`, 'success');
+    showToast(`อัปเดตข้อมูลบุคลากร ${normalizedStaff.name} เรียบร้อยแล้ว`, 'success');
     enqueueAdminSync('staff', dirtyVer);
+    if (otDirtyVer !== null) {
+      enqueueAdminSync('ot', otDirtyVer);
+    }
   };
 
   // Handler: Update Staff Status (Active / Resigned / Retired)

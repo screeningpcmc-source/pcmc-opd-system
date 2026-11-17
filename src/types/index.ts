@@ -115,13 +115,37 @@ export type LeaveType = string;
 
 export interface StaffMember {
   staffId: string;
-  employeeCode?: string; // รหัสบุคลากร (เช่น 20708302)
+  employeeCode?: string; // รหัสบุคลากร (ใช้ค่าเดียวกับ Staff_ID เช่น 20708302)
   name: string;
   position: StaffPosition;
   homeClinic: string;
   status: StaffStatus;
   startDate?: string; // วันที่เริ่มปฏิบัติงาน (YYYY-MM-DD)
   endDate?: string; // วันที่ลาออก/เกษียณ (YYYY-MM-DD)
+}
+
+export function isLegacyGeneratedStaffId(id?: string): boolean {
+  const s = (id || '').trim();
+  return !s || /^STF-/i.test(s);
+}
+
+export function isValidEmployeeCodeValue(code?: string): boolean {
+  const s = (code || '').trim();
+  if (!s) return false;
+  if (/^STF-/i.test(s)) return false;
+  if (s === 'External' || s === 'OPD' || s === '-') return false;
+  return true;
+}
+
+export function getStaffEmployeeCode(
+  staff?: Pick<StaffMember, 'staffId' | 'employeeCode'> | null
+): string {
+  if (!staff) return '';
+  const emp = (staff.employeeCode || '').trim();
+  if (isValidEmployeeCodeValue(emp)) return emp;
+  const sid = (staff.staffId || '').trim();
+  if (isValidEmployeeCodeValue(sid)) return sid;
+  return '';
 }
 
 export type WorkloadRecordType = 'STANDARD' | 'PREMIUM_POOL' | 'PREMIUM_SUB';

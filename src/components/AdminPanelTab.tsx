@@ -20,7 +20,10 @@ import {
   DEFAULT_OT_COST_CENTER,
   DEFAULT_OT_CONTROLLER_NAME,
   DEFAULT_OT_HOURLY_RATES,
-  getOtHourlyRate
+  getOtHourlyRate,
+  getStaffEmployeeCode,
+  isLegacyGeneratedStaffId,
+  isValidEmployeeCodeValue
 } from '../types';
 import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
 import { formatThaiShortDate } from '../utils/thaiDate';
@@ -79,7 +82,7 @@ interface AdminPanelTabProps {
   onLogout: () => void;
   isLoggingIn: boolean;
   onAddStaff: (staff: StaffMember) => void;
-  onUpdateStaff?: (staff: StaffMember) => void;
+  onUpdateStaff?: (staff: StaffMember, previousStaffId?: string) => void;
   onDeleteStaff: (staffId: string) => void;
   onUpdateStaffStatus: (staffId: string, status: StaffStatus) => void;
   onSaveSettings: (settings: SystemSettings) => void;
@@ -140,10 +143,22 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [newStatus, setNewStatus] = useState<StaffStatus>('Active');
   const [newStartDate, setNewStartDate] = useState<string>(todayStr);
   const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
+  const [editingOriginalStaffId, setEditingOriginalStaffId] = useState<string | null>(null);
+  const [editModalError, setEditModalError] = useState<string>('');
   const [confirmDeleteStaffId, setConfirmDeleteStaffId] = useState<string | null>(null);
   const [confirmResetAll, setConfirmResetAll] = useState<boolean>(false);
   const [copiedShareLink, setCopiedShareLink] = useState<boolean>(false);
   const [inlineError, setInlineError] = useState<string>('');
+
+  const openEditStaffModal = (staff: StaffMember) => {
+    const resolvedCode = getStaffEmployeeCode(staff);
+    setEditingOriginalStaffId(staff.staffId);
+    setEditModalError('');
+    setEditingStaff({
+      ...staff,
+      employeeCode: resolvedCode || undefined,
+    });
+  };
 
   // Clinic, Leave Type & Custom Holiday Management state
   const [newInClinicName, setNewInClinicName] = useState<string>('');
@@ -288,9 +303,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       .filter(s => {
         const q = searchQuery.toLowerCase().trim();
         const posLabel = formatPositionLabel(s.position).toLowerCase();
+        const resolvedCode = getStaffEmployeeCode(s).toLowerCase();
         const matchSearch = !q ||
           s.name.toLowerCase().includes(q) ||
-          (s.employeeCode || '').toLowerCase().includes(q) ||
+          resolvedCode.includes(q) ||
+          s.staffId.toLowerCase().includes(q) ||
           s.position.toLowerCase().includes(q) ||
           posLabel.includes(q) ||
           s.homeClinic.toLowerCase().includes(q);
@@ -308,19 +325,36 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const resignedCount = staffList.filter(s => s.status === 'Resigned').length;
   const retiredCount = staffList.filter(s => s.status === 'Retired').length;
 
-  // Handle Add Staff (auto-generate invisible internal key)
+  // Handle Add Staff (use employee code as canonical Staff_ID)
   const handleAddStaffSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim()) {
+    const cleanCode = newEmployeeCode.trim();
+    const cleanName = newName.trim();
+    if (!cleanCode) {
+      setInlineError('กรุณาระบุรหัสบุคลากร (ใช้เป็น Staff_ID เช่น 20708302)');
+      return;
+    }
+    if (!isValidEmployeeCodeValue(cleanCode)) {
+      setInlineError('รหัสบุคลากรไม่ถูกต้อง (กรุณาระบุเลขรหัสบุคลากรจริง เช่น 20708302)');
+      return;
+    }
+    const dupCodeStaff = staffList.find(
+      (s) => s.staffId === cleanCode || getStaffEmployeeCode(s) === cleanCode
+    );
+    if (dupCodeStaff) {
+      setInlineError(`รหัสบุคลากร "${cleanCode}" มีอยู่ในระบบแล้ว (${dupCodeStaff.name})`);
+      return;
+    }
+    if (!cleanName) {
       setInlineError('กรุณาระบุชื่อ-นามสกุลเจ้าหน้าที่');
       return;
     }
     setInlineError('');
 
     const staff: StaffMember = {
-      staffId: `STF-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      employeeCode: newEmployeeCode.trim() || undefined,
-      name: newName.trim(),
+      staffId: cleanCode,
+      employeeCode: cleanCode,
+      name: cleanName,
       position: newPosition,
       homeClinic: newClinic,
       status: newStatus,
@@ -1055,13 +1089,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-6 gap-3">
               <div>
                 <label className="block text-[11px] font-semibold text-gray-700 mb-1">
-                  รหัสบุคลากร
+                  รหัสบุคลากร (Staff_ID) <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   placeholder="เช่น 20708302"
                   value={newEmployeeCode}
                   onChange={(e) => setNewEmployeeCode(e.target.value)}
+                  required
                   className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border font-mono font-semibold bg-white"
                 />
               </div>
@@ -1195,7 +1230,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           <table className="w-full text-left text-xs border border-gray-100 rounded-lg">
             <thead className="bg-slate-50 text-slate-700 font-semibold border-b sticky top-0 z-10">
               <tr>
-                <th className="py-2.5 px-2.5 whitespace-nowrap">รหัสบุคลากร</th>
+                <th className="py-2.5 px-2.5 whitespace-nowrap">รหัสบุคลากร (Staff_ID)</th>
                 <th className="py-2.5 px-3">ชื่อ - นามสกุล</th>
                 <th className="py-2.5 px-2">ตำแหน่งวิชาชีพ</th>
                 <th className="py-2.5 px-3">ห้องตรวจสังกัด</th>
@@ -1212,15 +1247,17 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredStaff.map((staff) => (
+                filteredStaff.map((staff) => {
+                  const displayCode = getStaffEmployeeCode(staff);
+                  return (
                   <tr key={staff.staffId} className="hover:bg-slate-50/80">
                     <td className="py-2 px-2.5 font-mono text-[11px] font-semibold text-gray-700 whitespace-nowrap">
-                      {staff.employeeCode ? (
-                        <span>{staff.employeeCode}</span>
+                      {displayCode ? (
+                        <span>{displayCode}</span>
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setEditingStaff({ ...staff })}
+                          onClick={() => openEditStaffModal(staff)}
                           className="text-[10px] text-gray-400 hover:text-blue-600 hover:underline cursor-pointer font-sans"
                         >
                           + ระบุรหัส
@@ -1251,7 +1288,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                           ) : (
                             <button
                               type="button"
-                              onClick={() => setEditingStaff({ ...staff })}
+                              onClick={() => openEditStaffModal(staff)}
                               className="text-blue-600 hover:underline font-medium cursor-pointer"
                             >
                               + เติมวันเริ่มงาน
@@ -1266,7 +1303,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => setEditingStaff({ ...staff })}
+                                onClick={() => openEditStaffModal(staff)}
                                 className="text-amber-700 hover:underline font-medium cursor-pointer"
                               >
                                 + ระบุวันที่
@@ -1326,7 +1363,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                         {onUpdateStaff && (
                           <button
                             type="button"
-                            onClick={() => setEditingStaff({ ...staff })}
+                            onClick={() => openEditStaffModal(staff)}
                             className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold text-blue-700 hover:text-white bg-blue-50 hover:bg-blue-600 border border-blue-200 hover:border-blue-600 rounded-md transition-colors cursor-pointer"
                             title={`แก้ไขข้อมูล / วันเริ่มงาน ${staff.name}`}
                           >
@@ -1369,7 +1406,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -2224,24 +2262,41 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setEditingStaff(null)}
+                onClick={() => {
+                  setEditingStaff(null);
+                  setEditingOriginalStaffId(null);
+                  setEditModalError('');
+                }}
                 className="text-gray-400 hover:text-gray-600 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            {editModalError && (
+              <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>{editModalError}</span>
+              </div>
+            )}
+
             <div className="space-y-3 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">รหัสบุคลากร</label>
+                  <label className="block font-semibold text-gray-700 mb-1">
+                    รหัสบุคลากร (Staff_ID)
+                  </label>
                   <input
                     type="text"
                     placeholder="เช่น 20708302"
-                    value={editingStaff.employeeCode || ''}
-                    onChange={(e) =>
-                      setEditingStaff({ ...editingStaff, employeeCode: e.target.value })
+                    value={
+                      editingStaff.employeeCode ??
+                      (!isLegacyGeneratedStaffId(editingStaff.staffId) ? editingStaff.staffId : '')
                     }
+                    onChange={(e) => {
+                      setEditModalError('');
+                      setEditingStaff({ ...editingStaff, employeeCode: e.target.value });
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-mono font-semibold"
                   />
                 </div>
@@ -2352,7 +2407,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <div className="flex items-center justify-end gap-2.5 border-t pt-3">
               <button
                 type="button"
-                onClick={() => setEditingStaff(null)}
+                onClick={() => {
+                  setEditingStaff(null);
+                  setEditingOriginalStaffId(null);
+                  setEditModalError('');
+                }}
                 className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
               >
                 ยกเลิก
@@ -2360,13 +2419,40 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  if (!editingStaff.name.trim()) return;
-                  onUpdateStaff({
-                    ...editingStaff,
-                    employeeCode: (editingStaff.employeeCode || '').trim() || undefined,
-                    name: editingStaff.name.trim(),
-                  });
+                  const cleanName = editingStaff.name.trim();
+                  if (!cleanName) {
+                    setEditModalError('กรุณาระบุชื่อ - นามสกุล');
+                    return;
+                  }
+                  const rawCode = (editingStaff.employeeCode ?? '').trim();
+                  if (rawCode && !isValidEmployeeCodeValue(rawCode)) {
+                    setEditModalError('รหัสบุคลากรไม่ถูกต้อง (กรุณาระบุเลขรหัสบุคลากรจริง เช่น 20708302)');
+                    return;
+                  }
+                  const originalId = editingOriginalStaffId || editingStaff.staffId;
+                  if (rawCode) {
+                    const dup = staffList.find(
+                      (s) =>
+                        s.staffId !== originalId &&
+                        (s.staffId === rawCode || getStaffEmployeeCode(s) === rawCode)
+                    );
+                    if (dup) {
+                      setEditModalError(`รหัสบุคลากร "${rawCode}" ซ้ำกับ ${dup.name} ในระบบ`);
+                      return;
+                    }
+                  }
+                  onUpdateStaff(
+                    {
+                      ...editingStaff,
+                      staffId: rawCode || editingStaff.staffId,
+                      employeeCode: rawCode || undefined,
+                      name: cleanName,
+                    },
+                    originalId
+                  );
                   setEditingStaff(null);
+                  setEditingOriginalStaffId(null);
+                  setEditModalError('');
                 }}
                 className="px-5 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
               >

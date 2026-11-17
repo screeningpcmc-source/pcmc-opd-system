@@ -28,6 +28,9 @@ import {
   parseReferralFromSheetNote,
   DEFAULT_OT_COST_CENTER,
   DEFAULT_OT_CONTROLLER_NAME,
+  getStaffEmployeeCode,
+  isLegacyGeneratedStaffId,
+  isValidEmployeeCodeValue,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -106,13 +109,118 @@ function prepareOtForRemote(o: OTAttendance): OTAttendance {
 function buildStaffEmployeeCodesMap(staff: StaffMember[]): Record<string, string> {
   const out: Record<string, string> = {};
   (staff || []).forEach((s) => {
-    const code = (s.employeeCode || '').trim();
+    const code = getStaffEmployeeCode(s);
     if (code && s.name) {
-      out[s.staffId || s.name] = code;
+      out[code] = code;
       out[s.name.trim()] = code;
     }
   });
   return out;
+}
+
+function prepareStaffForRemote(s: StaffMember): StaffMember {
+  const code = getStaffEmployeeCode(s);
+  return {
+    ...s,
+    staffId: code || s.staffId,
+    employeeCode: code || undefined,
+  };
+}
+
+function prepareStaffRowForSheet(s: StaffMember): string[] {
+  const code = getStaffEmployeeCode(s);
+  return [
+    code || s.staffId,
+    s.name,
+    s.position,
+    s.homeClinic,
+    s.status,
+    s.startDate || '',
+    s.endDate || '',
+    code,
+  ];
+}
+
+function hydrateUnifiedStaffAndOt(
+  staffList: StaffMember[],
+  otList: OTAttendance[],
+  extraCodeMap?: Record<string, string> | null
+): { staff: StaffMember[]; ot: OTAttendance[] } {
+  const otCodeByName = new Map<string, string>();
+  (otList || []).forEach((o) => {
+    if (o.isExternal) return;
+    const name = (o.staffName || '').trim();
+    const code = (o.employeeCode || '').trim();
+    if (name && isValidEmployeeCodeValue(code) && !otCodeByName.has(name)) {
+      otCodeByName.set(name, code);
+    }
+  });
+
+  const usedStaffIds = new Set<string>();
+  const normalizedStaff: StaffMember[] = (staffList || []).map((s) => {
+    const cleanName = (s.name || '').trim();
+    const rawId = (s.staffId || '').trim();
+    const directCode = getStaffEmployeeCode(s);
+    const mapCode =
+      (rawId && extraCodeMap?.[rawId]) ||
+      (cleanName && extraCodeMap?.[cleanName]) ||
+      '';
+    const otCode = cleanName ? otCodeByName.get(cleanName) || '' : '';
+
+    let chosenCode = '';
+    if (isValidEmployeeCodeValue(directCode)) {
+      chosenCode = directCode;
+    } else if (isValidEmployeeCodeValue(mapCode)) {
+      chosenCode = mapCode.trim();
+    } else if (isValidEmployeeCodeValue(otCode)) {
+      chosenCode = otCode.trim();
+    }
+
+    let finalStaffId = rawId || `STF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    if (chosenCode && !usedStaffIds.has(chosenCode)) {
+      finalStaffId = chosenCode;
+      usedStaffIds.add(chosenCode);
+    } else if (chosenCode) {
+      // Keep original unique fallback if another record already claimed this code
+      usedStaffIds.add(finalStaffId);
+    } else {
+      usedStaffIds.add(finalStaffId);
+    }
+
+    return {
+      ...s,
+      staffId: finalStaffId,
+      employeeCode: chosenCode || undefined,
+      name: cleanName || s.name,
+      position: normalizeStaffPosition(s.position),
+    };
+  });
+
+  const staffCodeByName = new Map<string, string>();
+  normalizedStaff.forEach((s) => {
+    const code = getStaffEmployeeCode(s);
+    const cleanName = (s.name || '').trim();
+    if (cleanName && code && !staffCodeByName.has(cleanName)) {
+      staffCodeByName.set(cleanName, code);
+    }
+  });
+
+  const normalizedOt: OTAttendance[] = (otList || []).map((o) => {
+    if (o.isExternal) return o;
+    const cleanName = (o.staffName || '').trim();
+    const matchedCode = cleanName ? staffCodeByName.get(cleanName) || '' : '';
+    const existingCode = isValidEmployeeCodeValue(o.employeeCode)
+      ? (o.employeeCode || '').trim()
+      : '';
+    const finalCode = matchedCode || existingCode;
+    if (finalCode === (o.employeeCode || '').trim()) return o;
+    return {
+      ...o,
+      ...(finalCode ? { employeeCode: finalCode } : { employeeCode: undefined }),
+    };
+  });
+
+  return { staff: normalizedStaff, ot: normalizedOt };
 }
 
 function parseJsonRecordSafe<T = Record<string, any>>(raw?: string): T | null {
@@ -142,11 +250,9 @@ function parseSheetOtRecord(r: string[], fallbackId: string, staffList?: StaffMe
       : parsedClinic.hours;
   const rawCode = String(r[7] || '').trim();
   const staffName = String(r[2] || '').trim();
-  const matchedStaffCode = staffList?.find((s) => s.name.trim() === staffName)?.employeeCode;
-  const employeeCode =
-    rawCode && rawCode !== 'External' && rawCode !== 'OPD'
-      ? rawCode
-      : matchedStaffCode || undefined;
+  const matchedStaff = staffList?.find((s) => s.name.trim() === staffName);
+  const matchedStaffCode = getStaffEmployeeCode(matchedStaff);
+  const employeeCode = matchedStaffCode || (isValidEmployeeCodeValue(rawCode) ? rawCode : undefined);
 
   return {
     id: fallbackId,
@@ -755,11 +861,13 @@ export const loadLocalDatabase = (): AppDatabase => {
         autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
 
+      const hydratedLocal = hydrateUnifiedStaffAndOt(migratedStaff, migratedOt);
+
       const cleanDb: AppDatabase = {
-        staff: migratedStaff,
+        staff: hydratedLocal.staff,
         workloads: migratedWorkloads,
         leaves: migratedLeaves,
-        ot: migratedOt,
+        ot: hydratedLocal.ot,
         auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
         settings: mergedSettings,
       };
@@ -917,16 +1025,7 @@ export const createGoogleSpreadsheet = async (
   const spreadsheetId = createdData.spreadsheetId;
   const spreadsheetUrl = createdData.spreadsheetUrl;
 
-  const staffRows = staffList.map((s) => [
-    s.staffId,
-    s.name,
-    s.position,
-    s.homeClinic,
-    s.status,
-    s.startDate || '',
-    s.endDate || '',
-    s.employeeCode || '',
-  ]);
+  const staffRows = staffList.map(prepareStaffRowForSheet);
   const settingsRows = buildSettingsSheetRows(settings, staffList);
 
   const batchUpdateValues = {
@@ -1028,16 +1127,7 @@ export const syncStaffMasterToSheet = async (
 
     const rows = [
       ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
-      ...staffList.map((s) => [
-        s.staffId,
-        s.name,
-        s.position,
-        s.homeClinic,
-        s.status,
-        s.startDate || '',
-        s.endDate || '',
-        s.employeeCode || '',
-      ]),
+      ...staffList.map(prepareStaffRowForSheet),
     ];
 
     const putRes = await fetch(
@@ -1207,17 +1297,20 @@ export const syncAllWithGoogleSheet = async (
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
-      const staffId = (r[0] || `STF-GS-${idx + 1}`).trim();
+      const rawColA = (r[0] || `STF-GS-${idx + 1}`).trim();
       const name = (r[1] || '').trim();
       const colCode = (r[7] || '').trim();
-      const prevMatch = db.staff.find((s) => s.staffId === staffId || s.name.trim() === name);
-      const fallbackCode =
-        remoteStaffCodeMap?.[staffId] ||
+      const prevMatch = db.staff.find((s) => s.staffId === rawColA || s.name.trim() === name);
+      const resolvedCode =
+        (isValidEmployeeCodeValue(colCode) ? colCode : '') ||
+        (!isLegacyGeneratedStaffId(rawColA) ? rawColA : '') ||
+        remoteStaffCodeMap?.[rawColA] ||
         remoteStaffCodeMap?.[name] ||
-        prevMatch?.employeeCode;
+        getStaffEmployeeCode(prevMatch);
+      const staffId = isValidEmployeeCodeValue(resolvedCode) ? resolvedCode : rawColA;
       return {
         staffId,
-        employeeCode: colCode || fallbackCode || undefined,
+        employeeCode: isValidEmployeeCodeValue(resolvedCode) ? resolvedCode : undefined,
         name,
         position: pos,
         homeClinic: (r[3] || '').trim(),
@@ -1227,8 +1320,10 @@ export const syncAllWithGoogleSheet = async (
       };
     });
 
-  const shouldPushStaff = Boolean(options?.pushLocalStaff || isStaffMasterDirty() || sheetStaffRows.length === 0);
-  const finalStaff = shouldPushStaff ? db.staff : sheetStaffRows;
+  const baseFinalStaff =
+    isStaffMasterDirty() || options?.pushLocalStaff || sheetStaffRows.length === 0
+      ? db.staff
+      : sheetStaffRows;
 
   // 2. Parse Daily_Workload from sheet & merge with local
   const sheetWorkloads: DailyWorkload[] = workloadRawRows
@@ -1374,7 +1469,7 @@ export const syncAllWithGoogleSheet = async (
   const sheetOt: OTAttendance[] = otRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
-    .map((r, idx) => parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, finalStaff));
+    .map((r, idx) => parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, baseFinalStaff));
 
   const shouldOverwriteOt = isOtDirty();
   const sheetOKeys = new Set(sheetOt.map(otKey));
@@ -1391,7 +1486,7 @@ export const syncAllWithGoogleSheet = async (
     else existingOtQueue.set(k, [o]);
   });
 
-  const mergedOt = (
+  const rawMergedOt = (
     shouldOverwriteOt
       ? db.ot
       : [
@@ -1414,6 +1509,27 @@ export const syncAllWithGoogleSheet = async (
           }),
         ]
   ).sort((a, b) => b.date.localeCompare(a.date));
+
+  const hydratedOAuth = hydrateUnifiedStaffAndOt(baseFinalStaff, rawMergedOt, remoteStaffCodeMap);
+  const finalStaff = hydratedOAuth.staff;
+  const mergedOt = hydratedOAuth.ot;
+  const remoteNeedsStaffIdUpgrade = staffRawRows
+    .slice(1)
+    .filter((r) => (r[1] || '').trim().length > 0)
+    .some((r) => {
+      const rawColA = (r[0] || '').trim();
+      const rawName = (r[1] || '').trim();
+      const rawColH = (r[7] || '').trim();
+      const matched = finalStaff.find((s) => s.name.trim() === rawName);
+      const targetCode = getStaffEmployeeCode(matched);
+      return Boolean(targetCode && (rawColA !== targetCode || rawColH !== targetCode));
+    });
+  const shouldPushStaff = Boolean(
+    options?.pushLocalStaff ||
+      isStaffMasterDirty() ||
+      sheetStaffRows.length === 0 ||
+      remoteNeedsStaffIdUpgrade
+  );
 
   // 4.5 Parse Audit_Logs from sheet & merge with pending outbox audits
   const sheetAuditLogs: AuditLogEntry[] = auditRawRows
@@ -1572,16 +1688,7 @@ export const syncAllWithGoogleSheet = async (
       range: 'Staff_Master!A1:H',
       values: [
         ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
-        ...finalStaff.map((s) => [
-          s.staffId,
-          s.name,
-          s.position,
-          s.homeClinic,
-          s.status,
-          s.startDate || '',
-          s.endDate || '',
-          s.employeeCode || '',
-        ]),
+        ...finalStaff.map(prepareStaffRowForSheet),
       ],
     });
   }
@@ -2180,17 +2287,20 @@ function mergeRemoteDataRows(
       const rawStatus = (r[4] || 'Active').trim();
       const status: StaffStatus =
         rawStatus === 'Resigned' || rawStatus === 'Retired' ? rawStatus : 'Active';
-      const staffId = (r[0] || `STF-GS-${idx + 1}`).trim();
+      const rawColA = (r[0] || `STF-GS-${idx + 1}`).trim();
       const name = (r[1] || '').trim();
       const colCode = (r[7] || '').trim();
-      const prevMatch = db.staff.find((s) => s.staffId === staffId || s.name.trim() === name);
-      const fallbackCode =
-        remoteStaffCodeMap?.[staffId] ||
+      const prevMatch = db.staff.find((s) => s.staffId === rawColA || s.name.trim() === name);
+      const resolvedCode =
+        (isValidEmployeeCodeValue(colCode) ? colCode : '') ||
+        (!isLegacyGeneratedStaffId(rawColA) ? rawColA : '') ||
+        remoteStaffCodeMap?.[rawColA] ||
         remoteStaffCodeMap?.[name] ||
-        prevMatch?.employeeCode;
+        getStaffEmployeeCode(prevMatch);
+      const staffId = isValidEmployeeCodeValue(resolvedCode) ? resolvedCode : rawColA;
       return {
         staffId,
-        employeeCode: colCode || fallbackCode || undefined,
+        employeeCode: isValidEmployeeCodeValue(resolvedCode) ? resolvedCode : undefined,
         name,
         position: pos,
         homeClinic: (r[3] || '').trim(),
@@ -2200,7 +2310,7 @@ function mergeRemoteDataRows(
       };
     });
 
-  const finalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
+  const baseFinalStaff = isStaffMasterDirty() ? db.staff : sheetStaff.length > 0 ? sheetStaff : db.staff;
   const remotePremiumClinics = settingsMap['Premium_Sub_Clinics']
     ? settingsMap['Premium_Sub_Clinics'].split(',').map((s) => s.trim()).filter(Boolean)
     : db.settings.premiumSubClinics;
@@ -2348,9 +2458,9 @@ function mergeRemoteDataRows(
   }
 
   const deletedOKeys = getDeletedOtKeySet();
-  let mergedOt: OTAttendance[];
+  let rawMergedOt: OTAttendance[];
   if (isOtDirty() || params.otRows === null) {
-    mergedOt = [...db.ot];
+    rawMergedOt = [...db.ot];
   } else {
     const existingOtQueue = new Map<string, OTAttendance[]>();
     db.ot.forEach((o) => {
@@ -2363,7 +2473,7 @@ function mergeRemoteDataRows(
     const sheetOt: OTAttendance[] = params.otRows
       .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
       .map((r, idx) => {
-        const item = parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, finalStaff);
+        const item = parseSheetOtRecord(r, `OT-GS-${Date.now()}-${idx}`, baseFinalStaff);
         const matches = existingOtQueue.get(otKey(item));
         const prev = matches && matches.length > 0 ? matches.shift() : undefined;
         if (!prev) return item;
@@ -2394,8 +2504,12 @@ function mergeRemoteDataRows(
       }
     });
 
-    mergedOt = [...outboxAndJustPushedO, ...sheetOt].sort((a, b) => b.date.localeCompare(a.date));
+    rawMergedOt = [...outboxAndJustPushedO, ...sheetOt].sort((a, b) => b.date.localeCompare(a.date));
   }
+
+  const hydratedMerge = hydrateUnifiedStaffAndOt(baseFinalStaff, rawMergedOt, remoteStaffCodeMap);
+  const finalStaff = hydratedMerge.staff;
+  const mergedOt = hydratedMerge.ot;
 
   let mergedAuditLogs: AuditLogEntry[];
   if (params.auditRows === null) {
@@ -2699,7 +2813,12 @@ export const hasPendingAdminDirtyFlags = (): boolean =>
 export const syncPublicViaAppsScript = async (
   gasUrl: string,
   db: AppDatabase
-): Promise<{ accessible: boolean; mergedDb: AppDatabase; pushedCount: number }> => {
+): Promise<{
+  accessible: boolean;
+  mergedDb: AppDatabase;
+  pushedCount: number;
+  needsStaffIdUpgrade?: boolean;
+}> => {
   try {
     const sep = gasUrl.includes('?') ? '&' : '?';
     const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
@@ -2795,10 +2914,22 @@ export const syncPublicViaAppsScript = async (
     );
     const resolvedSheetId =
       mergedDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    const needsStaffIdUpgrade =
+      Array.isArray(data.staffRows) &&
+      data.staffRows.some((r: string[]) => {
+        const rawColA = String(r[0] || '').trim();
+        const rawName = String(r[1] || '').trim();
+        const rawColH = String(r[7] || '').trim();
+        if (!rawName) return false;
+        const matched = mergedDb.staff.find((s) => s.name.trim() === rawName);
+        const targetCode = getStaffEmployeeCode(matched);
+        return Boolean(targetCode && (rawColA !== targetCode || rawColH !== targetCode));
+      });
 
     return {
       accessible: true,
       pushedCount,
+      needsStaffIdUpgrade,
       mergedDb: {
         ...mergedDb,
         settings: {
@@ -2915,7 +3046,7 @@ export const pushAdminTableViaAppsScript = async (params: {
       },
     };
     if (table === 'staff') {
-      payload.staff = db.staff;
+      payload.staff = db.staff.map(prepareStaffForRemote);
       payload.settings = {
         ...db.settings,
         staffEmployeeCodes: buildStaffEmployeeCodesMap(db.staff),
@@ -3445,7 +3576,7 @@ export const syncAdminViaAppsScript = async (
     ot: getOtDirtyVersion(),
   };
   const dirty = {
-    staff: dirtyVersions.staff > 0,
+    staff: dirtyVersions.staff > 0 || Boolean(pubRes.needsStaffIdUpgrade),
     settings: dirtyVersions.settings > 0,
     workloads: dirtyVersions.workloads > 0,
     leaves: dirtyVersions.leaves > 0,
@@ -3481,7 +3612,7 @@ export const syncAdminViaAppsScript = async (
             ...dirty,
             settings: dirty.settings || dirty.staff,
           },
-          staff: workingDb.staff,
+          staff: workingDb.staff.map(prepareStaffForRemote),
           workloads: workingDb.workloads.map(prepareWorkloadForRemote),
           leaves: workingDb.leaves,
           ot: workingDb.ot.map(prepareOtForRemote),

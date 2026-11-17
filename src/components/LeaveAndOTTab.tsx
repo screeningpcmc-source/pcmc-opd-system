@@ -36,6 +36,7 @@ import {
   getEffectiveOtHours,
   normalizeStaffPosition,
   compareStaffByPositionAndStartDate as _compareRoster,
+  getStaffEmployeeCode,
 } from '../types';
 import {
   CalendarClock,
@@ -701,7 +702,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         Number.isFinite(pickedHrs) && pickedHrs > 0
           ? pickedHrs
           : getDefaultOtHoursForShift(otShift, settings?.stdHr);
-      const empCode = (staff?.employeeCode || '').trim();
+      const empCode = getStaffEmployeeCode(staff);
       return {
         id: `OT-${Date.now()}-${id}`,
         date: otDate,
@@ -1398,8 +1399,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       const groupKey = `${cleanName}::${posLabel}`;
       const hrs = getEffectiveOtHours(o, settings?.stdHr);
       const matchedStaff = staffByName.get(cleanName);
-      const empCode =
-        (o.employeeCode || '').trim() || (matchedStaff?.employeeCode || '').trim();
+      const staffCode = o.isExternal ? '' : getStaffEmployeeCode(matchedStaff);
+      const empCode = staffCode || (o.employeeCode || '').trim();
 
       let entry = grouped.get(groupKey);
       if (!entry) {
@@ -1411,6 +1412,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           dayHours: {},
         };
         grouped.set(groupKey, entry);
+      } else if (staffCode && entry.employeeCode !== staffCode) {
+        entry.employeeCode = staffCode;
       } else if (!entry.employeeCode && empCode) {
         entry.employeeCode = empCode;
       }
@@ -3011,9 +3014,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     .filter((s) => {
                       const q = otSearch.toLowerCase().trim();
                       if (!q) return true;
+                      const staffCode = getStaffEmployeeCode(s).toLowerCase();
                       return (
                         s.name.toLowerCase().includes(q) ||
-                        (s.employeeCode || '').toLowerCase().includes(q) ||
+                        staffCode.includes(q) ||
                         s.position.toLowerCase().includes(q) ||
                         formatPositionLabel(s.position).toLowerCase().includes(q) ||
                         s.homeClinic.toLowerCase().includes(q)
@@ -3022,6 +3026,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     .map((s) => {
                       const isSelected = selectedStaffIds.includes(s.staffId);
                       const personHours = selectedOtHoursByStaffId[s.staffId] ?? otHours;
+                      const staffCode = getStaffEmployeeCode(s);
                       return (
                         <div
                           key={s.staffId}
@@ -3041,7 +3046,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             <div className="min-w-0">
                               <span className="text-xs font-bold block truncate">{s.name}</span>
                               <span className="text-[11px] text-gray-500 block truncate">
-                                {s.employeeCode ? `รหัส: ${s.employeeCode} • ` : ''}
+                                {staffCode ? `รหัส: ${staffCode} • ` : ''}
                                 สังกัด: {s.homeClinic}
                               </span>
                             </div>
@@ -3356,6 +3361,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             const origin = o.affiliation || o.homeClinic;
                             const parsedWork = parseOtWorkClinic(o.workClinic);
                             const effHrs = getEffectiveOtHours(o, settings?.stdHr);
+                            const matchedStaff = !o.isExternal
+                              ? staffList.find((s) => s.name.trim() === (o.staffName || '').trim())
+                              : undefined;
+                            const displayEmpCode =
+                              getStaffEmployeeCode(matchedStaff) || (o.employeeCode || '').trim();
                             return (
                               <div
                                 key={o.id}
@@ -3364,9 +3374,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 <div className="min-w-0 space-y-0.5">
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <span className="font-bold text-gray-900">{o.staffName}</span>
-                                    {o.employeeCode && (
+                                    {displayEmpCode && (
                                       <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
-                                        {o.employeeCode}
+                                        {displayEmpCode}
                                       </span>
                                     )}
                                     {o.isExternal && (
@@ -3405,7 +3415,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          setEditingOT({ ...o });
+                                          setEditingOT({
+                                            ...o,
+                                            employeeCode: displayEmpCode || undefined,
+                                          });
                                           setEditOtReason('');
                                           setEditOtReasonError('');
                                         }}
@@ -3513,6 +3526,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                           const origin = o.affiliation || o.homeClinic;
                           const parsedWork = parseOtWorkClinic(o.workClinic);
                           const effHrs = getEffectiveOtHours(o, settings?.stdHr);
+                          const matchedStaff = !o.isExternal
+                            ? staffList.find((s) => s.name.trim() === (o.staffName || '').trim())
+                            : undefined;
+                          const displayEmpCode =
+                            getStaffEmployeeCode(matchedStaff) || (o.employeeCode || '').trim();
                           return (
                             <div
                               key={o.id}
@@ -3523,9 +3541,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               <div className="space-y-1 min-w-0">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   <span className="text-xs font-bold text-gray-900">{o.staffName}</span>
-                                  {o.employeeCode && (
+                                  {displayEmpCode && (
                                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
-                                      รหัส: {o.employeeCode}
+                                      รหัส: {displayEmpCode}
                                     </span>
                                   )}
                                   {o.isExternal && (
@@ -3564,7 +3582,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        setEditingOT({ ...o });
+                                        setEditingOT({
+                                          ...o,
+                                          employeeCode: displayEmpCode || undefined,
+                                        });
                                         setEditOtReason('');
                                         setEditOtReasonError('');
                                       }}
@@ -3623,6 +3644,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             const origin = o.affiliation || o.homeClinic;
                             const parsedWork = parseOtWorkClinic(o.workClinic);
                             const effHrs = getEffectiveOtHours(o, settings?.stdHr);
+                            const matchedStaff = !o.isExternal
+                              ? staffList.find((s) => s.name.trim() === (o.staffName || '').trim())
+                              : undefined;
+                            const displayEmpCode =
+                              getStaffEmployeeCode(matchedStaff) || (o.employeeCode || '').trim();
                             return (
                               <tr key={o.id} className="hover:bg-slate-50/80">
                                 <td className="py-2 px-3 text-gray-700 font-medium whitespace-nowrap">
@@ -3642,9 +3668,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 <td className="py-2 px-3">
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <span className="font-semibold text-gray-900">{o.staffName}</span>
-                                    {o.employeeCode && (
+                                    {displayEmpCode && (
                                       <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
-                                        {o.employeeCode}
+                                        {displayEmpCode}
                                       </span>
                                     )}
                                     {o.isExternal && (
@@ -3686,7 +3712,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          setEditingOT({ ...o });
+                                          setEditingOT({
+                                            ...o,
+                                            employeeCode: displayEmpCode || undefined,
+                                          });
                                           setEditOtReason('');
                                           setEditOtReasonError('');
                                         }}

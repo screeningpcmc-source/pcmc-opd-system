@@ -736,21 +736,41 @@ function replaceSheetBodyRows_(sheet, rows) {
   SpreadsheetApp.flush();
 }
 
+function isValidEmployeeCodeGas_(code) {
+  var c = String(code || '').trim();
+  if (!c) return false;
+  if (/^STF-/i.test(c)) return false;
+  if (/^(External|OPD|-)$/i.test(c)) return false;
+  return true;
+}
+
+function resolveStaffCodeAndIdGas_(s) {
+  var empCode = isValidEmployeeCodeGas_(s && s.employeeCode) ? String(s.employeeCode).trim() : '';
+  var rawStaffId = String((s && s.staffId) || '').trim();
+  var codeFromStaffId = isValidEmployeeCodeGas_(rawStaffId) ? rawStaffId : '';
+  var resolvedCode = empCode || codeFromStaffId;
+  return {
+    staffId: resolvedCode || rawStaffId,
+    employeeCode: resolvedCode
+  };
+}
+
 function writeStaffRowsToSheet_(staffList) {
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
     'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'
   ]);
   ensureStaffColumns_(sheet);
   var rows = (staffList || []).map(function(s) {
+    var ids = resolveStaffCodeAndIdGas_(s);
     return [
-      String(s.staffId || ''),
+      ids.staffId,
       String(s.name || ''),
       String(s.position || 'RN'),
       String(s.homeClinic || ''),
       String(s.status || 'Active'),
       String(s.startDate || ''),
       String(s.endDate || ''),
-      String(s.employeeCode || '')
+      ids.employeeCode
     ];
   });
   replaceSheetBodyRows_(sheet, rows);
@@ -1327,7 +1347,7 @@ function deleteOtRowFromApi_(payload) {
 
 function syncAdminAllFromApi_(payload) {
   var dirty = payload.dirty || {};
-  var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 7);
+  var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 8);
 
   if (dirty.staff || (staffData.rows.length === 0 && Array.isArray(payload.staff) && payload.staff.length > 0)) {
     writeStaffRowsToSheet_(payload.staff || []);
