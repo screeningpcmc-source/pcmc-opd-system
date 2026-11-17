@@ -15,7 +15,8 @@ import {
   CustomHoliday,
   AdminPinEntry,
   compareStaffByPositionAndStartDate,
-  REFERRAL_CLINIC_NAME
+  REFERRAL_CLINIC_NAME,
+  isDailyWorkloadExcludedPosition
 } from '../types';
 import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
 import { formatThaiShortDate } from '../utils/thaiDate';
@@ -1007,9 +1008,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     <option key={p} value={p}>{POSITION_LABELS[p]}</option>
                   ))}
                 </select>
-                {newPosition === 'Daily Wage' && (
+                {isDailyWorkloadExcludedPosition(newPosition) && (
                   <p className="text-[10px] text-sky-700 font-medium mt-1">
-                    ไม่นับในภาระงานประจำวัน (บันทึกวันลา/OT เพื่อคิด Unit Cost เมนู 2 ได้)
+                    ตำแหน่งจ้างรายวันไม่นับในภาระงานประจำวัน (บันทึกวันลา/OT เพื่อคิด Unit Cost เมนู 2 ได้)
                   </p>
                 )}
               </div>
@@ -1137,7 +1138,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                         staff.position === 'PN' ? 'bg-teal-100 text-teal-800' :
                         (staff.position === 'NA' || staff.position === 'PCA') ? 'bg-emerald-100 text-emerald-800' :
                         staff.position === 'Clerk' ? 'bg-amber-100 text-amber-800' :
-                        staff.position === 'Daily Wage' ? 'bg-sky-100 text-sky-800' :
+                        isDailyWorkloadExcludedPosition(staff.position) ? 'bg-sky-100 text-sky-800' :
                         'bg-gray-100 text-gray-800'
                       }`}>
                         {formatPositionLabel(staff.position)}
@@ -1999,9 +2000,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                       <option key={p} value={p}>{POSITION_LABELS[p]}</option>
                     ))}
                   </select>
-                  {editingStaff.position === 'Daily Wage' && (
+                  {isDailyWorkloadExcludedPosition(editingStaff.position) && (
                     <p className="text-[10px] text-sky-700 font-medium mt-1">
-                      ตำแหน่งนี้ไม่นับในภาระงานประจำวัน (ใช้บันทึกวันลา/OT นับ Unit Cost ประจำปี)
+                      ตำแหน่งจ้างรายวันไม่นับในภาระงานประจำวัน (ใช้บันทึกวันลา/OT นับ Unit Cost ประจำปี)
                     </p>
                   )}
                 </div>

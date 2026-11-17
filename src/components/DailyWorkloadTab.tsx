@@ -722,7 +722,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       PCA: 0,
       Clerk: Number(clerk) || 0,
       'Service Worker': Number(serviceWorker) || 0,
-      'Daily Wage': 0,
+      'RN (Daily Wage)': 0,
+      'PN (Daily Wage)': 0,
+      'NA (Daily Wage)': 0,
+      'Clerk (Daily Wage)': 0,
+      'Service Worker (Daily Wage)': 0,
     };
 
     const positionShortLabels: Record<StaffPosition, string> = {
@@ -733,7 +737,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       PCA: 'NA',
       Clerk: 'ผู้ปฏิบัติงานทั่วไป',
       'Service Worker': 'พนักงานบริการ',
-      'Daily Wage': 'จ้างรายวัน',
+      'RN (Daily Wage)': 'พยาบาล(จ้างรายวัน)',
+      'PN (Daily Wage)': 'ผู้ช่วยพยาบาล(จ้างรายวัน)',
+      'NA (Daily Wage)': 'ผู้ช่วยคนไข้(จ้างรายวัน)',
+      'Clerk (Daily Wage)': 'ผู้ปฏิบัติงานทั่วไป(จ้างรายวัน)',
+      'Service Worker (Daily Wage)': 'พนักงานบริการ(จ้างรายวัน)',
     };
 
     const trackedPositions = ALL_POSITIONS.filter(

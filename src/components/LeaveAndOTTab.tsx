@@ -20,6 +20,7 @@ import {
   LEGACY_PREMIUM_CLINIC_GROUP,
   compareStaffByPositionAndStartDate,
   isTrainingLeaveType,
+  isDailyWorkloadExcludedPosition,
   parseLeavePeriodFromNote,
   stripLeavePeriodFromNote,
   formatLeaveNoteWithPeriod,
@@ -791,7 +792,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         if (clinicFilter !== 'ALL' && item.staff.homeClinic !== clinicFilter) {
           return false;
         }
-        if (fiscalPositionFilter !== 'ALL' && item.staff.position !== fiscalPositionFilter) {
+        if (fiscalPositionFilter === 'DAILY_WAGE_ALL') {
+          if (!isDailyWorkloadExcludedPosition(item.staff.position)) return false;
+        } else if (fiscalPositionFilter !== 'ALL' && item.staff.position !== fiscalPositionFilter) {
           return false;
         }
         if (staffFilter !== 'ALL' && item.staff.staffId !== staffFilter) {
@@ -1026,7 +1029,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const filteredRoster = Array.from(rosterMap.values())
       .filter((person) => {
         if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
-        if (fiscalPositionFilter !== 'ALL' && person.position !== fiscalPositionFilter) return false;
+        if (fiscalPositionFilter === 'DAILY_WAGE_ALL') {
+          if (!isDailyWorkloadExcludedPosition(person.position)) return false;
+        } else if (fiscalPositionFilter !== 'ALL' && person.position !== fiscalPositionFilter) {
+          return false;
+        }
         if (staffFilter !== 'ALL' && person.id !== staffFilter) return false;
         if (q) {
           const match =
@@ -2568,7 +2575,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                   ? 'bg-teal-100 text-teal-800'
                                   : s.position === 'NA' || s.position === 'PCA'
                                     ? 'bg-emerald-100 text-emerald-800'
-                                    : s.position === 'Daily Wage'
+                                    : isDailyWorkloadExcludedPosition(s.position)
                                       ? 'bg-sky-100 text-sky-800'
                                       : 'bg-gray-100 text-gray-800'
                             }`}
@@ -3375,6 +3382,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   className="w-full text-xs rounded-lg border-gray-300 py-1.5 px-2.5 border bg-white font-medium text-gray-900 focus:ring-1 focus:ring-teal-500"
                 >
                   <option value="ALL">-- ทุกตำแหน่งวิชาชีพ --</option>
+                  <option value="DAILY_WAGE_ALL">รวมทุกตำแหน่ง (จ้างรายวัน ทั้งหมด)</option>
                   {ALL_POSITIONS.map((p) => (
                     <option key={p} value={p}>
                       {POSITION_LABELS[p]}
@@ -3598,7 +3606,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-teal-100 text-teal-800'
                                       : staff.position === 'NA' || staff.position === 'PCA'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : staff.position === 'Daily Wage'
+                                        : isDailyWorkloadExcludedPosition(staff.position)
                                           ? 'bg-sky-100 text-sky-800'
                                           : 'bg-gray-100 text-gray-800'
                               }`}
@@ -3737,7 +3745,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-teal-100 text-teal-800'
                                       : staff.position === 'NA' || staff.position === 'PCA'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : staff.position === 'Daily Wage'
+                                        : isDailyWorkloadExcludedPosition(staff.position)
                                           ? 'bg-sky-100 text-sky-800'
                                           : 'bg-gray-100 text-gray-800'
                               }`}

@@ -10,26 +10,86 @@ export type StaffPosition =
   | 'NA'
   | 'Clerk'
   | 'Service Worker'
-  | 'Daily Wage'
+  | 'RN (Daily Wage)'
+  | 'PN (Daily Wage)'
+  | 'NA (Daily Wage)'
+  | 'Clerk (Daily Wage)'
+  | 'Service Worker (Daily Wage)'
   | 'PCA';
 
-export const DAILY_WAGE_POSITION = 'Daily Wage' as const;
+export const DAILY_WAGE_POSITIONS: StaffPosition[] = [
+  'RN (Daily Wage)',
+  'PN (Daily Wage)',
+  'NA (Daily Wage)',
+  'Clerk (Daily Wage)',
+  'Service Worker (Daily Wage)',
+];
 
 export const isDailyWorkloadExcludedPosition = (pos?: string): boolean => {
-  const trimmed = (pos || '').trim();
+  const compact = (pos || '').trim().replace(/\s+/g, ' ');
+  if (!compact) return false;
   return (
+    compact === 'RN (Daily Wage)' ||
+    compact === 'PN (Daily Wage)' ||
+    compact === 'NA (Daily Wage)' ||
+    compact === 'PCA (Daily Wage)' ||
+    compact === 'Clerk (Daily Wage)' ||
+    compact === 'Service Worker (Daily Wage)' ||
+    compact === 'Daily Wage' ||
+    compact === 'Daily Nurse' ||
+    compact === 'Daily Hire' ||
+    compact.includes('จ้างรายวัน')
+  );
+};
+
+export const normalizeStaffPosition = (pos?: string): StaffPosition => {
+  const trimmed = (pos || '').trim().replace(/\s+/g, ' ');
+  if (trimmed === 'PCA') return 'NA';
+  if (
+    trimmed === 'RN (Daily Wage)' ||
+    trimmed === 'พยาบาล(จ้างรายวัน)' ||
+    trimmed === 'พยาบาล (จ้างรายวัน)' ||
+    trimmed === 'พยาบาลวิชาชีพ(จ้างรายวัน)' ||
+    trimmed === 'พยาบาลวิชาชีพ (จ้างรายวัน)' ||
     trimmed === 'Daily Wage' ||
     trimmed === 'Daily Nurse' ||
     trimmed === 'Daily Hire' ||
     trimmed === 'จ้างรายวัน' ||
     trimmed === 'พยาบาลจ้างรายวัน'
-  );
-};
-
-export const normalizeStaffPosition = (pos?: string): StaffPosition => {
-  const trimmed = (pos || '').trim();
-  if (trimmed === 'PCA') return 'NA';
-  if (isDailyWorkloadExcludedPosition(trimmed)) return 'Daily Wage';
+  ) {
+    return 'RN (Daily Wage)';
+  }
+  if (
+    trimmed === 'PN (Daily Wage)' ||
+    trimmed === 'ผู้ช่วยพยาบาล(จ้างรายวัน)' ||
+    trimmed === 'ผู้ช่วยพยาบาล (จ้างรายวัน)'
+  ) {
+    return 'PN (Daily Wage)';
+  }
+  if (
+    trimmed === 'NA (Daily Wage)' ||
+    trimmed === 'PCA (Daily Wage)' ||
+    trimmed === 'ผู้ช่วยคนไข้(จ้างรายวัน)' ||
+    trimmed === 'ผู้ช่วยคนไข้ (จ้างรายวัน)' ||
+    trimmed === 'ผู้ช่วยเหลือคนไข้(จ้างรายวัน)' ||
+    trimmed === 'ผู้ช่วยเหลือคนไข้ (จ้างรายวัน)'
+  ) {
+    return 'NA (Daily Wage)';
+  }
+  if (
+    trimmed === 'Clerk (Daily Wage)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป(จ้างรายวัน)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป (จ้างรายวัน)'
+  ) {
+    return 'Clerk (Daily Wage)';
+  }
+  if (
+    trimmed === 'Service Worker (Daily Wage)' ||
+    trimmed === 'พนักงานบริการ(จ้างรายวัน)' ||
+    trimmed === 'พนักงานบริการ (จ้างรายวัน)'
+  ) {
+    return 'Service Worker (Daily Wage)';
+  }
   if (
     trimmed === 'HN' ||
     trimmed === 'RN' ||
@@ -456,7 +516,11 @@ export const ALL_POSITIONS: StaffPosition[] = [
   'NA',
   'Clerk',
   'Service Worker',
-  'Daily Wage',
+  'RN (Daily Wage)',
+  'PN (Daily Wage)',
+  'NA (Daily Wage)',
+  'Clerk (Daily Wage)',
+  'Service Worker (Daily Wage)',
 ];
 
 export const POSITION_LABELS: Record<StaffPosition, string> = {
@@ -467,7 +531,11 @@ export const POSITION_LABELS: Record<StaffPosition, string> = {
   PCA: 'ผู้ช่วยเหลือคนไข้',
   Clerk: 'ผู้ปฏิบัติงานทั่วไป',
   'Service Worker': 'พนักงานบริการ',
-  'Daily Wage': 'จ้างรายวัน',
+  'RN (Daily Wage)': 'พยาบาล(จ้างรายวัน)',
+  'PN (Daily Wage)': 'ผู้ช่วยพยาบาล(จ้างรายวัน)',
+  'NA (Daily Wage)': 'ผู้ช่วยคนไข้(จ้างรายวัน)',
+  'Clerk (Daily Wage)': 'ผู้ปฏิบัติงานทั่วไป(จ้างรายวัน)',
+  'Service Worker (Daily Wage)': 'พนักงานบริการ(จ้างรายวัน)',
 };
 
 export const formatPositionLabel = (pos: StaffPosition | string): string => {
@@ -477,7 +545,14 @@ export const formatPositionLabel = (pos: StaffPosition | string): string => {
   if (pos === 'NA' || pos === 'PCA') return 'ผู้ช่วยเหลือคนไข้';
   if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
   if (pos === 'Service Worker') return 'พนักงานบริการ';
-  if (isDailyWorkloadExcludedPosition(pos)) return 'จ้างรายวัน';
+  if (pos === 'RN (Daily Wage)' || pos === 'Daily Wage' || pos === 'จ้างรายวัน') {
+    return 'พยาบาล(จ้างรายวัน)';
+  }
+  if (pos === 'PN (Daily Wage)') return 'ผู้ช่วยพยาบาล(จ้างรายวัน)';
+  if (pos === 'NA (Daily Wage)') return 'ผู้ช่วยคนไข้(จ้างรายวัน)';
+  if (pos === 'Clerk (Daily Wage)') return 'ผู้ปฏิบัติงานทั่วไป(จ้างรายวัน)';
+  if (pos === 'Service Worker (Daily Wage)') return 'พนักงานบริการ(จ้างรายวัน)';
+  if (isDailyWorkloadExcludedPosition(pos)) return POSITION_LABELS[normalizeStaffPosition(pos)];
   return pos;
 };
 
@@ -489,7 +564,11 @@ export const POSITION_SORT_ORDER: Record<StaffPosition, number> = {
   PCA: 4,
   Clerk: 5,
   'Service Worker': 6,
-  'Daily Wage': 7,
+  'RN (Daily Wage)': 7,
+  'PN (Daily Wage)': 8,
+  'NA (Daily Wage)': 9,
+  'Clerk (Daily Wage)': 10,
+  'Service Worker (Daily Wage)': 11,
 };
 
 export const compareStaffByPositionAndStartDate = (
