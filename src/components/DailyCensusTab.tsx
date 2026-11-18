@@ -541,366 +541,171 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         </div>
       </div>
 
-      {/* Main Census Report Sheet (Print & JPEG Optimized) */}
-      <div
-        ref={reportSheetRef}
-        className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-6 space-y-4 print:p-0 print:border-none print:shadow-none"
-      >
-        {/* Printable Hospital Header */}
-        <div className="border-b border-gray-300 pb-3 text-center">
-          <h3 className="text-base sm:text-lg font-bold text-gray-950">
-            โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน มหาวิทยาลัยศรีนครินทรวิโรฒ
-          </h3>
-          <p className="text-xs font-semibold text-gray-700 mt-0.5">
-            รายงานสถิติผู้ป่วยนอกและอัตรากำลังประจำวัน (Daily OPD Census Report)
-          </p>
-          <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-1 text-xs text-gray-600 mt-1">
-            <span><strong>วันที่:</strong> {formattedThaiDate}</span>
-            <span>•</span>
-            <span><strong>กะเวลา:</strong> {shiftFilter === 'ALL' ? 'ทุกกะเวลา' : shiftFilter}</span>
-            <span>•</span>
-            <span><strong>พิมพ์เมื่อ:</strong> {new Date().toLocaleString('th-TH')}</span>
+      {/* Main Census Report Sheet (Print A4 Landscape & JPEG Optimized) */}
+      <div className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-5 overflow-x-auto print:overflow-visible print:p-0 print:border-none print:shadow-none">
+        <div
+          ref={reportSheetRef}
+          className="print-landscape-sheet w-[1030px] max-w-full print:w-full mx-auto bg-white space-y-3.5 print:space-y-2"
+        >
+          {/* Printable Hospital Header */}
+          <div className="border-b border-gray-300 pb-2.5 text-center">
+            <h3 className="text-base sm:text-lg font-bold text-gray-950 print:text-sm">
+              โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน มหาวิทยาลัยศรีนครินทรวิโรฒ
+            </h3>
+            <p className="text-xs font-semibold text-gray-700 mt-0.5 print:text-[10.5px]">
+              รายงานสถิติผู้ป่วยนอกและอัตรากำลังประจำวัน (Daily OPD Census Report)
+            </p>
+            <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-1 text-xs text-gray-600 mt-1 print:text-[9.5px]">
+              <span><strong>วันที่:</strong> {formattedThaiDate}</span>
+              <span>•</span>
+              <span><strong>กะเวลา:</strong> {shiftFilter === 'ALL' ? 'ทุกกะเวลา' : shiftFilter}</span>
+              <span>•</span>
+              <span><strong>พิมพ์เมื่อ:</strong> {new Date().toLocaleString('th-TH')}</span>
+            </div>
           </div>
-        </div>
 
-        {/* Detailed Table */}
-        <div className="overflow-x-auto print-fit-container">
-          <table className="w-full text-left text-xs border border-gray-300 print:text-[8.5px] print-fit-table">
-            <thead className="bg-slate-100 text-slate-800 font-bold border-b border-gray-300">
-              <tr>
-                <th className="py-2.5 px-2 text-center w-8 print:w-[22px] print:px-0.5 print:py-1">ที่</th>
-                <th className="py-2.5 px-3 print:px-1 print:py-1">ห้องตรวจ / แผนก</th>
-                <th className="py-2.5 px-2 print:w-[68px] print:px-1 print:py-1">กะเวลา</th>
-                <th className="py-2.5 px-2 text-right bg-blue-50 text-blue-950 print:w-[34px] print:px-0.5 print:py-1">ผู้ป่วยรวม</th>
-                <th className="py-2.5 px-2 text-right print:w-[30px] print:px-0.5 print:py-1">ผู้ใหญ่</th>
-                <th className="py-2.5 px-2 text-right print:w-[26px] print:px-0.5 print:py-1">เด็ก</th>
-                <th className="py-2.5 px-2 text-right bg-red-50 text-red-950 print:w-[30px] print:px-0.5 print:py-1">Admit</th>
-                <th className="py-2.5 px-1.5 text-center print:w-[22px] print:px-0.5 print:py-1">HN</th>
-                <th className="py-2.5 px-1.5 text-center bg-blue-50/70 font-bold text-blue-900 print:w-[22px] print:px-0.5 print:py-1">RN</th>
-                <th className="py-2.5 px-1.5 text-center bg-teal-50/70 text-teal-900 print:w-[22px] print:px-0.5 print:py-1">PN</th>
-                <th className="py-2.5 px-1.5 text-center bg-emerald-50/70 text-emerald-900 print:w-[22px] print:px-0.5 print:py-1">NA</th>
-                <th className="py-2.5 px-1.5 text-center print:w-[34px] print:px-0.5 print:py-1">ผู้ปฏิบัติงานทั่วไป</th>
-                <th className="py-2.5 px-1.5 text-center print:w-[32px] print:px-0.5 print:py-1">พนักงานบริการ</th>
-                <th className="py-2.5 px-3 print:w-[68px] print:px-1 print:py-1">ผู้บันทึกรายงาน</th>
-                <th className="py-2.5 px-3 print:px-1 print:py-1">หมายเหตุ</th>
-                {isAdmin && <th className="py-2.5 px-2 text-center no-print bg-slate-100">จัดการ</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredWorkloads.length === 0 ? (
+          {/* Detailed Table (A4 Landscape Fit - Zero Overflow) */}
+          <div className="print-fit-container">
+            <table className="w-full table-fixed text-left text-[11px] border border-gray-300 border-collapse print:text-[8.5px] print-fit-table">
+              <colgroup>
+                <col className="w-[26px]" />
+                <col className="w-[162px]" />
+                <col className="w-[92px]" />
+                <col className="w-[44px]" />
+                <col className="w-[40px]" />
+                <col className="w-[34px]" />
+                <col className="w-[40px]" />
+                <col className="w-[26px]" />
+                <col className="w-[30px]" />
+                <col className="w-[30px]" />
+                <col className="w-[30px]" />
+                <col className="w-[50px]" />
+                <col className="w-[46px]" />
+                <col className="w-[116px]" />
+                <col />
+                {isAdmin && <col className="no-print w-[46px]" />}
+              </colgroup>
+              <thead className="bg-slate-100 text-slate-800 font-bold border-b border-gray-300">
                 <tr>
-                  <td colSpan={isAdmin ? 16 : 15} className="py-8 text-center text-gray-400">
-                    ไม่มีรายการบันทึกภาระงานในวันที่และกะที่เลือก
-                  </td>
+                  <th className="py-2 px-1 text-center print:px-0.5 print:py-1">ที่</th>
+                  <th className="py-2 px-2 print:px-1 print:py-1">ห้องตรวจ / แผนก</th>
+                  <th className="py-2 px-1.5 print:px-1 print:py-1">กะเวลา</th>
+                  <th className="py-2 px-1 text-right bg-blue-50 text-blue-950 leading-tight print:px-0.5 print:py-1">ผู้ป่วยรวม</th>
+                  <th className="py-2 px-1 text-right print:px-0.5 print:py-1">ผู้ใหญ่</th>
+                  <th className="py-2 px-1 text-right print:px-0.5 print:py-1">เด็ก</th>
+                  <th className="py-2 px-1 text-right bg-red-50 text-red-950 print:px-0.5 print:py-1">Admit</th>
+                  <th className="py-2 px-0.5 text-center print:py-1">HN</th>
+                  <th className="py-2 px-0.5 text-center bg-blue-50/70 font-bold text-blue-900 print:py-1">RN</th>
+                  <th className="py-2 px-0.5 text-center bg-teal-50/70 text-teal-900 print:py-1">PN</th>
+                  <th className="py-2 px-0.5 text-center bg-emerald-50/70 text-emerald-900 print:py-1">NA</th>
+                  <th className="py-2 px-1 text-center leading-tight print:px-0.5 print:py-1">ผู้ปฏิบัติงานทั่วไป</th>
+                  <th className="py-2 px-1 text-center leading-tight print:px-0.5 print:py-1">พนักงานบริการ</th>
+                  <th className="py-2 px-1.5 print:px-1 print:py-1">ผู้บันทึกรายงาน</th>
+                  <th className="py-2 px-2 print:px-1 print:py-1">หมายเหตุ</th>
+                  {isAdmin && <th className="py-2 px-1 text-center no-print bg-slate-100">จัดการ</th>}
                 </tr>
-              ) : (
-                <>
-                  {regularWorkloads.map((w, index) => {
-                    const hasRefDetails = isReferralWorkload(w) && Boolean(w.referralData);
-                    const refData = hasRefDetails ? normalizeReferralData(w.referralData) : null;
-                    const refTotal = refData ? getReferralTotalCount(refData) : 0;
-                    const refDateMatch = (w.date || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-                    const refDay = refDateMatch ? String(Number(refDateMatch[3])) : '-';
-                    const refMonth = refDateMatch ? THAI_SHORT_MONTHS[Number(refDateMatch[2]) - 1] || '-' : '-';
-                    const refBeYear = refDateMatch ? String(Number(refDateMatch[1]) + 543) : '-';
-                    const leftRefDefs = REFERRAL_ITEM_DEFINITIONS.slice(0, 3);
-                    const rightRefDefs = REFERRAL_ITEM_DEFINITIONS.slice(3, 6);
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {filteredWorkloads.length === 0 ? (
+                  <tr>
+                    <td colSpan={isAdmin ? 16 : 15} className="py-8 text-center text-gray-400">
+                      ไม่มีรายการบันทึกภาระงานในวันที่และกะที่เลือก
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    {regularWorkloads.map((w, index) => {
+                      const hasRefDetails = isReferralWorkload(w) && Boolean(w.referralData);
+                      const refData = hasRefDetails ? normalizeReferralData(w.referralData) : null;
+                      const refTotal = refData ? getReferralTotalCount(refData) : 0;
 
-                    return (
-                      <React.Fragment key={w.id}>
-                        <tr className="hover:bg-slate-50/80">
-                          <td className="py-2 px-2 text-center text-gray-500 print:px-0.5 print:py-1">{index + 1}</td>
-                          <td className="py-2 px-3 font-bold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">{w.clinic}</td>
-                          <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.shift}</td>
-                          <td className="py-2 px-2 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">{getEffectiveTotalPt(w)}</td>
-                          <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
-                          <td className="py-2 px-2 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
-                          <td className="py-2 px-2 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
-                          <td className="py-2 px-1.5 text-center text-gray-700 print:px-0.5 print:py-1">{w.hn}</td>
-                          <td className="py-2 px-1.5 text-center font-bold text-blue-800 bg-blue-50/40 print:px-0.5 print:py-1">{w.rn}</td>
-                          <td className="py-2 px-1.5 text-center text-teal-800 bg-teal-50/40 print:px-0.5 print:py-1">{w.pn}</td>
-                          <td className="py-2 px-1.5 text-center text-emerald-800 bg-emerald-50/40 print:px-0.5 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
-                          <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
-                          <td className="py-2 px-1.5 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
-                          <td className="py-2 px-3 text-gray-800 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
-                          <td className="py-2 px-3 text-gray-500 text-[11px] max-w-[200px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={w.note}>
-                            <div className="truncate print:whitespace-normal print:overflow-visible">
-                              {w.note || (hasRefDetails ? 'รายละเอียดตามตารางย่อยด้านล่าง' : '-')}
-                            </div>
-                            {(w.lastEditReason || w.lastEditedAt) && (
-                              <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
-                                แก้ไข: {w.lastEditReason || '-'}
-                              </div>
-                            )}
-                          </td>
-                          {isAdmin && (
-                            <td className="py-2 px-2 text-center whitespace-nowrap no-print">
-                              <div className="flex items-center justify-center gap-1">
-                                {onUpdateWorkload && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingWorkload({
-                                        ...w,
-                                        totalPt: getEffectiveTotalPt(w),
-                                        ...(isReferralWorkload(w)
-                                          ? { referralData: normalizeReferralData(w.referralData) }
-                                          : {}),
-                                      });
-                                      setEditWorkloadReason('');
-                                      setEditWorkloadReasonError('');
-                                      setEditModalError('');
-                                    }}
-                                    className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
-                                    title="แก้ไขข้อมูลภาระงาน"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
-                                {onDeleteWorkload && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setDeletingWorkload(w);
-                                      setDeleteWorkloadReason('');
-                                      setDeleteWorkloadReasonError('');
-                                    }}
-                                    className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
-                                    title="ลบรายการ"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          )}
-                        </tr>
-                        {refData && (
-                          <tr className="bg-indigo-50/35 print:bg-indigo-50/20">
-                            <td className="py-1.5 px-2 text-center text-indigo-500 font-bold align-top print:px-0.5 print:py-1">
-                              ↳
-                            </td>
-                            <td colSpan={isAdmin ? 15 : 14} className="py-2 px-3 print:px-1.5 print:py-1">
-                              <div className="border border-indigo-300 print:border-gray-700 rounded bg-white overflow-hidden">
-                                <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1 bg-indigo-50/70 print:bg-slate-100 border-b border-indigo-200 print:border-gray-700 text-[11px] print:text-[8px] font-bold text-indigo-950 print:text-gray-900">
-                                  <span>
-                                    รายละเอียดห้องรับ - ส่งต่อผู้ป่วย (วันที่ {refDay} เดือน {refMonth} พ.ศ. {refBeYear})
-                                  </span>
-                                  <span>
-                                    รวมทั้งหมด <strong className="text-indigo-700 print:text-gray-900">{refTotal.toLocaleString()}</strong> รายการ
-                                    <span className="mx-2 text-gray-400">|</span>
-                                    ผู้รายงาน: {w.reporter || '-'}
-                                  </span>
-                                </div>
-                                <table className="w-full text-[11px] print:text-[8px] border-collapse">
-                                  <thead>
-                                    <tr className="bg-slate-50 border-b border-gray-300 print:border-gray-700 text-gray-700 font-semibold">
-                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[16%]">รายการ</th>
-                                      <th className="py-1 px-2 text-center border-r border-gray-300 print:border-gray-700 w-[8%]">จำนวน</th>
-                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[26%]">เหตุผล</th>
-                                      <th className="py-1 px-2 text-left border-r border-gray-300 print:border-gray-700 w-[16%]">รายการ</th>
-                                      <th className="py-1 px-2 text-center border-r border-gray-300 print:border-gray-700 w-[8%]">จำนวน</th>
-                                      <th className="py-1 px-2 text-left w-[26%]">เหตุผล</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-gray-200 print:divide-gray-400">
-                                    {[0, 1, 2].map((rowIdx) => {
-                                      const lDef = leftRefDefs[rowIdx];
-                                      const rDef = rightRefDefs[rowIdx];
-                                      const lItem = refData[lDef.key];
-                                      const rItem = refData[rDef.key];
-                                      return (
-                                        <tr key={rowIdx}>
-                                          <td className="py-1 px-2 font-medium text-gray-800 border-r border-gray-300 print:border-gray-700">
-                                            {lDef.label}
-                                          </td>
-                                          <td className="py-1 px-2 text-center font-bold text-gray-900 border-r border-gray-300 print:border-gray-700">
-                                            {lItem.count > 0 ? lItem.count.toLocaleString() : '-'}
-                                          </td>
-                                          <td className="py-1 px-2 text-gray-700 border-r border-gray-300 print:border-gray-700">
-                                            {lItem.reason || '-'}
-                                          </td>
-                                          <td className="py-1 px-2 font-medium text-gray-800 border-r border-gray-300 print:border-gray-700">
-                                            {rDef.label}
-                                          </td>
-                                          <td className="py-1 px-2 text-center font-bold text-gray-900 border-r border-gray-300 print:border-gray-700">
-                                            {rItem.count > 0 ? rItem.count.toLocaleString() : '-'}
-                                          </td>
-                                          <td className="py-1 px-2 text-gray-700">
-                                            {rItem.reason || '-'}
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
-
-                  {premiumGroups.map((grp, grpIdx) => {
-                    const poolRec = grp.primaryPoolRecord;
-                    return (
-                      <React.Fragment key={grp.key}>
-                        {/* Master Row: ศูนย์ปัญญาภิรมย์ */}
-                        <tr className="bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200">
-                          <td className="py-2 px-2 text-center font-bold text-orange-900 print:px-0.5 print:py-1">
-                            {regularWorkloads.length + grpIdx + 1}
-                          </td>
-                          <td className="py-2 px-3 font-extrabold text-orange-950 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">
-                            <div className="inline-flex items-center gap-1.5 flex-wrap">
-                              <Star className="w-3.5 h-3.5 text-orange-600 shrink-0 no-print" />
-                              <span>{PREMIUM_CLINIC_GROUP}</span>
-                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-200/80 text-orange-900 print:text-[7.5px] print:px-1">
-                                รวม {grp.subRows.length} แผนก
-                              </span>
-                            </div>
-                          </td>
-                          <td className="py-2 px-2 text-orange-900 font-semibold whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">
-                            {grp.shift}
-                          </td>
-                          <td className="py-2 px-2 text-right font-extrabold text-blue-950 bg-blue-50/50 print:px-0.5 print:py-1">
-                            {grp.totalPt}
-                          </td>
-                          <td className="py-2 px-2 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
-                            {grp.adultPt}
-                          </td>
-                          <td className="py-2 px-2 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
-                            {grp.childPt}
-                          </td>
-                          <td className="py-2 px-2 text-right font-extrabold text-red-700 bg-red-50/50 print:px-0.5 print:py-1">
-                            {grp.admit}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-bold text-orange-950 print:px-0.5 print:py-1">
-                            {grp.hn}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-extrabold text-blue-900 bg-blue-50/50 print:px-0.5 print:py-1">
-                            {grp.rn}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-bold text-teal-900 bg-teal-50/50 print:px-0.5 print:py-1">
-                            {grp.pn}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-bold text-emerald-900 bg-emerald-50/50 print:px-0.5 print:py-1">
-                            {grp.na}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
-                            {grp.clerk}
-                          </td>
-                          <td className="py-2 px-1.5 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
-                            {grp.serviceWorker}
-                          </td>
-                          <td className="py-2 px-3 text-gray-900 font-medium whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-1">
-                            {grp.reporter}
-                          </td>
-                          <td className="py-2 px-3 text-orange-800 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-1" title={grp.note}>
-                            <div className="truncate print:whitespace-normal print:overflow-visible">
-                              {grp.note || (poolRec ? 'กำลังคนรวมทั้งคลินิก' : '-')}
-                            </div>
-                            {poolRec && (poolRec.lastEditReason || poolRec.lastEditedAt) && (
-                              <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate">
-                                แก้ไขกำลังคน: {poolRec.lastEditReason || '-'}
-                              </div>
-                            )}
-                          </td>
-                          {isAdmin && (
-                            <td className="py-2 px-2 text-center whitespace-nowrap no-print">
-                              {poolRec ? (
-                                <div className="flex items-center justify-center gap-1">
-                                  {onUpdateWorkload && (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingWorkload({ ...poolRec, totalPt: getEffectiveTotalPt(poolRec) });
-                                        setEditWorkloadReason('');
-                                        setEditWorkloadReasonError('');
-                                        setEditModalError('');
-                                      }}
-                                      className="text-orange-700 hover:text-orange-900 p-1 rounded hover:bg-orange-200/70 cursor-pointer"
-                                      title="แก้ไขกำลังคนรวมศูนย์ปัญญาภิรมย์"
-                                    >
-                                      <Pencil className="w-3.5 h-3.5" />
-                                    </button>
-                                  )}
-                                  {onDeleteWorkload && (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setDeletingWorkload(poolRec);
-                                        setDeleteWorkloadReason('');
-                                        setDeleteWorkloadReasonError('');
-                                      }}
-                                      className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
-                                      title="ลบแถวกำลังคนรวม"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-[10px] text-gray-400">-</span>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-
-                        {/* Detail Rows: แผนกย่อยของศูนย์ปัญญาภิรมย์ */}
-                        {grp.subRows.map((sub) => (
-                          <tr key={sub.id} className="bg-orange-50/20 hover:bg-orange-50/60 text-gray-700">
-                            <td className="py-1.5 px-2 text-center text-orange-400 print:px-0.5 print:py-0.5">•</td>
-                            <td className="py-1.5 px-3 pl-6 font-semibold text-gray-800 whitespace-nowrap print:whitespace-normal print:pl-3 print:px-1 print:py-0.5">
-                              <span className="text-orange-500 mr-1.5">↳</span>
-                              {sub.clinic}
-                            </td>
-                            <td className="py-1.5 px-2 text-gray-500 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-0.5">
-                              {sub.shift}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-bold text-blue-900 bg-blue-50/20 print:px-0.5 print:py-0.5">
-                              {getEffectiveTotalPt(sub)}
-                            </td>
-                            <td className="py-1.5 px-2 text-right text-gray-600 print:px-0.5 print:py-0.5">
-                              {sub.adultPt}
-                            </td>
-                            <td className="py-1.5 px-2 text-right text-gray-600 print:px-0.5 print:py-0.5">
-                              {sub.childPt}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-bold text-red-600 bg-red-50/20 print:px-0.5 print:py-0.5">
-                              {sub.admit}
+                      return (
+                        <React.Fragment key={w.id}>
+                          <tr
+                            className={
+                              refData
+                                ? 'bg-indigo-50/75 hover:bg-indigo-100/60 border-t-2 border-indigo-200'
+                                : 'hover:bg-slate-50/80'
+                            }
+                          >
+                            <td
+                              className={`py-2 px-1 text-center print:px-0.5 print:py-1 ${
+                                refData ? 'font-bold text-indigo-900' : 'text-gray-500'
+                              }`}
+                            >
+                              {index + 1}
                             </td>
                             <td
-                              colSpan={6}
-                              className="py-1.5 px-2 text-center text-[11px] italic text-orange-700/80 bg-orange-50/30 print:text-[7.5px] print:px-0.5 print:py-0.5"
+                              className={`py-2 px-2 break-words print:px-1 print:py-1 ${
+                                refData ? 'font-extrabold text-indigo-950' : 'font-bold text-gray-900'
+                              }`}
                             >
-                              ใช้กำลังคนร่วม (Pooled Staffing)
+                              {refData ? (
+                                <div className="inline-flex items-center gap-1 flex-wrap">
+                                  <span>{w.clinic}</span>
+                                  <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-indigo-200/80 text-indigo-900 print:text-[7.5px] print:px-1">
+                                    รวม {REFERRAL_ITEM_DEFINITIONS.length} รายการ
+                                  </span>
+                                </div>
+                              ) : (
+                                w.clinic
+                              )}
                             </td>
-                            <td className="py-1.5 px-3 text-gray-600 whitespace-nowrap text-[11px] print:whitespace-normal print:text-[8px] print:px-1 print:py-0.5">
-                              {sub.reporter}
+                            <td
+                              className={`py-2 px-1.5 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
+                                refData ? 'text-indigo-900 font-semibold' : 'text-gray-600'
+                              }`}
+                            >
+                              {w.shift}
                             </td>
-                            <td className="py-1.5 px-3 text-gray-500 text-[11px] max-w-[170px] print:max-w-none print:text-[8px] print:px-1 print:py-0.5" title={sub.note}>
-                              <div className="truncate print:whitespace-normal print:overflow-visible">{sub.note || '-'}</div>
-                              {(sub.lastEditReason || sub.lastEditedAt) && (
-                                <div className="no-print mt-0.5 text-[10px] text-amber-700 truncate">
-                                  แก้ไข: {sub.lastEditReason || '-'}
+                            <td className="py-2 px-1 text-right font-bold text-blue-900 bg-blue-50/30 print:px-0.5 print:py-1">
+                              {refData ? refTotal : getEffectiveTotalPt(w)}
+                            </td>
+                            <td className="py-2 px-1 text-right text-gray-600 print:px-0.5 print:py-1">{w.adultPt}</td>
+                            <td className="py-2 px-1 text-right text-gray-600 print:px-0.5 print:py-1">{w.childPt}</td>
+                            <td className="py-2 px-1 text-right font-bold text-red-600 bg-red-50/30 print:px-0.5 print:py-1">{w.admit}</td>
+                            <td className="py-2 px-0.5 text-center text-gray-700 print:py-1">{w.hn}</td>
+                            <td className="py-2 px-0.5 text-center font-bold text-blue-800 bg-blue-50/40 print:py-1">{w.rn}</td>
+                            <td className="py-2 px-0.5 text-center text-teal-800 bg-teal-50/40 print:py-1">{w.pn}</td>
+                            <td className="py-2 px-0.5 text-center text-emerald-800 bg-emerald-50/40 print:py-1">{w.na !== undefined ? w.na : (w.pca || 0)}</td>
+                            <td className="py-2 px-1 text-center text-gray-600 print:px-0.5 print:py-1">{w.clerk}</td>
+                            <td className="py-2 px-1 text-center text-gray-600 print:px-0.5 print:py-1">{w.serviceWorker}</td>
+                            <td className="py-2 px-1.5 text-gray-800 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
+                            <td
+                              className={`py-2 px-2 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
+                                refData ? 'text-indigo-800 font-medium' : 'text-gray-500'
+                              }`}
+                              title={w.note}
+                            >
+                              <div className="whitespace-normal break-words">
+                                {refData ? (w.note || 'รายละเอียดตามรายการย่อย') : (w.note || '-')}
+                              </div>
+                              {(w.lastEditReason || w.lastEditedAt) && (
+                                <div className="no-print mt-0.5 text-[9.5px] text-amber-700 break-words" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
+                                  แก้ไข: {w.lastEditReason || '-'}
                                 </div>
                               )}
                             </td>
                             {isAdmin && (
-                              <td className="py-1.5 px-2 text-center whitespace-nowrap no-print">
-                                <div className="flex items-center justify-center gap-1">
+                              <td className="py-2 px-1 text-center no-print">
+                                <div className="flex items-center justify-center gap-0.5">
                                   {onUpdateWorkload && (
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        setEditingWorkload({ ...sub, totalPt: getEffectiveTotalPt(sub) });
+                                        setEditingWorkload({
+                                          ...w,
+                                          totalPt: getEffectiveTotalPt(w),
+                                          ...(isReferralWorkload(w)
+                                            ? { referralData: normalizeReferralData(w.referralData) }
+                                            : {}),
+                                        });
                                         setEditWorkloadReason('');
                                         setEditWorkloadReasonError('');
                                         setEditModalError('');
                                       }}
                                       className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
-                                      title="แก้ไขข้อมูลผู้ป่วยแผนกย่อย"
+                                      title="แก้ไขข้อมูลภาระงาน"
                                     >
                                       <Pencil className="w-3.5 h-3.5" />
                                     </button>
@@ -909,12 +714,12 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        setDeletingWorkload(sub);
+                                        setDeletingWorkload(w);
                                         setDeleteWorkloadReason('');
                                         setDeleteWorkloadReasonError('');
                                       }}
                                       className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
-                                      title="ลบรายการแผนกย่อย"
+                                      title="ลบรายการ"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
                                     </button>
@@ -923,59 +728,298 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                               </td>
                             )}
                           </tr>
-                        ))}
-                      </React.Fragment>
-                    );
-                  })}
-                </>
-              )}
-            </tbody>
-            {/* Total Row */}
-            <tfoot className="bg-slate-200 text-slate-900 font-extrabold border-t-2 border-gray-400">
-              <tr>
-                <td colSpan={3} className="py-2.5 px-3 text-center">
-                  ยอดรวมทั้งสิ้น ({clinicCount} คลินิก)
-                </td>
-                <td className="py-2.5 px-2 text-right text-blue-950 font-black text-sm bg-blue-100">
-                  {totals.totalPt.toLocaleString()}
-                </td>
-                <td className="py-2.5 px-2 text-right">{totals.adultPt.toLocaleString()}</td>
-                <td className="py-2.5 px-2 text-right">{totals.childPt.toLocaleString()}</td>
-                <td className="py-2.5 px-2 text-right text-red-950 font-black text-sm bg-red-100">
-                  {totals.admit.toLocaleString()}
-                </td>
-                <td className="py-2.5 px-1.5 text-center">{totals.hn.toFixed(1)}</td>
-                <td className="py-2.5 px-1.5 text-center text-blue-950 bg-blue-100 font-black">
-                  {totals.rn.toFixed(1)}
-                </td>
-                <td className="py-2.5 px-1.5 text-center text-teal-950 bg-teal-100">
-                  {totals.pn.toFixed(1)}
-                </td>
-                <td className="py-2.5 px-1.5 text-center text-emerald-950 bg-emerald-100">
-                  {totals.na.toFixed(1)}
-                </td>
-                <td className="py-2.5 px-1.5 text-center">{totals.clerk.toFixed(1)}</td>
-                <td className="py-2.5 px-1.5 text-center">{totals.serviceWorker.toFixed(1)}</td>
-                <td colSpan={2} className="py-2.5 px-3 text-right text-xs">
-                  กำลังคนพยาบาลรวม: <span className="text-emerald-900 font-black">{totalNursingOnDuty.toFixed(1)}</span> แรง
-                </td>
-                {isAdmin && <td className="no-print"></td>}
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+                          {refData &&
+                            REFERRAL_ITEM_DEFINITIONS.map((def) => {
+                              const item = refData[def.key];
+                              const countVal = Number(item?.count) || 0;
+                              const isAdmitCategory =
+                                def.key === 'admitPrivate' || def.key === 'admitGeneral';
+                              return (
+                                <tr
+                                  key={`${w.id}-${def.key}`}
+                                  className="bg-indigo-50/20 hover:bg-indigo-50/50 text-gray-700"
+                                >
+                                  <td className="py-1.5 px-1 text-center text-indigo-400 print:px-0.5 print:py-0.5">•</td>
+                                  <td className="py-1.5 px-2 pl-4 font-semibold text-gray-800 break-words print:pl-2.5 print:px-1 print:py-0.5">
+                                    <span className="text-indigo-500 mr-1">↳</span>
+                                    {def.label}
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-gray-500 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
+                                    {w.shift}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-right font-bold text-blue-900 bg-blue-50/20 print:px-0.5 print:py-0.5">
+                                    {countVal > 0 ? countVal.toLocaleString() : 0}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-right text-gray-400 print:px-0.5 print:py-0.5">-</td>
+                                  <td className="py-1.5 px-1 text-right text-gray-400 print:px-0.5 print:py-0.5">-</td>
+                                  <td
+                                    className={`py-1.5 px-1 text-right bg-red-50/20 print:px-0.5 print:py-0.5 ${
+                                      isAdmitCategory
+                                        ? 'font-bold text-red-600'
+                                        : 'text-gray-400 font-normal'
+                                    }`}
+                                  >
+                                    {isAdmitCategory ? (countVal > 0 ? countVal.toLocaleString() : 0) : '-'}
+                                  </td>
+                                  <td
+                                    colSpan={6}
+                                    className="py-1.5 px-1 text-center text-[10px] italic text-indigo-700/80 bg-indigo-50/30 print:text-[7.5px] print:px-0.5 print:py-0.5"
+                                  >
+                                    ใช้กำลังคนร่วม (Pooled Staffing)
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-gray-600 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
+                                    {w.reporter}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-gray-600 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
+                                    {item?.reason || '-'}
+                                  </td>
+                                  {isAdmin && (
+                                    <td className="py-1.5 px-1 text-center text-gray-300 text-[10px] no-print">
+                                      -
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                        </React.Fragment>
+                      );
+                    })}
 
-        {/* Printable Official Signatures */}
-        <div className="pt-8 pb-4 print:pt-12 grid grid-cols-2 gap-8 text-center text-xs text-gray-700">
-          <div>
-            <div className="h-12 border-b border-gray-400 w-48 mx-auto"></div>
-            <div className="mt-2 font-semibold">ลงชื่อ .....................................................</div>
-            <div className="text-[11px] text-gray-500 mt-0.5">(ผู้รวบรวมรายงาน / พยาบาลเวรตรวจการ)</div>
+                    {premiumGroups.map((grp, grpIdx) => {
+                      const poolRec = grp.primaryPoolRecord;
+                      return (
+                        <React.Fragment key={grp.key}>
+                          {/* Master Row: ศูนย์ปัญญาภิรมย์ */}
+                          <tr className="bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200">
+                            <td className="py-2 px-1 text-center font-bold text-orange-900 print:px-0.5 print:py-1">
+                              {regularWorkloads.length + grpIdx + 1}
+                            </td>
+                            <td className="py-2 px-2 font-extrabold text-orange-950 break-words print:px-1 print:py-1">
+                              <div className="inline-flex items-center gap-1 flex-wrap">
+                                <Star className="w-3.5 h-3.5 text-orange-600 shrink-0 no-print" />
+                                <span>{PREMIUM_CLINIC_GROUP}</span>
+                                <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-orange-200/80 text-orange-900 print:text-[7.5px] print:px-1">
+                                  รวม {grp.subRows.length} แผนก
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-2 px-1.5 text-orange-900 font-semibold text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">
+                              {grp.shift}
+                            </td>
+                            <td className="py-2 px-1 text-right font-extrabold text-blue-950 bg-blue-50/50 print:px-0.5 print:py-1">
+                              {grp.totalPt}
+                            </td>
+                            <td className="py-2 px-1 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
+                              {grp.adultPt}
+                            </td>
+                            <td className="py-2 px-1 text-right font-semibold text-gray-800 print:px-0.5 print:py-1">
+                              {grp.childPt}
+                            </td>
+                            <td className="py-2 px-1 text-right font-extrabold text-red-700 bg-red-50/50 print:px-0.5 print:py-1">
+                              {grp.admit}
+                            </td>
+                            <td className="py-2 px-0.5 text-center font-bold text-orange-950 print:py-1">
+                              {grp.hn}
+                            </td>
+                            <td className="py-2 px-0.5 text-center font-extrabold text-blue-900 bg-blue-50/50 print:py-1">
+                              {grp.rn}
+                            </td>
+                            <td className="py-2 px-0.5 text-center font-bold text-teal-900 bg-teal-50/50 print:py-1">
+                              {grp.pn}
+                            </td>
+                            <td className="py-2 px-0.5 text-center font-bold text-emerald-900 bg-emerald-50/50 print:py-1">
+                              {grp.na}
+                            </td>
+                            <td className="py-2 px-1 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
+                              {grp.clerk}
+                            </td>
+                            <td className="py-2 px-1 text-center font-semibold text-gray-700 print:px-0.5 print:py-1">
+                              {grp.serviceWorker}
+                            </td>
+                            <td className="py-2 px-1.5 text-gray-900 font-medium text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">
+                              {grp.reporter}
+                            </td>
+                            <td className="py-2 px-2 text-orange-800 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1" title={grp.note}>
+                              <div className="whitespace-normal break-words">
+                                {grp.note || (poolRec ? 'กำลังคนรวมทั้งคลินิก' : '-')}
+                              </div>
+                              {poolRec && (poolRec.lastEditReason || poolRec.lastEditedAt) && (
+                                <div className="no-print mt-0.5 text-[9.5px] text-amber-700 break-words">
+                                  แก้ไขกำลังคน: {poolRec.lastEditReason || '-'}
+                                </div>
+                              )}
+                            </td>
+                            {isAdmin && (
+                              <td className="py-2 px-1 text-center no-print">
+                                {poolRec ? (
+                                  <div className="flex items-center justify-center gap-0.5">
+                                    {onUpdateWorkload && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingWorkload({ ...poolRec, totalPt: getEffectiveTotalPt(poolRec) });
+                                          setEditWorkloadReason('');
+                                          setEditWorkloadReasonError('');
+                                          setEditModalError('');
+                                        }}
+                                        className="text-orange-700 hover:text-orange-900 p-1 rounded hover:bg-orange-200/70 cursor-pointer"
+                                        title="แก้ไขกำลังคนรวมศูนย์ปัญญาภิรมย์"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    {onDeleteWorkload && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setDeletingWorkload(poolRec);
+                                          setDeleteWorkloadReason('');
+                                          setDeleteWorkloadReasonError('');
+                                        }}
+                                        className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                        title="ลบแถวกำลังคนรวม"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-gray-400">-</span>
+                                )}
+                              </td>
+                            )}
+                          </tr>
+
+                          {/* Detail Rows: แผนกย่อยของศูนย์ปัญญาภิรมย์ */}
+                          {grp.subRows.map((sub) => (
+                            <tr key={sub.id} className="bg-orange-50/20 hover:bg-orange-50/60 text-gray-700">
+                              <td className="py-1.5 px-1 text-center text-orange-400 print:px-0.5 print:py-0.5">•</td>
+                              <td className="py-1.5 px-2 pl-4 font-semibold text-gray-800 break-words print:pl-2.5 print:px-1 print:py-0.5">
+                                <span className="text-orange-500 mr-1">↳</span>
+                                {sub.clinic}
+                              </td>
+                              <td className="py-1.5 px-1.5 text-gray-500 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
+                                {sub.shift}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-bold text-blue-900 bg-blue-50/20 print:px-0.5 print:py-0.5">
+                                {getEffectiveTotalPt(sub)}
+                              </td>
+                              <td className="py-1.5 px-1 text-right text-gray-600 print:px-0.5 print:py-0.5">
+                                {sub.adultPt}
+                              </td>
+                              <td className="py-1.5 px-1 text-right text-gray-600 print:px-0.5 print:py-0.5">
+                                {sub.childPt}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-bold text-red-600 bg-red-50/20 print:px-0.5 print:py-0.5">
+                                {sub.admit}
+                              </td>
+                              <td
+                                colSpan={6}
+                                className="py-1.5 px-1 text-center text-[10px] italic text-orange-700/80 bg-orange-50/30 print:text-[7.5px] print:px-0.5 print:py-0.5"
+                              >
+                                ใช้กำลังคนร่วม (Pooled Staffing)
+                              </td>
+                              <td className="py-1.5 px-1.5 text-gray-600 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
+                                {sub.reporter}
+                              </td>
+                              <td className="py-1.5 px-2 text-gray-500 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5" title={sub.note}>
+                                <div className="whitespace-normal break-words">{sub.note || '-'}</div>
+                                {(sub.lastEditReason || sub.lastEditedAt) && (
+                                  <div className="no-print mt-0.5 text-[9.5px] text-amber-700 break-words">
+                                    แก้ไข: {sub.lastEditReason || '-'}
+                                  </div>
+                                )}
+                              </td>
+                              {isAdmin && (
+                                <td className="py-1.5 px-1 text-center no-print">
+                                  <div className="flex items-center justify-center gap-0.5">
+                                    {onUpdateWorkload && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingWorkload({ ...sub, totalPt: getEffectiveTotalPt(sub) });
+                                          setEditWorkloadReason('');
+                                          setEditWorkloadReasonError('');
+                                          setEditModalError('');
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 cursor-pointer"
+                                        title="แก้ไขข้อมูลผู้ป่วยแผนกย่อย"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    {onDeleteWorkload && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setDeletingWorkload(sub);
+                                          setDeleteWorkloadReason('');
+                                          setDeleteWorkloadReasonError('');
+                                        }}
+                                        className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 cursor-pointer"
+                                        title="ลบรายการแผนกย่อย"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      );
+                    })}
+                  </>
+                )}
+              </tbody>
+              {/* Total Row */}
+              <tfoot className="bg-slate-200 text-slate-900 font-extrabold border-t-2 border-gray-400">
+                <tr>
+                  <td colSpan={3} className="py-2 px-2 text-center print:px-1">
+                    ยอดรวมทั้งสิ้น ({clinicCount} คลินิก)
+                  </td>
+                  <td className="py-2 px-1 text-right text-blue-950 font-black text-xs bg-blue-100 print:text-[9px] print:px-0.5">
+                    {totals.totalPt.toLocaleString()}
+                  </td>
+                  <td className="py-2 px-1 text-right print:px-0.5">{totals.adultPt.toLocaleString()}</td>
+                  <td className="py-2 px-1 text-right print:px-0.5">{totals.childPt.toLocaleString()}</td>
+                  <td className="py-2 px-1 text-right text-red-950 font-black text-xs bg-red-100 print:text-[9px] print:px-0.5">
+                    {totals.admit.toLocaleString()}
+                  </td>
+                  <td className="py-2 px-0.5 text-center">{totals.hn.toFixed(1)}</td>
+                  <td className="py-2 px-0.5 text-center text-blue-950 bg-blue-100 font-black">
+                    {totals.rn.toFixed(1)}
+                  </td>
+                  <td className="py-2 px-0.5 text-center text-teal-950 bg-teal-100">
+                    {totals.pn.toFixed(1)}
+                  </td>
+                  <td className="py-2 px-0.5 text-center text-emerald-950 bg-emerald-100">
+                    {totals.na.toFixed(1)}
+                  </td>
+                  <td className="py-2 px-0.5 text-center">{totals.clerk.toFixed(1)}</td>
+                  <td className="py-2 px-0.5 text-center">{totals.serviceWorker.toFixed(1)}</td>
+                  <td colSpan={2} className="py-2 px-2 text-right text-[11px] print:text-[8.5px] print:px-1 whitespace-normal">
+                    กำลังคนพยาบาลรวม: <span className="text-emerald-900 font-black">{totalNursingOnDuty.toFixed(1)}</span> แรง
+                  </td>
+                  {isAdmin && <td className="no-print"></td>}
+                </tr>
+              </tfoot>
+            </table>
           </div>
-          <div>
-            <div className="h-12 border-b border-gray-400 w-48 mx-auto"></div>
-            <div className="mt-2 font-semibold">ลงชื่อ .....................................................</div>
-            <div className="text-[11px] text-gray-500 mt-0.5">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</div>
+
+          {/* Printable Official Signatures */}
+          <div className="pt-6 pb-3 print:pt-10 grid grid-cols-2 gap-8 text-center text-xs text-gray-700">
+            <div>
+              <div className="h-10 border-b border-gray-400 w-48 mx-auto"></div>
+              <div className="mt-2 font-semibold">ลงชื่อ .....................................................</div>
+              <div className="text-[11px] text-gray-500 mt-0.5">(ผู้รวบรวมรายงาน / พยาบาลเวรตรวจการ)</div>
+            </div>
+            <div>
+              <div className="h-10 border-b border-gray-400 w-48 mx-auto"></div>
+              <div className="mt-2 font-semibold">ลงชื่อ .....................................................</div>
+              <div className="text-[11px] text-gray-500 mt-0.5">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</div>
+            </div>
           </div>
         </div>
       </div>

@@ -9,6 +9,7 @@ export type StaffPosition =
   | 'PN'
   | 'NA'
   | 'Clerk'
+  | 'Clerk (Referral)'
   | 'Service Worker'
   | 'RN (Daily Wage)'
   | 'PN (Daily Wage)'
@@ -91,6 +92,18 @@ export const normalizeStaffPosition = (pos?: string): StaffPosition => {
     return 'Service Worker (Daily Wage)';
   }
   if (
+    trimmed === 'Clerk (Referral)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อผู้ป่วย)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป(ศูนย์รับ-ส่งต่อผู้ป่วย)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ - ส่งต่อผู้ป่วย)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อ)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป(ศูนย์รับ-ส่งต่อ)' ||
+    trimmed === 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อผู้ป่วย • เทียบเท่า NA)' ||
+    (trimmed.includes('ผู้ปฏิบัติงานทั่วไป') && trimmed.includes('ศูนย์รับ'))
+  ) {
+    return 'Clerk (Referral)';
+  }
+  if (
     trimmed === 'HN' ||
     trimmed === 'RN' ||
     trimmed === 'PN' ||
@@ -101,6 +114,11 @@ export const normalizeStaffPosition = (pos?: string): StaffPosition => {
     return trimmed;
   }
   return 'RN';
+};
+
+export const isNaEquivalentPosition = (pos?: string): boolean => {
+  const norm = normalizeStaffPosition(pos);
+  return norm === 'NA' || norm === 'PCA' || norm === 'Clerk (Referral)';
 };
 
 export type StaffStatus = 'Active' | 'Resigned' | 'Retired';
@@ -425,6 +443,7 @@ export const DEFAULT_OT_HOURLY_RATES: Record<StaffPosition, number> = {
   PCA: 95,
   'NA (Daily Wage)': 95,
   Clerk: 75,
+  'Clerk (Referral)': 75,
   'Clerk (Daily Wage)': 75,
   'Service Worker': 75,
   'Service Worker (Daily Wage)': 75,
@@ -456,7 +475,7 @@ export function formatOtPaySheetPositionLabel(pos: StaffPosition | string): stri
   if (norm === 'HN' || norm === 'RN' || norm === 'RN (Daily Wage)') return 'พยาบาล';
   if (norm === 'PN' || norm === 'PN (Daily Wage)') return 'ผู้ช่วยพยาบาล';
   if (norm === 'NA' || norm === 'PCA' || norm === 'NA (Daily Wage)') return 'ผู้ช่วยคนไข้';
-  if (norm === 'Clerk' || norm === 'Clerk (Daily Wage)') return 'ผู้ปฏิบัติงานทั่วไป';
+  if (norm === 'Clerk' || norm === 'Clerk (Referral)' || norm === 'Clerk (Daily Wage)') return 'ผู้ปฏิบัติงานทั่วไป';
   if (norm === 'Service Worker' || norm === 'Service Worker (Daily Wage)') return 'พนักงานบริการ';
   return pos;
 }
@@ -595,6 +614,7 @@ export const ALL_POSITIONS: StaffPosition[] = [
   'PN',
   'NA',
   'Clerk',
+  'Clerk (Referral)',
   'Service Worker',
   'RN (Daily Wage)',
   'PN (Daily Wage)',
@@ -610,6 +630,7 @@ export const POSITION_LABELS: Record<StaffPosition, string> = {
   NA: 'ผู้ช่วยเหลือคนไข้',
   PCA: 'ผู้ช่วยเหลือคนไข้',
   Clerk: 'ผู้ปฏิบัติงานทั่วไป',
+  'Clerk (Referral)': 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อผู้ป่วย • เทียบเท่า NA)',
   'Service Worker': 'พนักงานบริการ',
   'RN (Daily Wage)': 'พยาบาล(จ้างรายวัน)',
   'PN (Daily Wage)': 'ผู้ช่วยพยาบาล(จ้างรายวัน)',
@@ -624,6 +645,7 @@ export const formatPositionLabel = (pos: StaffPosition | string): string => {
   if (pos === 'PN') return 'ผู้ช่วยพยาบาล';
   if (pos === 'NA' || pos === 'PCA') return 'ผู้ช่วยเหลือคนไข้';
   if (pos === 'Clerk') return 'ผู้ปฏิบัติงานทั่วไป';
+  if (pos === 'Clerk (Referral)') return 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อ)';
   if (pos === 'Service Worker') return 'พนักงานบริการ';
   if (pos === 'RN (Daily Wage)' || pos === 'Daily Wage' || pos === 'จ้างรายวัน') {
     return 'พยาบาล(จ้างรายวัน)';
@@ -643,12 +665,13 @@ export const POSITION_SORT_ORDER: Record<StaffPosition, number> = {
   NA: 4,
   PCA: 4,
   Clerk: 5,
-  'Service Worker': 6,
-  'RN (Daily Wage)': 7,
-  'PN (Daily Wage)': 8,
-  'NA (Daily Wage)': 9,
-  'Clerk (Daily Wage)': 10,
-  'Service Worker (Daily Wage)': 11,
+  'Clerk (Referral)': 6,
+  'Service Worker': 7,
+  'RN (Daily Wage)': 8,
+  'PN (Daily Wage)': 9,
+  'NA (Daily Wage)': 10,
+  'Clerk (Daily Wage)': 11,
+  'Service Worker (Daily Wage)': 12,
 };
 
 export const compareStaffByPositionAndStartDate = (

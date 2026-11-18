@@ -69,9 +69,15 @@ import {
   getPendingOutboxOt,
   enqueuePendingOutboxAuditLogs,
   clearAllPendingOutbox,
+  computeChangedSettingsEntries,
   pushAdminTableViaAppsScript,
   pushTargetedAdminRowMutationViaAppsScript,
+  pushTargetedAdminStaffMutationViaAppsScript,
+  pushTargetedSettingsKeysViaAppsScript,
   pushAdminTableViaOAuth,
+  pushTargetedAdminRowViaOAuth,
+  pushTargetedStaffViaOAuth,
+  pushTargetedSettingsKeysViaOAuth,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
   appendOTToSheet,
@@ -1084,16 +1090,47 @@ export default function App() {
     action: 'updateWorkload' | 'deleteWorkload' | 'updateLeave' | 'deleteLeave' | 'updateOT' | 'deleteOT';
     target: DailyWorkload | LeaveRecord | OTAttendance;
     updated?: DailyWorkload | LeaveRecord | OTAttendance;
+    insertIfMissing?: boolean;
     opSeq: number;
   };
+
+  type TargetedAdminStaffSpec = {
+    action: 'addStaff' | 'updateStaff' | 'deleteStaff';
+    target?: StaffMember;
+    updated?: StaffMember;
+    previousStaffId?: string;
+    propagateOt?: boolean;
+    insertIfMissing?: boolean;
+    otDirtyVer?: number | null;
+    opSeq: number;
+  };
+
+  type TargetedAdminSettingsSpec = {
+    changedEntries: Array<[string, string]>;
+    opSeq: number;
+  };
+
+  type TargetedAdminMutationPayload =
+    | TargetedAdminRowSpec
+    | { staff: TargetedAdminStaffSpec }
+    | { settings: TargetedAdminSettingsSpec };
 
   // Sequential direct Admin sync queue (always executes regardless of autoSync setting)
   const enqueueAdminSync = (
     table: 'workloads' | 'leaves' | 'ot' | 'staff' | 'settings',
     expectedDirtyVersion: number,
     auditEntry?: AuditLogEntry,
-    targetedRow?: TargetedAdminRowSpec
+    targeted?: TargetedAdminMutationPayload
   ) => {
+    const targetedRow =
+      targeted && 'action' in targeted && 'target' in targeted && !('staff' in targeted)
+        ? (targeted as TargetedAdminRowSpec)
+        : undefined;
+    const targetedStaff =
+      targeted && 'staff' in targeted ? targeted.staff : undefined;
+    const targetedSettings =
+      targeted && 'settings' in targeted ? targeted.settings : undefined;
+
     adminWriteQueueRef.current = adminWriteQueueRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -1104,7 +1141,13 @@ export default function App() {
           const targetSheetId = (latestDb.settings.spreadsheetId || '').trim();
           const pin = unlockedAdminPinRef.current;
 
+          if (targetedSettings && targetedSettings.changedEntries.length === 0) {
+            clearSettingsDirty(expectedDirtyVersion);
+            return;
+          }
+
           if (targetGasUrl && pin) {
+            // 1. Targeted single-row Workload / Leave / OT
             if (
               targetedRow &&
               auditEntry &&
@@ -1117,6 +1160,7 @@ export default function App() {
                 table,
                 target: targetedRow.target,
                 updated: targetedRow.updated,
+                insertIfMissing: targetedRow.insertIfMissing,
                 db: latestDb,
                 auditEntry,
                 expectedDirtyVersion,
@@ -1146,11 +1190,14 @@ export default function App() {
 
               const token = await getAccessToken();
               if (token && targetSheetId) {
-                const oauthRes = await pushAdminTableViaOAuth({
+                const oauthRes = await pushTargetedAdminRowViaOAuth({
                   accessToken: token,
                   spreadsheetId: targetSheetId,
+                  action: targetedRow.action,
                   table,
-                  db: latestDb,
+                  target: targetedRow.target,
+                  updated: targetedRow.updated,
+                  insertIfMissing: targetedRow.insertIfMissing,
                   auditEntry,
                   expectedDirtyVersion,
                 });
@@ -1171,6 +1218,121 @@ export default function App() {
               return;
             }
 
+            // 2. Targeted single-row Staff_Master
+            if (table === 'staff' && targetedStaff) {
+              const staffRes = await pushTargetedAdminStaffMutationViaAppsScript({
+                gasUrl: targetGasUrl,
+                adminPin: pin,
+                action: targetedStaff.action,
+                target: targetedStaff.target,
+                updated: targetedStaff.updated,
+                previousStaffId: targetedStaff.previousStaffId,
+                propagateOt: targetedStaff.propagateOt,
+                insertIfMissing: targetedStaff.insertIfMissing,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+                expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+              });
+
+              if (staffRes.syncedDb && mutationSeqRef.current === targetedStaff.opSeq) {
+                dbRef.current = staffRes.syncedDb;
+                setDb(staffRes.syncedDb);
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+              }
+
+              if (staffRes.ok) {
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                return;
+              }
+
+              if (staffRes.notFound) {
+                showToast(
+                  staffRes.error || 'ไม่พบรายชื่อบุคลากรเดิมใน Google Sheets ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
+                  'info'
+                );
+                return;
+              }
+
+              const token = await getAccessToken();
+              if (token && targetSheetId) {
+                const oauthRes = await pushTargetedStaffViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  action: targetedStaff.action,
+                  target: targetedStaff.target,
+                  updated: targetedStaff.updated,
+                  previousStaffId: targetedStaff.previousStaffId,
+                  propagateOt: targetedStaff.propagateOt,
+                  insertIfMissing: targetedStaff.insertIfMissing,
+                  auditEntry,
+                  expectedDirtyVersion,
+                  expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+                });
+                if (oauthRes.ok) {
+                  lastSyncEpochRef.current = Date.now();
+                  setLastSyncedAt(formatSyncTime());
+                  return;
+                }
+              }
+
+              showToast(
+                `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${staffRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+                'error'
+              );
+              return;
+            }
+
+            // 3. Targeted Settings key-only updates
+            if (table === 'settings' && targetedSettings) {
+              const settingsRes = await pushTargetedSettingsKeysViaAppsScript({
+                gasUrl: targetGasUrl,
+                adminPin: pin,
+                changedEntries: targetedSettings.changedEntries,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+
+              if (settingsRes.syncedDb && mutationSeqRef.current === targetedSettings.opSeq) {
+                dbRef.current = settingsRes.syncedDb;
+                setDb(settingsRes.syncedDb);
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+              }
+
+              if (settingsRes.ok) {
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                return;
+              }
+
+              const token = await getAccessToken();
+              if (token && targetSheetId) {
+                const oauthRes = await pushTargetedSettingsKeysViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  changedEntries: targetedSettings.changedEntries,
+                  auditEntry,
+                  expectedDirtyVersion,
+                });
+                if (oauthRes.ok) {
+                  lastSyncEpochRef.current = Date.now();
+                  setLastSyncedAt(formatSyncTime());
+                  return;
+                }
+              }
+
+              showToast(
+                `บันทึกการตั้งค่าแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${settingsRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+                'error'
+              );
+              return;
+            }
+
+            // Fallback generic table push if called without targeted descriptor
             const gasRes = await pushAdminTableViaAppsScript({
               gasUrl: targetGasUrl,
               adminPin: pin,
@@ -1220,14 +1382,51 @@ export default function App() {
           if (targetSheetId) {
             const token = await getAccessToken();
             if (token) {
-              const oauthRes = await pushAdminTableViaOAuth({
-                accessToken: token,
-                spreadsheetId: targetSheetId,
-                table,
-                db: latestDb,
-                auditEntry,
-                expectedDirtyVersion,
-              });
+              let oauthRes: { ok: boolean; error?: string };
+              if (targetedRow && (table === 'workloads' || table === 'leaves' || table === 'ot')) {
+                oauthRes = await pushTargetedAdminRowViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  action: targetedRow.action,
+                  table,
+                  target: targetedRow.target,
+                  updated: targetedRow.updated,
+                  insertIfMissing: targetedRow.insertIfMissing,
+                  auditEntry,
+                  expectedDirtyVersion,
+                });
+              } else if (table === 'staff' && targetedStaff) {
+                oauthRes = await pushTargetedStaffViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  action: targetedStaff.action,
+                  target: targetedStaff.target,
+                  updated: targetedStaff.updated,
+                  previousStaffId: targetedStaff.previousStaffId,
+                  propagateOt: targetedStaff.propagateOt,
+                  insertIfMissing: targetedStaff.insertIfMissing,
+                  auditEntry,
+                  expectedDirtyVersion,
+                  expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+                });
+              } else if (table === 'settings' && targetedSettings) {
+                oauthRes = await pushTargetedSettingsKeysViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  changedEntries: targetedSettings.changedEntries,
+                  auditEntry,
+                  expectedDirtyVersion,
+                });
+              } else {
+                oauthRes = await pushAdminTableViaOAuth({
+                  accessToken: token,
+                  spreadsheetId: targetSheetId,
+                  table,
+                  db: latestDb,
+                  auditEntry,
+                  expectedDirtyVersion,
+                });
+              }
               if (oauthRes.ok) {
                 lastSyncEpochRef.current = Date.now();
                 setLastSyncedAt(formatSyncTime());
@@ -1315,8 +1514,14 @@ export default function App() {
       'workloads',
       dirtyVer,
       auditEntry,
-      prevItem && !prevWasInOutbox
-        ? { action: 'updateWorkload', target: prevItem, updated: stamped, opSeq }
+      prevItem
+        ? {
+            action: 'updateWorkload',
+            target: prevItem,
+            updated: stamped,
+            insertIfMissing: prevWasInOutbox,
+            opSeq,
+          }
         : undefined
     );
   };
@@ -1504,8 +1709,14 @@ export default function App() {
       'leaves',
       dirtyVer,
       auditEntry,
-      prevItem && !prevWasInOutbox
-        ? { action: 'updateLeave', target: prevItem, updated: stamped, opSeq }
+      prevItem
+        ? {
+            action: 'updateLeave',
+            target: prevItem,
+            updated: stamped,
+            insertIfMissing: prevWasInOutbox,
+            opSeq,
+          }
         : undefined
     );
   };
@@ -1698,16 +1909,40 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตเวรนอกเวลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
+    const promotedTarget =
+      promotedStaffDirtyVer !== null
+        ? baseDb.staff.find((s) => s.name.trim() === stamped.staffName.trim())
+        : undefined;
+    const promotedUpdated =
+      promotedStaffDirtyVer !== null && promotedTarget
+        ? { ...promotedTarget, staffId: stampedEmpCode, employeeCode: stampedEmpCode }
+        : undefined;
+
     enqueueAdminSync(
       'ot',
       dirtyVer,
       auditEntry,
-      prevItem && !prevWasInOutbox
-        ? { action: 'updateOT', target: prevItem, updated: stamped, opSeq }
+      prevItem
+        ? {
+            action: 'updateOT',
+            target: prevItem,
+            updated: stamped,
+            insertIfMissing: prevWasInOutbox,
+            opSeq,
+          }
         : undefined
     );
-    if (promotedStaffDirtyVer !== null) {
-      enqueueAdminSync('staff', promotedStaffDirtyVer);
+    if (promotedStaffDirtyVer !== null && promotedTarget && promotedUpdated) {
+      enqueueAdminSync('staff', promotedStaffDirtyVer, undefined, {
+        staff: {
+          action: 'updateStaff',
+          target: promotedTarget,
+          updated: promotedUpdated,
+          previousStaffId: promotedTarget.staffId,
+          insertIfMissing: true,
+          opSeq,
+        },
+      });
     }
   };
 
@@ -1795,6 +2030,7 @@ export default function App() {
       : baseDb.ot;
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markStaffMasterDirty();
     const otDirtyVer = otChanged ? markOtDirty() : null;
     const nextDb = {
@@ -1805,10 +2041,15 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`เพิ่มเจ้าหน้าที่ ${normalizedStaff.name} เข้าสู่ระบบแล้ว`, 'success');
-    enqueueAdminSync('staff', dirtyVer);
-    if (otDirtyVer !== null) {
-      enqueueAdminSync('ot', otDirtyVer);
-    }
+    enqueueAdminSync('staff', dirtyVer, undefined, {
+      staff: {
+        action: 'addStaff',
+        updated: normalizedStaff,
+        propagateOt: otDirtyVer !== null,
+        otDirtyVer,
+        opSeq,
+      },
+    });
   };
 
   // Handler: Delete Staff Member
@@ -1821,6 +2062,7 @@ export default function App() {
     const target = baseDb.staff.find(s => s.staffId === staffId);
     const nextStaff = baseDb.staff.filter(s => s.staffId !== staffId);
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markStaffMasterDirty();
     const nextDb = {
       ...baseDb,
@@ -1829,7 +2071,21 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`ลบบุคลากร ${target?.name || ''} ออกจากระบบแล้ว`, 'info');
-    enqueueAdminSync('staff', dirtyVer);
+    enqueueAdminSync(
+      'staff',
+      dirtyVer,
+      undefined,
+      target
+        ? {
+            staff: {
+              action: 'deleteStaff',
+              target,
+              previousStaffId: staffId,
+              opSeq,
+            },
+          }
+        : undefined
+    );
   };
 
   // Handler: Update Staff Member (Admin)
@@ -1877,6 +2133,7 @@ export default function App() {
       : baseDb.ot;
 
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markStaffMasterDirty();
     const otDirtyVer = otChanged ? markOtDirty() : null;
     const nextDb = {
@@ -1887,10 +2144,18 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตข้อมูลบุคลากร ${normalizedStaff.name} เรียบร้อยแล้ว`, 'success');
-    enqueueAdminSync('staff', dirtyVer);
-    if (otDirtyVer !== null) {
-      enqueueAdminSync('ot', otDirtyVer);
-    }
+    enqueueAdminSync('staff', dirtyVer, undefined, {
+      staff: {
+        action: 'updateStaff',
+        target: prevStaff,
+        updated: normalizedStaff,
+        previousStaffId: prevStaff.staffId,
+        propagateOt: otDirtyVer !== null,
+        otDirtyVer,
+        insertIfMissing: true,
+        opSeq,
+      },
+    });
   };
 
   // Handler: Update Staff Status (Active / Resigned / Retired)
@@ -1901,14 +2166,19 @@ export default function App() {
     }
     const baseDb = dbRef.current;
     const todayStr = new Date().toISOString().split('T')[0];
+    const prevTarget = baseDb.staff.find(s => s.staffId === staffId);
+    let updatedTarget: StaffMember | undefined;
     const nextStaff = baseDb.staff.map(s => {
       if (s.staffId !== staffId) return s;
-      if (status === 'Resigned' || status === 'Retired') {
-        return { ...s, status, endDate: s.endDate || todayStr };
-      }
-      return { ...s, status, endDate: undefined };
+      const next =
+        status === 'Resigned' || status === 'Retired'
+          ? { ...s, status, endDate: s.endDate || todayStr }
+          : { ...s, status, endDate: undefined };
+      updatedTarget = next;
+      return next;
     });
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markStaffMasterDirty();
     const nextDb = {
       ...baseDb,
@@ -1917,7 +2187,23 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast(`อัปเดตสถานะเป็น ${status} สำเร็จ`, 'info');
-    enqueueAdminSync('staff', dirtyVer);
+    enqueueAdminSync(
+      'staff',
+      dirtyVer,
+      undefined,
+      prevTarget && updatedTarget
+        ? {
+            staff: {
+              action: 'updateStaff',
+              target: prevTarget,
+              updated: updatedTarget,
+              previousStaffId: staffId,
+              insertIfMissing: true,
+              opSeq,
+            },
+          }
+        : undefined
+    );
   };
 
   // Handler: Save Settings
@@ -1927,7 +2213,9 @@ export default function App() {
       return;
     }
     const baseDb = dbRef.current;
+    const changedEntries = computeChangedSettingsEntries(baseDb.settings, settings);
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markSettingsDirty();
     const nextDb = {
       ...baseDb,
@@ -1936,7 +2224,9 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
     showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
-    enqueueAdminSync('settings', dirtyVer);
+    enqueueAdminSync('settings', dirtyVer, undefined, {
+      settings: { changedEntries, opSeq },
+    });
   };
 
   // Handler: Toggle Auto Sync
@@ -1944,6 +2234,7 @@ export default function App() {
     if (!isAdmin) return;
     const baseDb = dbRef.current;
     mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
     const dirtyVer = markSettingsDirty();
     const nextDb = {
       ...baseDb,
@@ -1954,7 +2245,9 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    enqueueAdminSync('settings', dirtyVer);
+    enqueueAdminSync('settings', dirtyVer, undefined, {
+      settings: { changedEntries: [], opSeq },
+    });
     showToast(
       enabled
         ? 'เปิดใช้งาน Auto ซิงค์ทุกครั้งที่กดบันทึกแล้ว'

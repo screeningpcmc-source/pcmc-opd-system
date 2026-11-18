@@ -28,6 +28,7 @@ import {
   isReferralWorkload,
   formatReferralSummaryText,
   normalizeReferralData,
+  normalizeStaffPosition,
   isDailyWorkloadExcludedPosition
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
@@ -321,7 +322,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   };
 
   const isNursingRole = (pos?: string): boolean => {
-    return pos === 'RN' || pos === 'PN' || pos === 'NA' || pos === 'PCA';
+    const norm = normalizeStaffPosition(pos);
+    return norm === 'RN' || norm === 'PN' || norm === 'NA' || norm === 'PCA' || norm === 'Clerk (Referral)';
   };
 
   const isStaffActiveOnDate = (s: StaffMember, dateStr: string): boolean => {
@@ -740,9 +742,12 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           isStaffActiveOnDate(s, g.date) &&
           normalizeClinicUnit(s.homeClinic) === g.unit
       );
-      const baseRN = baseStaff.filter((s) => s.position === 'RN').length;
-      const basePN = baseStaff.filter((s) => s.position === 'PN').length;
-      const baseNA = baseStaff.filter((s) => s.position === 'NA' || s.position === 'PCA').length;
+      const baseRN = baseStaff.filter((s) => normalizeStaffPosition(s.position) === 'RN').length;
+      const basePN = baseStaff.filter((s) => normalizeStaffPosition(s.position) === 'PN').length;
+      const baseNA = baseStaff.filter((s) => {
+        const np = normalizeStaffPosition(s.position);
+        return np === 'NA' || np === 'PCA' || np === 'Clerk (Referral)';
+      }).length;
       const baselineCount = baseStaff.length;
       const baselineParts: string[] = [];
       if (baseRN > 0) baselineParts.push(`RN ${baseRN}`);
@@ -1839,10 +1844,10 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         <div className="overflow-x-auto print:overflow-visible">
           <div
             ref={reportSheetRef}
-            className="font-sarabun bg-white text-black mx-auto w-full max-w-[794px] min-w-[660px] print:min-w-0 print:max-w-full p-4 sm:p-6 print:p-0"
+            className="print-portrait-sheet font-sarabun bg-white text-black mx-auto w-full max-w-[730px] min-w-0 print:max-w-full p-3 sm:p-5 print:p-0"
           >
             {/* Main Form Grid matching the official PDF layout */}
-            <table className="w-full border-collapse border border-black text-[12px] print:text-[10.5px] leading-tight">
+            <table className="w-full table-fixed border-collapse border border-black text-[11.5px] print:text-[10px] leading-tight print-fit-table">
               <colgroup>
                 <col className="w-[9%]" />
                 <col className="w-[35%]" />
@@ -2153,7 +2158,18 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             {/* Official Formal Monthly Referral Table inside PDF / JPEG sheet */}
             {referralMonthlySummary && (
               <div className="mt-4 print:mt-3 pt-2">
-                <table className="w-full border-collapse border border-black text-[11.5px] print:text-[9.5px] leading-tight">
+                <table className="w-full table-fixed border-collapse border border-black text-[10.5px] print:text-[9px] leading-tight print-fit-table">
+                  <colgroup>
+                    <col className="w-[6%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8.5%]" />
+                    <col className="w-[8%]" />
+                    <col className="w-[35%]" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th
@@ -2164,14 +2180,14 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                       </th>
                     </tr>
                     <tr className="text-center font-bold bg-slate-50">
-                      <th className="border border-black py-1 px-1">วันที่</th>
+                      <th className="border border-black py-1 px-0.5">วันที่</th>
                       {REFERRAL_ITEM_DEFINITIONS.map(({ key, label }) => (
-                        <th key={key} className="border border-black py-1 px-1">
+                        <th key={key} className="border border-black py-1 px-0.5 whitespace-normal break-words">
                           {label}
                         </th>
                       ))}
-                      <th className="border border-black py-1 px-1 bg-[#fef9c3]">รวม</th>
-                      <th className="border border-black py-1 px-1.5">เหตุผล / ผู้รายงาน</th>
+                      <th className="border border-black py-1 px-0.5 bg-[#fef9c3]">รวม</th>
+                      <th className="border border-black py-1 px-1">เหตุผล / ผู้รายงาน</th>
                     </tr>
                   </thead>
                   <tbody>

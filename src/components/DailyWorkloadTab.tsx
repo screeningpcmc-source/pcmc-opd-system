@@ -404,7 +404,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       const pos = normalizeStaffPosition(s.position);
       if (pos === 'RN') counts.rn += 1;
       else if (pos === 'PN') counts.pn += 1;
-      else if (pos === 'NA') counts.na += 1;
+      else if (pos === 'NA' || pos === 'PCA' || pos === 'Clerk (Referral)') counts.na += 1;
       else if (pos === 'Clerk') counts.clerk += 1;
       else if (pos === 'Service Worker') counts.serviceWorker += 1;
     });
@@ -532,7 +532,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       }
       return trimmed;
     };
-    const normalizePos = (pos?: string): StaffPosition => normalizeStaffPosition(pos);
+    const normalizePos = (pos?: string): StaffPosition => {
+      const np = normalizeStaffPosition(pos);
+      return np === 'Clerk (Referral)' || np === 'PCA' ? 'NA' : np;
+    };
     const isActiveOnDate = (s: StaffMember) => {
       if (s.status !== 'Active') return false;
       if (s.startDate && s.startDate > date) return false;
@@ -780,6 +783,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       NA: Number(na) || 0,
       PCA: 0,
       Clerk: Number(clerk) || 0,
+      'Clerk (Referral)': 0,
       'Service Worker': Number(serviceWorker) || 0,
       'RN (Daily Wage)': 0,
       'PN (Daily Wage)': 0,
@@ -795,6 +799,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       NA: 'NA (ผู้ช่วยคนไข้)',
       PCA: 'NA',
       Clerk: 'ผู้ปฏิบัติงานทั่วไป',
+      'Clerk (Referral)': 'ผู้ปฏิบัติงานทั่วไป (ศูนย์รับ-ส่งต่อ • เทียบเท่า NA)',
       'Service Worker': 'พนักงานบริการ',
       'RN (Daily Wage)': 'พยาบาล(จ้างรายวัน)',
       'PN (Daily Wage)': 'ผู้ช่วยพยาบาล(จ้างรายวัน)',
@@ -804,7 +809,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     };
 
     const trackedPositions = ALL_POSITIONS.filter(
-      pos => pos !== 'HN' && !isDailyWorkloadExcludedPosition(pos)
+      pos => pos !== 'HN' && pos !== 'Clerk (Referral)' && !isDailyWorkloadExcludedPosition(pos)
     );
 
     const positionRows = trackedPositions.map(pos => {

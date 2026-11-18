@@ -296,6 +296,33 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
   return rows;
 }
 
+export function computeChangedSettingsEntries(
+  prevSettings: SystemSettings,
+  nextSettings: SystemSettings
+): Array<[string, string]> {
+  const prevRows = buildSettingsSheetRows(prevSettings).slice(1);
+  const nextRows = buildSettingsSheetRows(nextSettings).slice(1);
+  const prevMap = new Map<string, string>();
+  prevRows.forEach(([k, v]) => {
+    if (k) prevMap.set(k, v ?? '');
+  });
+  const changed: Array<[string, string]> = [];
+  nextRows.forEach(([k, v]) => {
+    if (!k) return;
+    if (prevMap.get(k) !== (v ?? '')) {
+      changed.push([k, v ?? '']);
+    }
+  });
+  if (
+    typeof nextSettings.adminPin === 'string' &&
+    nextSettings.adminPin.trim() &&
+    nextSettings.adminPin.trim() !== (prevSettings.adminPin || '').trim()
+  ) {
+    changed.push(['Admin_Pin', nextSettings.adminPin.trim()]);
+  }
+  return changed;
+}
+
 const isDemoStaffId = (id?: string) => /^STF-\d{3}$/.test((id || '').trim());
 const isDemoWorkloadId = (id?: string) => /^WL-\d{3}$/.test((id || '').trim());
 const isDemoLeaveId = (id?: string) => /^LV-\d{3}$/.test((id || '').trim());
@@ -1113,8 +1140,10 @@ export const syncStaffMasterToSheet = async (
   try {
     await ensureSpreadsheetTabs(accessToken, spreadsheetId);
 
+    const bodyRows = staffList.map(prepareStaffRowForSheet);
+
     const clearRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A:H:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('Staff_Master!A2:H')}:clear`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -1125,25 +1154,22 @@ export const syncStaffMasterToSheet = async (
       throw parseSheetsApiError(errText, 'ล้างข้อมูลชีท Staff_Master ไม่สำเร็จ');
     }
 
-    const rows = [
-      ['Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'],
-      ...staffList.map(prepareStaffRowForSheet),
-    ];
-
-    const putRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Staff_Master!A1:H${rows.length}?valueInputOption=USER_ENTERED`,
-      {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ values: rows }),
+    if (bodyRows.length > 0) {
+      const putRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`Staff_Master!A2:H${bodyRows.length + 1}`)}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ values: bodyRows }),
+        }
+      );
+      if (!putRes.ok) {
+        const errText = await putRes.text();
+        throw parseSheetsApiError(errText, 'บันทึกชีท Staff_Master ไม่สำเร็จ');
       }
-    );
-    if (!putRes.ok) {
-      const errText = await putRes.text();
-      throw parseSheetsApiError(errText, 'บันทึกชีท Staff_Master ไม่สำเร็จ');
     }
 
     clearStaffMasterDirty();
@@ -3039,7 +3065,7 @@ export const pushAdminTableViaAppsScript = async (params: {
     const payload: Record<string, unknown> = {
       dirty: {
         staff: table === 'staff',
-        settings: table === 'settings' || table === 'staff',
+        settings: table === 'settings',
         workloads: table === 'workloads',
         leaves: table === 'leaves',
         ot: table === 'ot',
@@ -3047,10 +3073,6 @@ export const pushAdminTableViaAppsScript = async (params: {
     };
     if (table === 'staff') {
       payload.staff = db.staff.map(prepareStaffForRemote);
-      payload.settings = {
-        ...db.settings,
-        staffEmployeeCodes: buildStaffEmployeeCodesMap(db.staff),
-      };
     }
     if (table === 'workloads') payload.workloads = db.workloads.map(prepareWorkloadForRemote);
     if (table === 'leaves') payload.leaves = db.leaves;
@@ -3186,68 +3208,55 @@ export const pushAdminTableViaOAuth = async (params: {
     };
 
     if (table === 'workloads') {
-      const rows = [
-        [
-          'Date', 'Shift', 'Clinic', 'Total_Pt', 'Adult_Pt', 'Child_Pt',
-          'Admit', 'HN', 'RN', 'PN', 'NA', 'Clerk', 'Service_Worker',
-          'Note', 'Reporter', 'Clinic_Group', 'Pool_ID', 'Record_Type',
-        ],
-        ...db.workloads.map((w) => [
-          w.date,
-          w.shift,
-          w.clinic,
-          getEffectiveTotalPt(w),
-          w.adultPt,
-          w.childPt,
-          w.admit,
-          w.hn,
-          w.rn,
-          w.pn,
-          w.na ?? w.pca ?? 0,
-          w.clerk,
-          w.serviceWorker,
-          formatWorkloadNoteForSheet(w.note, w.referralData),
-          w.reporter,
-          w.clinicGroup || '',
-          w.poolId || '',
-          w.recordType || 'STANDARD',
-        ]),
-      ];
-      await clearAndPut('Daily_Workload!A:R', `Daily_Workload!A1:R${rows.length}`, rows);
+      const bodyRows = db.workloads.map((w) => [
+        w.date,
+        w.shift,
+        w.clinic,
+        getEffectiveTotalPt(w),
+        w.adultPt,
+        w.childPt,
+        w.admit,
+        w.hn,
+        w.rn,
+        w.pn,
+        w.na ?? w.pca ?? 0,
+        w.clerk,
+        w.serviceWorker,
+        formatWorkloadNoteForSheet(w.note, w.referralData),
+        w.reporter,
+        w.clinicGroup || '',
+        w.poolId || '',
+        w.recordType || 'STANDARD',
+      ]);
+      await clearAndPut('Daily_Workload!A2:R', `Daily_Workload!A2:R${bodyRows.length + 1}`, bodyRows);
       clearWorkloadsDirty(expectedDirtyVersion);
       if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
     } else if (table === 'leaves') {
-      const rows = [
-        ['Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'],
-        ...db.leaves.map((l) => [
-          l.startDate,
-          l.endDate,
-          l.staffName,
-          l.position,
-          l.clinic,
-          l.leaveType,
-          l.days,
-          l.note || '',
-        ]),
-      ];
-      await clearAndPut('Leave_Records!A:H', `Leave_Records!A1:H${rows.length}`, rows);
+      const bodyRows = db.leaves.map((l) => [
+        l.startDate,
+        l.endDate,
+        l.staffName,
+        l.position,
+        l.clinic,
+        l.leaveType,
+        l.days,
+        l.note || '',
+      ]);
+      await clearAndPut('Leave_Records!A2:H', `Leave_Records!A2:H${bodyRows.length + 1}`, bodyRows);
       clearLeavesDirty(expectedDirtyVersion);
       if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
     } else if (table === 'ot') {
-      const rows = [
-        ['Date', 'Shift', 'Staff_Name', 'Position', 'Home_Clinic', 'Work_Clinic', 'Hours', 'Employee_Code'],
-        ...db.ot.map((o) => [
-          o.date,
-          o.shift,
-          o.staffName,
-          o.position,
-          o.homeClinic,
-          formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
-          getEffectiveOtHours(o),
-          o.employeeCode || '',
-        ]),
-      ];
-      await clearAndPut('OT_Attendance!A:H', `OT_Attendance!A1:H${rows.length}`, rows);
+      const bodyRows = db.ot.map((o) => [
+        o.date,
+        o.shift,
+        o.staffName,
+        o.position,
+        o.homeClinic,
+        formatOtWorkClinicForSheet(o.workClinic, o.hours, o.shift),
+        getEffectiveOtHours(o),
+        o.employeeCode || '',
+      ]);
+      await clearAndPut('OT_Attendance!A2:H', `OT_Attendance!A2:H${bodyRows.length + 1}`, bodyRows);
       clearOtDirty(expectedDirtyVersion);
       if (getOtDirtyVersion() === 0) clearAllOtTombstones();
     } else if (table === 'staff') {
@@ -3255,8 +3264,8 @@ export const pushAdminTableViaOAuth = async (params: {
       if (!ok) return { ok: false, error: 'อัปเดต Staff_Master ไม่สำเร็จ' };
       clearStaffMasterDirty(expectedDirtyVersion);
     } else if (table === 'settings') {
-      const rows = buildSettingsSheetRows(db.settings, db.staff);
-      await clearAndPut('Settings!A:B', `Settings!A1:B${rows.length}`, rows);
+      const bodyRows = buildSettingsSheetRows(db.settings, db.staff).slice(1);
+      await clearAndPut('Settings!A2:B', `Settings!A2:B${bodyRows.length + 1}`, bodyRows);
       clearSettingsDirty(expectedDirtyVersion);
     }
 
@@ -3284,14 +3293,25 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
   db: AppDatabase;
   auditEntry: AuditLogEntry;
   expectedDirtyVersion: number;
+  insertIfMissing?: boolean;
 }): Promise<{
   ok: boolean;
   notFound?: boolean;
   error?: string;
   syncedDb?: AppDatabase;
 }> => {
-  const { gasUrl, adminPin, action, table, target, updated, db, auditEntry, expectedDirtyVersion } =
-    params;
+  const {
+    gasUrl,
+    adminPin,
+    action,
+    table,
+    target,
+    updated,
+    db,
+    auditEntry,
+    expectedDirtyVersion,
+    insertIfMissing,
+  } = params;
   if (!gasUrl || !adminPin) {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
@@ -3352,6 +3372,7 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
           target: serializedTarget,
           updated: serializedUpdated,
           auditEntry,
+          ...(insertIfMissing ? { insertIfMissing: true } : {}),
         },
       }),
     });
@@ -3545,6 +3566,799 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
     return { ok: true, syncedDb };
   } catch (err: any) {
     return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+/**
+ * Targeted single-row Admin Staff mutation via Apps Script Web App URL.
+ * Updates/inserts/deletes ONLY the affected Staff_Master row (and matching OT rows' name/code cells).
+ */
+export const pushTargetedAdminStaffMutationViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  action: 'addStaff' | 'updateStaff' | 'deleteStaff';
+  target?: StaffMember;
+  updated?: StaffMember;
+  previousStaffId?: string;
+  propagateOt?: boolean;
+  insertIfMissing?: boolean;
+  db: AppDatabase;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+  expectedOtDirtyVersion?: number | null;
+}): Promise<{
+  ok: boolean;
+  notFound?: boolean;
+  error?: string;
+  syncedDb?: AppDatabase;
+}> => {
+  const {
+    gasUrl,
+    adminPin,
+    action,
+    target,
+    updated,
+    previousStaffId,
+    propagateOt,
+    insertIfMissing,
+    db,
+    auditEntry,
+    expectedDirtyVersion,
+    expectedOtDirtyVersion,
+  } = params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+
+  const buildSyncedDb = (data: any): AppDatabase => {
+    const merged = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      db,
+      auditEntry ? { justPushedAudits: [auditEntry] } : undefined
+    );
+    const resolvedSheetId =
+      merged.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    return {
+      ...merged,
+      settings: {
+        ...merged.settings,
+        spreadsheetId: resolvedSheetId || undefined,
+        spreadsheetUrl:
+          merged.settings.spreadsheetUrl ||
+          (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+        gasUrl: merged.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+      },
+    };
+  };
+
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action,
+        adminPin,
+        payload: {
+          ...(target ? { target: prepareStaffForRemote(target) } : {}),
+          ...(updated ? { updated: prepareStaffForRemote(updated) } : {}),
+          ...(previousStaffId ? { previousStaffId } : {}),
+          ...(propagateOt ? { propagateOt: true } : {}),
+          ...(insertIfMissing ? { insertIfMissing: true } : {}),
+          ...(auditEntry ? { auditEntry } : {}),
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+
+    if (data && data.targeted === true) {
+      if (data.notFound) {
+        clearStaffMasterDirty(expectedDirtyVersion);
+        return {
+          ok: false,
+          notFound: true,
+          error: String(data.error || 'ไม่พบรายชื่อบุคลากรเดิมใน Google Sheets'),
+          syncedDb: buildSyncedDb(data),
+        };
+      }
+      if (data.success === false) {
+        return { ok: false, error: String(data.error || 'Apps Script ปฏิเสธการบันทึก') };
+      }
+      clearStaffMasterDirty(expectedDirtyVersion);
+      if (propagateOt && expectedOtDirtyVersion !== undefined && expectedOtDirtyVersion !== null) {
+        clearOtDirty(expectedOtDirtyVersion);
+      }
+      if (auditEntry) markAuditOutboxSynced([auditEntry]);
+      return { ok: true, syncedDb: buildSyncedDb(data) };
+    }
+
+    const errText = String(data?.error || '');
+    const isUnsupportedActionFallback =
+      data && data.success === false && errText.includes('สงวนสิทธิ์');
+    if (data && data.success === false && !isUnsupportedActionFallback) {
+      return { ok: false, error: errText || 'Apps Script ปฏิเสธการบันทึก' };
+    }
+
+    // Fallback for older Code.gs without targeted staff route: send via syncAdminAll for staff (never touch settings)
+    const fallbackRes = await pushAdminTableViaAppsScript({
+      gasUrl,
+      adminPin,
+      table: 'staff',
+      db,
+      auditEntry,
+      expectedDirtyVersion,
+    });
+    if (fallbackRes.ok && propagateOt && expectedOtDirtyVersion !== undefined && expectedOtDirtyVersion !== null) {
+      await pushAdminTableViaAppsScript({
+        gasUrl,
+        adminPin,
+        table: 'ot',
+        db,
+        expectedDirtyVersion: expectedOtDirtyVersion,
+      });
+    }
+    return fallbackRes;
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+/**
+ * Targeted Settings key-only update via Apps Script Web App URL.
+ * Updates ONLY the changed Settings key rows without rewriting unrelated keys or headers.
+ */
+export const pushTargetedSettingsKeysViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  changedEntries: Array<[string, string]>;
+  db: AppDatabase;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  syncedDb?: AppDatabase;
+}> => {
+  const { gasUrl, adminPin, changedEntries, db, auditEntry, expectedDirtyVersion } = params;
+  if (changedEntries.length === 0) {
+    clearSettingsDirty(expectedDirtyVersion);
+    return { ok: true };
+  }
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'updateSettingsKeys',
+        adminPin,
+        payload: {
+          entries: changedEntries,
+          ...(auditEntry ? { auditEntry } : {}),
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+
+    if (data && data.targeted === true) {
+      if (data.success === false) {
+        return { ok: false, error: String(data.error || 'Apps Script ปฏิเสธการบันทึก') };
+      }
+      clearSettingsDirty(expectedDirtyVersion);
+      if (auditEntry) markAuditOutboxSynced([auditEntry]);
+      const merged = mergeRemoteDataRows(
+        {
+          staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+          workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+          leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+          otRows: Array.isArray(data.otRows) ? data.otRows : [],
+          settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+          auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+        },
+        db,
+        auditEntry ? { justPushedAudits: [auditEntry] } : undefined
+      );
+      const resolvedSheetId =
+        merged.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+      return {
+        ok: true,
+        syncedDb: {
+          ...merged,
+          settings: {
+            ...merged.settings,
+            spreadsheetId: resolvedSheetId || undefined,
+            spreadsheetUrl:
+              merged.settings.spreadsheetUrl ||
+              (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+            gasUrl: merged.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+          },
+        },
+      };
+    }
+
+    const errText = String(data?.error || '');
+    const isUnsupportedActionFallback =
+      data && data.success === false && errText.includes('สงวนสิทธิ์');
+    if (data && data.success === false && !isUnsupportedActionFallback) {
+      return { ok: false, error: errText || 'Apps Script ปฏิเสธการบันทึก' };
+    }
+
+    return await pushAdminTableViaAppsScript({
+      gasUrl,
+      adminPin,
+      table: 'settings',
+      db,
+      auditEntry,
+      expectedDirtyVersion,
+    });
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+async function getOAuthSheetNumericId(
+  accessToken: string,
+  spreadsheetId: string,
+  sheetTitle: string
+): Promise<number | null> {
+  const metaRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!metaRes.ok) return null;
+  const meta = await metaRes.json();
+  const matched = (meta.sheets || []).find(
+    (s: any) => s?.properties?.title === sheetTitle
+  );
+  return typeof matched?.properties?.sheetId === 'number' ? matched.properties.sheetId : null;
+}
+
+async function deleteOAuthSheetRowAt(
+  accessToken: string,
+  spreadsheetId: string,
+  sheetTitle: string,
+  rowNumber1Based: number
+): Promise<void> {
+  if (rowNumber1Based < 2) return;
+  const numericSheetId = await getOAuthSheetNumericId(accessToken, spreadsheetId, sheetTitle);
+  if (numericSheetId === null) {
+    throw new Error(`ไม่พบแท็บ ${sheetTitle} ใน Google Sheets`);
+  }
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: numericSheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber1Based - 1,
+                endIndex: rowNumber1Based,
+              },
+            },
+          },
+        ],
+      }),
+    }
+  );
+  if (!res.ok) {
+    throw parseSheetsApiError(await res.text(), `ลบแถวใน ${sheetTitle} ไม่สำเร็จ`);
+  }
+}
+
+/**
+ * Targeted single-row Admin Edit/Delete for Daily_Workload / Leave_Records / OT_Attendance via OAuth.
+ */
+export const pushTargetedAdminRowViaOAuth = async (params: {
+  accessToken: string;
+  spreadsheetId: string;
+  action: 'updateWorkload' | 'deleteWorkload' | 'updateLeave' | 'deleteLeave' | 'updateOT' | 'deleteOT';
+  table: 'workloads' | 'leaves' | 'ot';
+  target: DailyWorkload | LeaveRecord | OTAttendance;
+  updated?: DailyWorkload | LeaveRecord | OTAttendance;
+  insertIfMissing?: boolean;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const {
+    accessToken,
+    spreadsheetId,
+    action,
+    table,
+    target,
+    updated,
+    insertIfMissing,
+    auditEntry,
+    expectedDirtyVersion,
+  } = params;
+  try {
+    await ensureSpreadsheetTabs(accessToken, spreadsheetId);
+    const sheetTitle =
+      table === 'workloads'
+        ? 'Daily_Workload'
+        : table === 'leaves'
+        ? 'Leave_Records'
+        : 'OT_Attendance';
+    const maxColLetter = table === 'workloads' ? 'S' : 'I';
+
+    const readRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`${sheetTitle}!A1:${maxColLetter}`)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!readRes.ok) {
+      throw parseSheetsApiError(await readRes.text(), `อ่านข้อมูลจาก ${sheetTitle} ไม่สำเร็จ`);
+    }
+    const readJson = await readRes.json();
+    const values: any[][] = Array.isArray(readJson.values) ? readJson.values : [];
+    const header0 = String(values[0]?.[0] || '').trim();
+
+    let matchRowNum = -1;
+    let hasId = false;
+
+    if (table === 'workloads') {
+      hasId = header0 === 'Record_ID';
+      const wTarget = target as DailyWorkload;
+      const targetFullKey = workloadKey(wTarget);
+      if (hasId && wTarget.id) {
+        const idx = values.findIndex((r, i) => i > 0 && String(r[0] || '').trim() === wTarget.id);
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+      if (matchRowNum === -1) {
+        const idx = values.findIndex((r, i) => {
+          if (i === 0) return false;
+          const sliced = hasId ? r.slice(1, 19) : r.slice(0, 18);
+          const parsed = parseRemoteWorkloadsOnly([sliced])[0];
+          return parsed ? workloadKey(parsed) === targetFullKey : false;
+        });
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+    } else if (table === 'leaves') {
+      hasId = header0 === 'Leave_ID';
+      const lTarget = target as LeaveRecord;
+      const targetFullKey = leaveKey(lTarget);
+      if (hasId && lTarget.id) {
+        const idx = values.findIndex((r, i) => i > 0 && String(r[0] || '').trim() === lTarget.id);
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+      if (matchRowNum === -1) {
+        const idx = values.findIndex((r, i) => {
+          if (i === 0) return false;
+          const sliced = hasId ? r.slice(1, 9) : r.slice(0, 8);
+          const parsed = parseRemoteLeavesOnly([sliced])[0];
+          return parsed ? leaveKey(parsed) === targetFullKey : false;
+        });
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+    } else {
+      hasId = header0 === 'OT_ID';
+      const oTarget = target as OTAttendance;
+      const targetFullKey = otKey(oTarget);
+      if (hasId && oTarget.id) {
+        const idx = values.findIndex((r, i) => i > 0 && String(r[0] || '').trim() === oTarget.id);
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+      if (matchRowNum === -1) {
+        const idx = values.findIndex((r, i) => {
+          if (i === 0) return false;
+          const sliced = hasId ? r.slice(1, 9) : r.slice(0, 8);
+          if (!(String(sliced[0] || '').trim() && String(sliced[2] || '').trim())) return false;
+          return otKey(parseSheetOtRecord(sliced, `O-${i}`)) === targetFullKey;
+        });
+        if (idx > 0) matchRowNum = idx + 1;
+      }
+    }
+
+    const isDelete = action.startsWith('delete');
+    if (isDelete) {
+      if (matchRowNum !== -1) {
+        await deleteOAuthSheetRowAt(accessToken, spreadsheetId, sheetTitle, matchRowNum);
+      }
+    } else if (updated) {
+      let baseRow: (string | number)[] = [];
+      let fallbackId = '';
+      if (table === 'workloads') {
+        const u = updated as DailyWorkload;
+        fallbackId = u.id;
+        baseRow = [
+          u.date,
+          u.shift,
+          u.clinic,
+          getEffectiveTotalPt(u),
+          u.adultPt,
+          u.childPt,
+          u.admit,
+          u.hn,
+          u.rn,
+          u.pn,
+          u.na ?? u.pca ?? 0,
+          u.clerk,
+          u.serviceWorker,
+          formatWorkloadNoteForSheet(u.note, u.referralData),
+          u.reporter,
+          u.clinicGroup || '',
+          u.poolId || '',
+          u.recordType || 'STANDARD',
+        ];
+      } else if (table === 'leaves') {
+        const u = updated as LeaveRecord;
+        fallbackId = u.id;
+        baseRow = [
+          u.startDate,
+          u.endDate,
+          u.staffName,
+          u.position,
+          u.clinic,
+          u.leaveType,
+          u.days,
+          u.note || '',
+        ];
+      } else {
+        const u = updated as OTAttendance;
+        fallbackId = u.id;
+        baseRow = [
+          u.date,
+          u.shift,
+          u.staffName,
+          u.position,
+          u.homeClinic,
+          formatOtWorkClinicForSheet(u.workClinic, u.hours, u.shift),
+          getEffectiveOtHours(u),
+          u.employeeCode || '',
+        ];
+      }
+
+      if (matchRowNum !== -1) {
+        const existingId = hasId ? String(values[matchRowNum - 1]?.[0] || '').trim() : '';
+        const rowValues = hasId ? [existingId || fallbackId, ...baseRow] : baseRow;
+        const endCol = table === 'workloads' ? (hasId ? 'S' : 'R') : (hasId ? 'I' : 'H');
+        const putRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`${sheetTitle}!A${matchRowNum}:${endCol}${matchRowNum}`)}?valueInputOption=USER_ENTERED`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ values: [rowValues] }),
+          }
+        );
+        if (!putRes.ok) {
+          throw parseSheetsApiError(await putRes.text(), `อัปเดตแถวใน ${sheetTitle} ไม่สำเร็จ`);
+        }
+      } else if (insertIfMissing) {
+        const rowValues = hasId ? [fallbackId, ...baseRow] : baseRow;
+        const endCol = table === 'workloads' ? (hasId ? 'S' : 'R') : (hasId ? 'I' : 'H');
+        const appRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`${sheetTitle}!A:${endCol}`)}:append?valueInputOption=USER_ENTERED`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ values: [rowValues] }),
+          }
+        );
+        if (!appRes.ok) {
+          throw parseSheetsApiError(await appRes.text(), `เพิ่มแถวใหม่ใน ${sheetTitle} ไม่สำเร็จ`);
+        }
+      }
+    }
+
+    if (table === 'workloads') {
+      clearWorkloadsDirty(expectedDirtyVersion);
+      if (isDelete) clearWorkloadTombstone(target as DailyWorkload);
+      if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+    } else if (table === 'leaves') {
+      clearLeavesDirty(expectedDirtyVersion);
+      if (isDelete) clearLeaveTombstone(target as LeaveRecord);
+      if (getLeavesDirtyVersion() === 0) clearAllLeaveTombstones();
+    } else {
+      clearOtDirty(expectedDirtyVersion);
+      if (isDelete) clearOtTombstone(target as OTAttendance);
+      if (getOtDirtyVersion() === 0) clearAllOtTombstones();
+    }
+    if (auditEntry) {
+      await appendAuditLogToSheet(accessToken, spreadsheetId, auditEntry);
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'OAuth row error') };
+  }
+};
+
+/**
+ * Targeted single-row Admin Staff mutation via OAuth.
+ */
+export const pushTargetedStaffViaOAuth = async (params: {
+  accessToken: string;
+  spreadsheetId: string;
+  action: 'addStaff' | 'updateStaff' | 'deleteStaff';
+  target?: StaffMember;
+  updated?: StaffMember;
+  previousStaffId?: string;
+  propagateOt?: boolean;
+  insertIfMissing?: boolean;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+  expectedOtDirtyVersion?: number | null;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const {
+    accessToken,
+    spreadsheetId,
+    action,
+    target,
+    updated,
+    previousStaffId,
+    propagateOt,
+    insertIfMissing,
+    auditEntry,
+    expectedDirtyVersion,
+    expectedOtDirtyVersion,
+  } = params;
+  try {
+    await ensureSpreadsheetTabs(accessToken, spreadsheetId);
+    const readRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('Staff_Master!A1:H')}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!readRes.ok) {
+      throw parseSheetsApiError(await readRes.text(), 'อ่านข้อมูล Staff_Master ไม่สำเร็จ');
+    }
+    const readJson = await readRes.json();
+    const values: any[][] = Array.isArray(readJson.values) ? readJson.values : [];
+
+    const lookupTarget = target || updated;
+    const candidates = [
+      previousStaffId,
+      lookupTarget?.staffId,
+      lookupTarget?.employeeCode && isValidEmployeeCodeValue(lookupTarget.employeeCode)
+        ? lookupTarget.employeeCode
+        : undefined,
+    ]
+      .map((c) => String(c || '').trim())
+      .filter(Boolean);
+
+    let matchRowNum = -1;
+    for (const needle of candidates) {
+      const idx = values.findIndex((r, i) => {
+        if (i === 0) return false;
+        const cId = String(r[0] || '').trim();
+        const cCode = String(r[7] || '').trim();
+        return cId === needle || (isValidEmployeeCodeValue(needle) && cCode === needle);
+      });
+      if (idx > 0) {
+        matchRowNum = idx + 1;
+        break;
+      }
+    }
+    if (matchRowNum === -1 && lookupTarget?.name) {
+      const needleName = lookupTarget.name.trim();
+      const idx = values.findIndex(
+        (r, i) => i > 0 && String(r[1] || '').trim() === needleName
+      );
+      if (idx > 0) matchRowNum = idx + 1;
+    }
+
+    if (action === 'deleteStaff') {
+      if (matchRowNum !== -1) {
+        await deleteOAuthSheetRowAt(accessToken, spreadsheetId, 'Staff_Master', matchRowNum);
+      }
+    } else if (updated) {
+      const rowValues = prepareStaffRowForSheet(updated);
+      if (matchRowNum !== -1) {
+        const putRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`Staff_Master!A${matchRowNum}:H${matchRowNum}`)}?valueInputOption=USER_ENTERED`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ values: [rowValues] }),
+          }
+        );
+        if (!putRes.ok) {
+          throw parseSheetsApiError(await putRes.text(), 'อัปเดตข้อมูลบุคลากรไม่สำเร็จ');
+        }
+      } else if (action === 'addStaff' || insertIfMissing) {
+        const appRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('Staff_Master!A:H')}:append?valueInputOption=USER_ENTERED`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ values: [rowValues] }),
+          }
+        );
+        if (!appRes.ok) {
+          throw parseSheetsApiError(await appRes.text(), 'เพิ่มรายชื่อบุคลากรไม่สำเร็จ');
+        }
+      }
+
+      if (propagateOt) {
+        const newCode = getStaffEmployeeCode(updated);
+        const oldName = (target?.name || updated.name).trim();
+        const newName = updated.name.trim();
+        const otReadRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('OT_Attendance!A1:I')}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (otReadRes.ok) {
+          const otJson = await otReadRes.json();
+          const otValues: any[][] = Array.isArray(otJson.values) ? otJson.values : [];
+          const hasId = String(otValues[0]?.[0] || '').trim() === 'OT_ID';
+          const offset = hasId ? 1 : 0;
+          const updates: Array<{ range: string; values: string[][] }> = [];
+          const nameCol = String.fromCharCode(65 + offset + 2);
+          const codeCol = String.fromCharCode(65 + offset + 7);
+          otValues.forEach((r, idx) => {
+            if (idx === 0) return;
+            const rName = String(r[offset + 2] || '').trim();
+            const rCode = String(r[offset + 7] || '').trim();
+            const matched =
+              (newCode && rCode === newCode) ||
+              (previousStaffId && isValidEmployeeCodeValue(previousStaffId) && rCode === previousStaffId) ||
+              rName === oldName ||
+              rName === newName;
+            if (!matched) return;
+            const rowNum = idx + 1;
+            if (newName && rName !== newName) {
+              updates.push({ range: `OT_Attendance!${nameCol}${rowNum}`, values: [[newName]] });
+            }
+            if (newCode && rCode !== newCode) {
+              updates.push({ range: `OT_Attendance!${codeCol}${rowNum}`, values: [[newCode]] });
+            }
+          });
+          if (updates.length > 0) {
+            await fetch(
+              `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  valueInputOption: 'USER_ENTERED',
+                  data: updates,
+                }),
+              }
+            );
+          }
+        }
+      }
+    }
+
+    clearStaffMasterDirty(expectedDirtyVersion);
+    if (propagateOt && expectedOtDirtyVersion !== undefined && expectedOtDirtyVersion !== null) {
+      clearOtDirty(expectedOtDirtyVersion);
+    }
+    if (auditEntry) {
+      await appendAuditLogToSheet(accessToken, spreadsheetId, auditEntry);
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'OAuth staff error') };
+  }
+};
+
+/**
+ * Targeted Settings key-only update via OAuth (modifies ONLY changed key rows in Settings sheet).
+ */
+export const pushTargetedSettingsKeysViaOAuth = async (params: {
+  accessToken: string;
+  spreadsheetId: string;
+  changedEntries: Array<[string, string]>;
+  auditEntry?: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const { accessToken, spreadsheetId, changedEntries, auditEntry, expectedDirtyVersion } = params;
+  if (changedEntries.length === 0) {
+    clearSettingsDirty(expectedDirtyVersion);
+    return { ok: true };
+  }
+  try {
+    await ensureSpreadsheetTabs(accessToken, spreadsheetId);
+    const readRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('Settings!A1:B')}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!readRes.ok) {
+      throw parseSheetsApiError(await readRes.text(), 'อ่านข้อมูล Settings ไม่สำเร็จ');
+    }
+    const readJson = await readRes.json();
+    const values: any[][] = Array.isArray(readJson.values) ? readJson.values : [];
+    const keyToRowNum = new Map<string, number>();
+    values.forEach((r, i) => {
+      if (i === 0) return;
+      const k = String(r[0] || '').trim();
+      if (k && !keyToRowNum.has(k)) {
+        keyToRowNum.set(k, i + 1);
+      }
+    });
+
+    const batchUpdates: Array<{ range: string; values: string[][] }> = [];
+    const toAppend: string[][] = [];
+    changedEntries.forEach(([k, v]) => {
+      const existingRow = keyToRowNum.get(k);
+      if (existingRow) {
+        batchUpdates.push({ range: `Settings!B${existingRow}`, values: [[v]] });
+      } else {
+        toAppend.push([k, v]);
+      }
+    });
+
+    if (batchUpdates.length > 0) {
+      const batchRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            valueInputOption: 'USER_ENTERED',
+            data: batchUpdates,
+          }),
+        }
+      );
+      if (!batchRes.ok) {
+        throw parseSheetsApiError(await batchRes.text(), 'อัปเดตคีย์ Settings ไม่สำเร็จ');
+      }
+    }
+
+    if (toAppend.length > 0) {
+      const appRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent('Settings!A:B')}:append?valueInputOption=USER_ENTERED`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ values: toAppend }),
+        }
+      );
+      if (!appRes.ok) {
+        throw parseSheetsApiError(await appRes.text(), 'เพิ่มคีย์ Settings ใหม่ไม่สำเร็จ');
+      }
+    }
+
+    clearSettingsDirty(expectedDirtyVersion);
+    if (auditEntry) {
+      await appendAuditLogToSheet(accessToken, spreadsheetId, auditEntry);
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'OAuth settings error') };
   }
 };
 

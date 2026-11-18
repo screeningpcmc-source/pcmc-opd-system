@@ -685,6 +685,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         PCA: naRate,
         'NA (Daily Wage)': naRate,
         Clerk: clerkRate,
+        'Clerk (Referral)': clerkRate,
         'Clerk (Daily Wage)': clerkRate,
         'Service Worker': swRate,
         'Service Worker (Daily Wage)': swRate,
@@ -1126,6 +1127,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     <option key={p} value={p}>{POSITION_LABELS[p]}</option>
                   ))}
                 </select>
+                {newPosition === 'Clerk (Referral)' && (
+                  <p className="text-[10px] text-emerald-700 font-medium mt-1">
+                    ตำแหน่งพิเศษของศูนย์รับ-ส่งต่อผู้ป่วย: ระบบนับภาระงานและกำลังคนประจำวันเทียบเท่า NA
+                  </p>
+                )}
                 {isDailyWorkloadExcludedPosition(newPosition) && (
                   <p className="text-[10px] text-sky-700 font-medium mt-1">
                     ตำแหน่งจ้างรายวันไม่นับในภาระงานประจำวัน (บันทึกวันลา/OT เพื่อคิด Unit Cost เมนู 2 ได้)
@@ -1271,6 +1277,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                         staff.position === 'RN' ? 'bg-blue-100 text-blue-800' :
                         staff.position === 'PN' ? 'bg-teal-100 text-teal-800' :
                         (staff.position === 'NA' || staff.position === 'PCA') ? 'bg-emerald-100 text-emerald-800' :
+                        staff.position === 'Clerk (Referral)' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' :
                         staff.position === 'Clerk' ? 'bg-amber-100 text-amber-800' :
                         isDailyWorkloadExcludedPosition(staff.position) ? 'bg-sky-100 text-sky-800' :
                         'bg-gray-100 text-gray-800'

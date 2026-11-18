@@ -275,6 +275,8 @@ function doPost(e) {
 
     var adminActions = [
       'syncAdminAll', 'syncStaff', 'syncSettings', 'appendAudit',
+      'addStaff', 'updateStaff', 'deleteStaff',
+      'updateSettingsKeys',
       'updateWorkload', 'deleteWorkload',
       'updateLeave', 'deleteLeave',
       'updateOT', 'deleteOT'
@@ -288,6 +290,18 @@ function doPost(e) {
       }
       if (action === 'syncAdminAll') {
         return jsonResponse_(syncAdminAllFromApi_(payload || {}));
+      }
+      if (action === 'addStaff') {
+        return jsonResponse_(addStaffFromApi_(payload || {}));
+      }
+      if (action === 'updateStaff') {
+        return jsonResponse_(updateStaffRowFromApi_(payload || {}));
+      }
+      if (action === 'deleteStaff') {
+        return jsonResponse_(deleteStaffRowFromApi_(payload || {}));
+      }
+      if (action === 'updateSettingsKeys') {
+        return jsonResponse_(updateSettingsKeysFromApi_(payload || {}));
       }
       if (action === 'updateWorkload') {
         return jsonResponse_(updateWorkloadRowFromApi_(payload || {}));
@@ -432,22 +446,18 @@ function ensureWorkloadColumns_(sheet) {
   var firstHeader = headers[0] || '';
   var expectedTail = ['Clinic_Group', 'Pool_ID', 'Record_Type'];
   var baseColCount = (firstHeader === 'Record_ID') ? 16 : 15;
-  var needsUpdate = false;
   for (var i = 0; i < expectedTail.length; i++) {
-    if (headers[baseColCount + i] !== expectedTail[i]) {
-      needsUpdate = true;
-      break;
+    // Only fill genuinely blank header cells so existing/custom headers are never overwritten
+    if (!headers[baseColCount + i]) {
+      sheet.getRange(1, baseColCount + 1 + i).setValue(expectedTail[i]);
     }
-  }
-  if (needsUpdate) {
-    sheet.getRange(1, baseColCount + 1, 1, expectedTail.length).setValues([expectedTail]);
   }
 }
 
 function ensureStaffColumns_(sheet) {
   if (!sheet || sheet.getLastRow() === 0) return;
   var col8 = String(sheet.getRange(1, 8).getValue() || '').trim();
-  if (col8 !== 'Employee_Code') {
+  if (!col8) {
     sheet.getRange(1, 8).setValue('Employee_Code');
   }
 }
@@ -458,8 +468,11 @@ function ensureOtColumns_(sheet) {
   var baseCol = (firstHeader === 'OT_ID') ? 7 : 6;
   var hHours = String(sheet.getRange(1, baseCol + 1).getValue() || '').trim();
   var hCode = String(sheet.getRange(1, baseCol + 2).getValue() || '').trim();
-  if (hHours !== 'Hours' || hCode !== 'Employee_Code') {
-    sheet.getRange(1, baseCol + 1, 1, 2).setValues([['Hours', 'Employee_Code']]);
+  if (!hHours) {
+    sheet.getRange(1, baseCol + 1).setValue('Hours');
+  }
+  if (!hCode) {
+    sheet.getRange(1, baseCol + 2).setValue('Employee_Code');
   }
 }
 
@@ -1103,6 +1116,18 @@ function updateWorkloadRowFromApi_(payload) {
   var rowIdx = findWorkloadSheetRowIndex_(sheet, target || updated);
 
   if (rowIdx === -1) {
+    if (payload.insertIfMissing) {
+      var newRowValues = workloadObjToRowArray_(updated, hasId, updated.id || '');
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRowValues.length).setValues([newRowValues]);
+      SpreadsheetApp.flush();
+      if (auditEntry) {
+        appendAuditRowsToSheet_([auditEntry]);
+      }
+      var insRes = buildPublicReadAllPayload_();
+      insRes.targeted = true;
+      insRes.inserted = true;
+      return insRes;
+    }
     var notFoundRes = buildPublicReadAllPayload_();
     notFoundRes.success = false;
     notFoundRes.targeted = true;
@@ -1191,15 +1216,6 @@ function updateLeaveRowFromApi_(payload) {
   var hasId = String(sheet.getRange(1, 1).getValue() || '').trim() === 'Leave_ID';
   var rowIdx = findLeaveSheetRowIndex_(sheet, target || updated);
 
-  if (rowIdx === -1) {
-    var notFoundRes = buildPublicReadAllPayload_();
-    notFoundRes.success = false;
-    notFoundRes.targeted = true;
-    notFoundRes.notFound = true;
-    notFoundRes.error = 'ไม่พบรายการวันลาเดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
-    return notFoundRes;
-  }
-
   var baseRow = [
     String(updated.startDate || ''),
     String(updated.endDate || updated.startDate || ''),
@@ -1210,6 +1226,28 @@ function updateLeaveRowFromApi_(payload) {
     Number(updated.days || 1),
     String(updated.note || '')
   ];
+
+  if (rowIdx === -1) {
+    if (payload.insertIfMissing) {
+      var newRowValues = hasId ? [String(updated.id || ('LV-' + Date.now()))].concat(baseRow) : baseRow;
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRowValues.length).setValues([newRowValues]);
+      SpreadsheetApp.flush();
+      if (auditEntry) {
+        appendAuditRowsToSheet_([auditEntry]);
+      }
+      var insRes = buildPublicReadAllPayload_();
+      insRes.targeted = true;
+      insRes.inserted = true;
+      return insRes;
+    }
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการวันลาเดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
   var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
   var rowValues = hasId ? [String(existingId || updated.id || ('LV-' + Date.now()))].concat(baseRow) : baseRow;
   sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
@@ -1292,15 +1330,6 @@ function updateOtRowFromApi_(payload) {
   var hasId = String(sheet.getRange(1, 1).getValue() || '').trim() === 'OT_ID';
   var rowIdx = findOtSheetRowIndex_(sheet, target || updated);
 
-  if (rowIdx === -1) {
-    var notFoundRes = buildPublicReadAllPayload_();
-    notFoundRes.success = false;
-    notFoundRes.targeted = true;
-    notFoundRes.notFound = true;
-    notFoundRes.error = 'ไม่พบรายการเวร OT เดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
-    return notFoundRes;
-  }
-
   var baseRow = [
     String(updated.date || ''),
     String(updated.shift || ''),
@@ -1311,6 +1340,28 @@ function updateOtRowFromApi_(payload) {
     updated.hours !== undefined && updated.hours !== null && updated.hours !== '' ? Number(updated.hours) : '',
     String(updated.employeeCode || '')
   ];
+
+  if (rowIdx === -1) {
+    if (payload.insertIfMissing) {
+      var newRowValues = hasId ? [String(updated.id || ('OT-' + Date.now()))].concat(baseRow) : baseRow;
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRowValues.length).setValues([newRowValues]);
+      SpreadsheetApp.flush();
+      if (auditEntry) {
+        appendAuditRowsToSheet_([auditEntry]);
+      }
+      var insRes = buildPublicReadAllPayload_();
+      insRes.targeted = true;
+      insRes.inserted = true;
+      return insRes;
+    }
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการเวร OT เดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
   var existingId = hasId ? String(sheet.getRange(rowIdx, 1).getValue() || '').trim() : '';
   var rowValues = hasId
     ? [String(existingId || updated.id || ('OT-' + Date.now()))].concat(baseRow)
@@ -1345,6 +1396,247 @@ function deleteOtRowFromApi_(payload) {
   return res;
 }
 
+function staffObjToRowArrayGas_(s) {
+  var ids = resolveStaffCodeAndIdGas_(s);
+  return [
+    ids.staffId,
+    String(s.name || ''),
+    String(s.position || 'RN'),
+    String(s.homeClinic || ''),
+    String(s.status || 'Active'),
+    String(s.startDate || ''),
+    String(s.endDate || ''),
+    ids.employeeCode
+  ];
+}
+
+function findStaffSheetRowIndex_(sheet, targetObj, previousStaffId) {
+  if (!sheet || sheet.getLastRow() <= 1) return -1;
+  var allValues = sheet.getRange(1, 1, sheet.getLastRow(), Math.max(8, sheet.getLastColumn())).getValues();
+  var candidates = [];
+  if (previousStaffId) candidates.push(String(previousStaffId).trim());
+  if (targetObj && targetObj.staffId) candidates.push(String(targetObj.staffId).trim());
+  if (targetObj && targetObj.employeeCode && isValidEmployeeCodeGas_(targetObj.employeeCode)) {
+    candidates.push(String(targetObj.employeeCode).trim());
+  }
+
+  for (var c = 0; c < candidates.length; c++) {
+    var needle = candidates[c];
+    if (!needle) continue;
+    for (var i = 1; i < allValues.length; i++) {
+      var colId = String(allValues[i][0] || '').trim();
+      var colCode = String(allValues[i][7] || '').trim();
+      if (colId === needle || (isValidEmployeeCodeGas_(needle) && colCode === needle)) {
+        return i + 1;
+      }
+    }
+  }
+
+  var targetName = String((targetObj && targetObj.name) || '').trim();
+  if (targetName) {
+    for (var j = 1; j < allValues.length; j++) {
+      if (String(allValues[j][1] || '').trim() === targetName) {
+        return j + 1;
+      }
+    }
+  }
+  return -1;
+}
+
+function propagateStaffIdentityToOtRows_(oldName, newName, newCode, oldStaffId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.OT);
+  if (!sheet || sheet.getLastRow() <= 1) return;
+  ensureOtColumns_(sheet);
+  var lastRow = sheet.getLastRow();
+  var lastCol = Math.max(9, sheet.getLastColumn());
+  var allValues = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  var hasId = String(allValues[0][0] || '').trim() === 'OT_ID';
+  var offset = hasId ? 1 : 0;
+
+  var cleanOldName = String(oldName || '').trim();
+  var cleanNewName = String(newName || '').trim();
+  var cleanNewCode = isValidEmployeeCodeGas_(newCode) ? String(newCode).trim() : '';
+  var cleanOldStaffId = isValidEmployeeCodeGas_(oldStaffId) ? String(oldStaffId).trim() : '';
+
+  for (var i = 1; i < allValues.length; i++) {
+    var rowName = String(allValues[i][offset + 2] || '').trim();
+    var rowCode = String(allValues[i][offset + 7] || '').trim();
+    var matchedByCode =
+      (cleanNewCode && rowCode === cleanNewCode) ||
+      (cleanOldStaffId && rowCode === cleanOldStaffId);
+    var matchedByName =
+      (cleanOldName && rowName === cleanOldName) ||
+      (cleanNewName && rowName === cleanNewName);
+
+    if (!matchedByCode && !matchedByName) continue;
+
+    var rIdx = i + 1;
+    if (cleanNewName && rowName !== cleanNewName) {
+      sheet.getRange(rIdx, offset + 3).setValue(cleanNewName);
+    }
+    if (cleanNewCode && rowCode !== cleanNewCode) {
+      sheet.getRange(rIdx, offset + 8).setValue(cleanNewCode);
+    }
+  }
+  SpreadsheetApp.flush();
+}
+
+function addStaffFromApi_(payload) {
+  var updated = payload.updated || payload.staff;
+  var auditEntry = payload.auditEntry;
+  if (!updated || !updated.name) return { success: false, error: 'ไม่มีข้อมูลบุคลากรที่จะเพิ่ม' };
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
+    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'
+  ]);
+  ensureStaffColumns_(sheet);
+
+  var rowValues = staffObjToRowArrayGas_(updated);
+  var existingRowIdx = findStaffSheetRowIndex_(sheet, updated, payload.previousStaffId);
+  if (existingRowIdx !== -1) {
+    sheet.getRange(existingRowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, rowValues.length).setValues([rowValues]);
+  }
+  SpreadsheetApp.flush();
+
+  if (payload.propagateOt) {
+    var ids = resolveStaffCodeAndIdGas_(updated);
+    propagateStaffIdentityToOtRows_(updated.name, updated.name, ids.employeeCode, payload.previousStaffId || updated.staffId);
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.inserted = existingRowIdx === -1;
+  return res;
+}
+
+function updateStaffRowFromApi_(payload) {
+  var target = payload.target;
+  var updated = payload.updated;
+  var auditEntry = payload.auditEntry;
+  if (!updated) return { success: false, error: 'ไม่มีข้อมูลบุคลากรที่จะแก้ไข' };
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
+    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'
+  ]);
+  ensureStaffColumns_(sheet);
+
+  var rowIdx = findStaffSheetRowIndex_(sheet, target || updated, payload.previousStaffId);
+  var rowValues = staffObjToRowArrayGas_(updated);
+
+  if (rowIdx === -1) {
+    if (payload.insertIfMissing) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, rowValues.length).setValues([rowValues]);
+      SpreadsheetApp.flush();
+      if (payload.propagateOt) {
+        var insIds = resolveStaffCodeAndIdGas_(updated);
+        propagateStaffIdentityToOtRows_((target && target.name) || updated.name, updated.name, insIds.employeeCode, payload.previousStaffId || (target && target.staffId));
+      }
+      if (auditEntry) {
+        appendAuditRowsToSheet_([auditEntry]);
+      }
+      var insRes = buildPublicReadAllPayload_();
+      insRes.targeted = true;
+      insRes.inserted = true;
+      return insRes;
+    }
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายชื่อบุคลากรเดิมใน Google Sheets';
+    return notFoundRes;
+  }
+
+  sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  if (payload.propagateOt) {
+    var ids = resolveStaffCodeAndIdGas_(updated);
+    propagateStaffIdentityToOtRows_(
+      (target && target.name) || updated.name,
+      updated.name,
+      ids.employeeCode,
+      payload.previousStaffId || (target && target.staffId)
+    );
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
+function deleteStaffRowFromApi_(payload) {
+  var target = payload.target;
+  var auditEntry = payload.auditEntry;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.STAFF, [
+    'Staff_ID', 'Name', 'Position', 'Home_Clinic', 'Status', 'Start_Date', 'End_Date', 'Employee_Code'
+  ]);
+  var rowIdx = findStaffSheetRowIndex_(sheet, target, payload.previousStaffId);
+  if (rowIdx !== -1) {
+    deleteSheetBodyRowAt_(sheet, rowIdx);
+  }
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.deleted = rowIdx !== -1;
+  return res;
+}
+
+function updateSettingsKeysFromApi_(payload) {
+  var entries = Array.isArray(payload.entries) ? payload.entries : [];
+  var auditEntry = payload.auditEntry;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.SETTINGS, ['Key', 'Value']);
+
+  var existingRowByKey = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i][0] || '').trim();
+      if (k && !existingRowByKey[k]) {
+        existingRowByKey[k] = i + 2;
+      }
+    }
+  }
+
+  for (var e = 0; e < entries.length; e++) {
+    var pair = entries[e];
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    var key = String(pair[0] || '').trim();
+    var val = String(pair[1] === undefined || pair[1] === null ? '' : pair[1]);
+    if (!key) continue;
+
+    if (key === 'Gas_Web_App_URL' && val) {
+      PropertiesService.getScriptProperties().setProperty('GAS_WEB_APP_URL', val);
+    }
+
+    var existingRow = existingRowByKey[key];
+    if (existingRow) {
+      sheet.getRange(existingRow, 2).setValue(val);
+    } else {
+      sheet.appendRow([key, val]);
+      existingRowByKey[key] = sheet.getLastRow();
+    }
+  }
+  SpreadsheetApp.flush();
+
+  if (auditEntry) {
+    appendAuditRowsToSheet_([auditEntry]);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
 function syncAdminAllFromApi_(payload) {
   var dirty = payload.dirty || {};
   var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 8);
@@ -1369,4 +1661,5 @@ function syncAdminAllFromApi_(payload) {
   }
   return buildPublicReadAllPayload_();
 }
+
 

@@ -210,7 +210,7 @@ const getOtPayGroupRank = (pos: StaffPosition | string): number => {
   if (norm === 'HN' || norm === 'RN' || norm === 'RN (Daily Wage)') return 1;
   if (norm === 'PN' || norm === 'PN (Daily Wage)') return 2;
   if (norm === 'NA' || norm === 'PCA' || norm === 'NA (Daily Wage)') return 3;
-  if (norm === 'Clerk' || norm === 'Clerk (Daily Wage)') return 4;
+  if (norm === 'Clerk' || norm === 'Clerk (Referral)' || norm === 'Clerk (Daily Wage)') return 4;
   if (norm === 'Service Worker' || norm === 'Service Worker (Daily Wage)') return 5;
   return 9;
 };
@@ -3086,9 +3086,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                     ? 'bg-teal-100 text-teal-800'
                                     : s.position === 'NA' || s.position === 'PCA'
                                       ? 'bg-emerald-100 text-emerald-800'
-                                      : isDailyWorkloadExcludedPosition(s.position)
-                                        ? 'bg-sky-100 text-sky-800'
-                                        : 'bg-gray-100 text-gray-800'
+                                      : s.position === 'Clerk (Referral)'
+                                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                        : isDailyWorkloadExcludedPosition(s.position)
+                                          ? 'bg-sky-100 text-sky-800'
+                                          : 'bg-gray-100 text-gray-800'
                               }`}
                             >
                               {formatPositionLabel(s.position)}
@@ -4098,160 +4100,187 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   </span>
                 </div>
               )}
-              <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
-                <table className="w-full text-left text-xs print:text-[8px] print-fit-table">
-                <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px] print:text-[8px]">
-                  <tr>
-                    <th className="py-2.5 px-3 whitespace-nowrap print:w-[82px] print:px-1 print:py-1">ชื่อ - นามสกุล</th>
-                    <th className="py-2.5 px-2 text-center whitespace-nowrap print:w-[58px] print:px-0.5 print:py-1">ตำแหน่ง</th>
-                    <th className="py-2.5 px-2 whitespace-nowrap print:w-[54px] print:px-0.5 print:py-1">หน่วยงานสังกัด</th>
-                    {fiscalMonths.map((m) => {
-                      const ceEnd = selectedFiscalYear - 543;
-                      const mYear = m.yearOffset === -1 ? ceEnd - 1 : ceEnd;
-                      const mLast = new Date(mYear, Number(m.key), 0).getDate();
-                      const mGovDays = countGovernmentWorkdaysInRange(
-                        `${mYear}-${m.key}-01`,
-                        `${mYear}-${m.key}-${String(mLast).padStart(2, '0')}`,
-                        customHolidays
-                      );
-                      return (
-                        <th
-                          key={m.key}
-                          className="py-2.5 px-2 text-center bg-slate-200/50 whitespace-nowrap print:px-0.5 print:py-1"
-                          title={`${m.fullName} ${mYear + 543}: วันราชการ ${mGovDays} วัน (จ.-ศ. หักวันหยุด)`}
-                        >
-                          <div>{m.name}</div>
-                          <div className="text-[9px] font-medium text-slate-500 print:text-[7px]">
-                            ({mGovDays}ว)
-                          </div>
-                        </th>
-                      );
-                    })}
-                    <th className="py-2.5 px-2 text-center bg-blue-50 text-blue-900 whitespace-nowrap print:w-[28px] print:px-0.5 print:py-1">
-                      ในเวลา
-                    </th>
-                    <th className="py-2.5 px-2 text-center bg-purple-50 text-purple-900 whitespace-nowrap print:w-[28px] print:px-0.5 print:py-1">
-                      เวร OT
-                    </th>
-                    <th className="py-2.5 px-2 text-center bg-amber-50 text-amber-900 whitespace-nowrap print:w-[26px] print:px-0.5 print:py-1">
-                      วันลา
-                    </th>
-                    <th className="py-2.5 px-3 text-center bg-teal-700 text-white font-extrabold whitespace-nowrap print:w-[32px] print:px-0.5 print:py-1">
-                      รวมทั้งสิ้น
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredSummaryData.length === 0 ? (
-                    <tr>
-                      <td colSpan={19} className="py-8 text-center text-gray-400">
-                        ไม่พบข้อมูลตามตัวกรองที่เลือก
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredSummaryData.map((item, idx) => {
-                      const { staff, monthDetails, totalInTime, totalOT, totalLeaves, grandTotal } =
-                        item;
-                      return (
-                        <tr
-                          key={staff.staffId}
-                          className={
-                            idx % 2 === 0
-                              ? 'bg-white hover:bg-slate-50'
-                              : 'bg-slate-50/50 hover:bg-slate-100/60'
-                          }
-                        >
-                          <td className="py-2 px-3 font-semibold text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1">
-                            {staff.name}
-                          </td>
-                          <td className="py-2 px-2 text-center print:px-0.5 print:py-1">
-                            <span
-                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap print:whitespace-normal print:px-0.5 print:text-[7.5px] ${
-                                staff.position === 'HN'
-                                  ? 'bg-purple-100 text-purple-800'
-                                  : staff.position === 'RN'
-                                    ? 'bg-blue-100 text-blue-800'
-                                    : staff.position === 'PN'
-                                      ? 'bg-teal-100 text-teal-800'
-                                      : staff.position === 'NA' || staff.position === 'PCA'
-                                        ? 'bg-emerald-100 text-emerald-800'
-                                        : isDailyWorkloadExcludedPosition(staff.position)
-                                          ? 'bg-sky-100 text-sky-800'
-                                          : 'bg-gray-100 text-gray-800'
-                              }`}
+              <div className="overflow-x-auto border border-gray-200 rounded-xl print:border-none print:overflow-visible">
+                <div className="print-landscape-sheet w-[1050px] max-w-full print:w-full mx-auto bg-white">
+                  <table className="w-full table-fixed text-left text-[11px] print:text-[8px] print-fit-table">
+                    <colgroup>
+                      <col className="w-[116px]" />
+                      <col className="w-[78px]" />
+                      <col className="w-[74px]" />
+                      {fiscalMonths.map((m) => (
+                        <col key={m.key} />
+                      ))}
+                      <col className="w-[42px]" />
+                      <col className="w-[42px]" />
+                      <col className="w-[38px]" />
+                      <col className="w-[48px]" />
+                    </colgroup>
+                    <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[10.5px] print:text-[7.5px]">
+                      <tr>
+                        <th className="py-2 px-1.5 print:px-1 print:py-1">ชื่อ - นามสกุล</th>
+                        <th className="py-2 px-1 text-center print:px-0.5 print:py-1">ตำแหน่ง</th>
+                        <th className="py-2 px-1 print:px-0.5 print:py-1">หน่วยงานสังกัด</th>
+                        {fiscalMonths.map((m) => {
+                          const ceEnd = selectedFiscalYear - 543;
+                          const mYear = m.yearOffset === -1 ? ceEnd - 1 : ceEnd;
+                          const mLast = new Date(mYear, Number(m.key), 0).getDate();
+                          const mGovDays = countGovernmentWorkdaysInRange(
+                            `${mYear}-${m.key}-01`,
+                            `${mYear}-${m.key}-${String(mLast).padStart(2, '0')}`,
+                            customHolidays
+                          );
+                          return (
+                            <th
+                              key={m.key}
+                              className="py-2 px-0.5 text-center bg-slate-200/50 print:px-0.5 print:py-1"
+                              title={`${m.fullName} ${mYear + 543}: วันราชการ ${mGovDays} วัน (จ.-ศ. หักวันหยุด)`}
                             >
-                              {formatPositionLabel(staff.position)}
-                            </span>
-                          </td>
-                          <td className="py-2 px-2 text-gray-600 truncate max-w-[130px] print:max-w-none print:whitespace-normal print:px-0.5 print:py-1">
-                            {staff.homeClinic}
-                          </td>
-
-                          {/* 12 Month columns */}
-                          {fiscalMonths.map((m) => {
-                            const detail = monthDetails[m.key];
-                            const inTime = detail?.inTime || 0;
-                            const ot = detail?.ot || 0;
-                            const val =
-                              shiftFilter === 'IN_TIME'
-                                ? inTime
-                                : shiftFilter === 'OT'
-                                  ? ot
-                                  : inTime + ot;
-                            const hasAnyWork = shiftFilter === 'ALL' ? inTime > 0 || ot > 0 : val > 0;
-
-                            return (
-                              <td
-                                key={m.key}
-                                className={`py-2 px-1.5 text-center text-[11px] print:text-[7.5px] print:px-0.5 print:py-1 ${
-                                  hasAnyWork ? 'font-bold text-teal-950' : 'text-gray-300'
-                                }`}
-                                title={`ในเวลา: ${inTime} วัน, OT: ${ot} เวร, ลา: ${detail?.leaves || 0} วัน`}
-                              >
-                                {hasAnyWork ? (
-                                  shiftFilter === 'ALL' ? (
-                                    <span className="font-bold text-teal-950 whitespace-nowrap">
-                                      {inTime}/{ot}
-                                    </span>
-                                  ) : (
-                                    val
-                                  )
-                                ) : (
-                                  '-'
-                                )}
-                              </td>
-                            );
-                          })}
-
-                          <td className="py-2 px-2 text-center font-bold text-blue-900 bg-blue-50/50 print:px-0.5 print:py-1">
-                            {totalInTime}
-                          </td>
-                          <td className="py-2 px-2 text-center font-bold text-purple-900 bg-purple-50/50 print:px-0.5 print:py-1">
-                            {totalOT}
-                          </td>
-                          <td className="py-2 px-2 text-center text-amber-800 bg-amber-50/50 print:px-0.5 print:py-1">
-                            {totalLeaves > 0 ? totalLeaves : '-'}
-                          </td>
-                          <td className="py-2 px-3 text-center font-black text-sm print:text-[8.5px] text-teal-950 bg-teal-50 print:px-0.5 print:py-1">
-                            {shiftFilter === 'IN_TIME'
-                              ? totalInTime
-                              : shiftFilter === 'OT'
-                                ? totalOT
-                                : grandTotal}
+                              <div>{m.name}</div>
+                              <div className="text-[8.5px] font-medium text-slate-500 print:text-[6.5px]">
+                                ({mGovDays}ว)
+                              </div>
+                            </th>
+                          );
+                        })}
+                        <th className="py-2 px-1 text-center bg-blue-50 text-blue-900 leading-tight print:px-0.5 print:py-1">
+                          ในเวลา
+                        </th>
+                        <th className="py-2 px-1 text-center bg-purple-50 text-purple-900 leading-tight print:px-0.5 print:py-1">
+                          เวร OT
+                        </th>
+                        <th className="py-2 px-1 text-center bg-amber-50 text-amber-900 leading-tight print:px-0.5 print:py-1">
+                          วันลา
+                        </th>
+                        <th className="py-2 px-1 text-center bg-teal-700 text-white font-extrabold leading-tight print:px-0.5 print:py-1">
+                          รวมทั้งสิ้น
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {filteredSummaryData.length === 0 ? (
+                        <tr>
+                          <td colSpan={19} className="py-8 text-center text-gray-400">
+                            ไม่พบข้อมูลตามตัวกรองที่เลือก
                           </td>
                         </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                      ) : (
+                        filteredSummaryData.map((item, idx) => {
+                          const { staff, monthDetails, totalInTime, totalOT, totalLeaves, grandTotal } =
+                            item;
+                          return (
+                            <tr
+                              key={staff.staffId}
+                              className={
+                                idx % 2 === 0
+                                  ? 'bg-white hover:bg-slate-50'
+                                  : 'bg-slate-50/50 hover:bg-slate-100/60'
+                              }
+                            >
+                              <td className="py-1.5 px-1.5 font-semibold text-gray-900 whitespace-normal break-words leading-tight print:px-1 print:py-1">
+                                {staff.name}
+                              </td>
+                              <td className="py-1.5 px-1 text-center print:px-0.5 print:py-1">
+                                <span
+                                  className={`inline-block px-1 py-0.5 rounded text-[9.5px] font-bold whitespace-normal break-words leading-tight print:px-0.5 print:text-[7px] ${
+                                    staff.position === 'HN'
+                                      ? 'bg-purple-100 text-purple-800'
+                                      : staff.position === 'RN'
+                                        ? 'bg-blue-100 text-blue-800'
+                                        : staff.position === 'PN'
+                                          ? 'bg-teal-100 text-teal-800'
+                                          : staff.position === 'NA' || staff.position === 'PCA'
+                                            ? 'bg-emerald-100 text-emerald-800'
+                                            : staff.position === 'Clerk (Referral)'
+                                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                              : isDailyWorkloadExcludedPosition(staff.position)
+                                                ? 'bg-sky-100 text-sky-800'
+                                                : 'bg-gray-100 text-gray-800'
+                                  }`}
+                                >
+                                  {formatPositionLabel(staff.position)}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-1 text-gray-600 whitespace-normal break-words leading-tight print:px-0.5 print:py-1">
+                                {staff.homeClinic}
+                              </td>
+
+                              {/* 12 Month columns */}
+                              {fiscalMonths.map((m) => {
+                                const detail = monthDetails[m.key];
+                                const inTime = detail?.inTime || 0;
+                                const ot = detail?.ot || 0;
+                                const val =
+                                  shiftFilter === 'IN_TIME'
+                                    ? inTime
+                                    : shiftFilter === 'OT'
+                                      ? ot
+                                      : inTime + ot;
+                                const hasAnyWork = shiftFilter === 'ALL' ? inTime > 0 || ot > 0 : val > 0;
+
+                                return (
+                                  <td
+                                    key={m.key}
+                                    className={`py-1.5 px-0.5 text-center text-[10px] print:text-[7.5px] print:px-0.5 print:py-1 ${
+                                      hasAnyWork ? 'font-bold text-teal-950' : 'text-gray-300'
+                                    }`}
+                                    title={`ในเวลา: ${inTime} วัน, OT: ${ot} เวร, ลา: ${detail?.leaves || 0} วัน`}
+                                  >
+                                    {hasAnyWork ? (
+                                      shiftFilter === 'ALL' ? (
+                                        <span className="font-bold text-teal-950 whitespace-nowrap">
+                                          {inTime}/{ot}
+                                        </span>
+                                      ) : (
+                                        val
+                                      )
+                                    ) : (
+                                      '-'
+                                    )}
+                                  </td>
+                                );
+                              })}
+
+                              <td className="py-1.5 px-1 text-center font-bold text-blue-900 bg-blue-50/50 print:px-0.5 print:py-1">
+                                {totalInTime}
+                              </td>
+                              <td className="py-1.5 px-1 text-center font-bold text-purple-900 bg-purple-50/50 print:px-0.5 print:py-1">
+                                {totalOT}
+                              </td>
+                              <td className="py-1.5 px-1 text-center text-amber-800 bg-amber-50/50 print:px-0.5 print:py-1">
+                                {totalLeaves > 0 ? totalLeaves : '-'}
+                              </td>
+                              <td className="py-1.5 px-1 text-center font-black text-xs print:text-[8.5px] text-teal-950 bg-teal-50 print:px-0.5 print:py-1">
+                                {shiftFilter === 'IN_TIME'
+                                  ? totalInTime
+                                  : shiftFilter === 'OT'
+                                    ? totalOT
+                                    : grandTotal}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           ) : (
             /* VIEW B: Monthly Detailed Table */
-            <div className="overflow-x-auto border border-gray-200 rounded-xl print-fit-container">
-              <table className="w-full text-left text-xs print:text-[9px] print-fit-table">
-                <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px]">
+            <div className="overflow-x-auto border border-gray-200 rounded-xl print:border-none print:overflow-visible">
+              <div className="print-landscape-sheet w-full max-w-[1050px] print:max-w-full mx-auto bg-white">
+                <table className="w-full table-fixed text-left text-xs print:text-[8.5px] print-fit-table">
+                  <colgroup>
+                    <col className="w-[16%]" />
+                    <col className="w-[12%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[8%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[24%]" />
+                  </colgroup>
+                  <thead className="bg-slate-100 text-slate-800 font-bold border-b text-[11px] print:text-[8px]">
                   <tr>
                     <th className="py-2.5 px-3 whitespace-nowrap">ชื่อ - นามสกุล</th>
                     <th className="py-2.5 px-2 text-center whitespace-nowrap">ตำแหน่ง</th>
@@ -4300,12 +4329,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               : 'bg-slate-50/50 hover:bg-slate-100/60'
                           }
                         >
-                          <td className="py-2 px-3 font-semibold text-gray-900 whitespace-nowrap">
+                          <td className="py-2 px-2 font-semibold text-gray-900 whitespace-normal break-words leading-tight">
                             {staff.name}
                           </td>
-                          <td className="py-2 px-2 text-center">
+                          <td className="py-2 px-1.5 text-center">
                             <span
-                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-normal break-words leading-tight ${
                                 staff.position === 'HN'
                                   ? 'bg-purple-100 text-purple-800'
                                   : staff.position === 'RN'
@@ -4314,27 +4343,29 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-teal-100 text-teal-800'
                                       : staff.position === 'NA' || staff.position === 'PCA'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : isDailyWorkloadExcludedPosition(staff.position)
-                                          ? 'bg-sky-100 text-sky-800'
-                                          : 'bg-gray-100 text-gray-800'
+                                        : staff.position === 'Clerk (Referral)'
+                                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                          : isDailyWorkloadExcludedPosition(staff.position)
+                                            ? 'bg-sky-100 text-sky-800'
+                                            : 'bg-gray-100 text-gray-800'
                               }`}
                             >
                               {formatPositionLabel(staff.position)}
                             </span>
                           </td>
-                          <td className="py-2 px-3 text-gray-600 whitespace-nowrap">
+                          <td className="py-2 px-2 text-gray-600 whitespace-normal break-words leading-tight">
                             {staff.homeClinic}
                           </td>
-                          <td className="py-2 px-3 text-center font-bold text-blue-900 bg-blue-50/30">
+                          <td className="py-2 px-2 text-center font-bold text-blue-900 bg-blue-50/30">
                             {d.inTime > 0 ? `${d.inTime} วัน` : '-'}
                           </td>
-                          <td className="py-2 px-3 text-center font-bold text-purple-900 bg-purple-50/30">
+                          <td className="py-2 px-2 text-center font-bold text-purple-900 bg-purple-50/30">
                             {d.ot > 0 ? `${d.ot} เวร` : '-'}
                           </td>
-                          <td className="py-2 px-3 text-center font-semibold text-amber-800 bg-amber-50/30">
+                          <td className="py-2 px-2 text-center font-semibold text-amber-800 bg-amber-50/30">
                             {d.leaves > 0 ? `${d.leaves} วัน` : '-'}
                           </td>
-                          <td className="py-2 px-3 text-center font-black text-sm text-teal-950 bg-teal-50">
+                          <td className="py-2 px-2 text-center font-black text-sm text-teal-950 bg-teal-50">
                             {shiftFilter === 'IN_TIME'
                               ? d.inTime
                               : shiftFilter === 'OT'
@@ -4342,7 +4373,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                 : d.total}{' '}
                             วัน
                           </td>
-                          <td className="py-2 px-3 text-[11px] text-gray-600">
+                          <td className="py-2 px-2 text-[11px] text-gray-600 break-words">
                             <div className="space-y-0.5">
                               {d.otClinics.length > 0 && (
                                 <div className="text-purple-800 font-medium">
@@ -4365,6 +4396,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   )}
                 </tbody>
               </table>
+              </div>
             </div>
               )}
             </div>
@@ -4425,147 +4457,160 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
               </div>
 
-              <div
-                ref={leaveReportRef}
-                className="bg-white border border-gray-300 rounded-xl p-4 sm:p-6 space-y-4 print:border-none print:p-0 print:space-y-2 print:w-full"
-              >
-                <div className="text-center space-y-1 border-b border-gray-300 pb-3 print:pb-2">
-                  <div className="text-sm sm:text-base font-extrabold text-gray-900 print:text-sm">
-                    ชื่อหน่วยงาน : หน่วยการพยาบาลผู้ป่วยนอก
+              <div className="overflow-x-auto border border-gray-300 rounded-xl print:border-none print:overflow-visible">
+                <div
+                  ref={leaveReportRef}
+                  className="print-landscape-sheet w-[1030px] max-w-full print:w-full mx-auto bg-white p-4 sm:p-5 space-y-3 print:p-0 print:space-y-2"
+                >
+                  <div className="text-center space-y-1 border-b border-gray-300 pb-2.5 print:pb-2">
+                    <div className="text-sm sm:text-base font-extrabold text-gray-900 print:text-sm">
+                      ชื่อหน่วยงาน : หน่วยการพยาบาลผู้ป่วยนอก
+                    </div>
+                    <div className="text-xs text-gray-600 font-medium print:text-[10px]">
+                      รายงานสรุปวันลาบุคลากร • {leaveReportPeriodLabel}
+                      {clinicFilter !== 'ALL' ? ` • คลินิก: ${clinicFilter}` : ''}
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-600 font-medium print:text-[10px]">
-                    รายงานสรุปวันลาบุคลากร • {leaveReportPeriodLabel}
-                    {clinicFilter !== 'ALL' ? ` • คลินิก: ${clinicFilter}` : ''}
-                  </div>
-                </div>
 
-                <div className="overflow-x-auto print-fit-container">
-                  <table className="w-full text-xs border-collapse border border-gray-400 print:text-[8.5px] print-fit-table">
-                    <thead className="bg-slate-100 text-gray-900 font-bold">
-                      <tr>
-                        <th className="border border-gray-400 py-2 px-2 text-center w-12 print:w-[26px] print:px-0.5 print:py-1">
-                          ลำดับ
-                        </th>
-                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap print:w-[68px] print:whitespace-normal print:px-1 print:py-1">
-                          ชื่อ
-                        </th>
-                        <th className="border border-gray-400 py-2 px-2.5 text-left whitespace-nowrap print:w-[74px] print:whitespace-normal print:px-1 print:py-1">
-                          สกุล
-                        </th>
-                        <th className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap print:w-[76px] print:whitespace-normal print:px-1 print:py-1">
-                          ตำแหน่ง
-                        </th>
+                  <div className="w-full">
+                    <table className="w-full table-fixed text-[11px] border-collapse border border-gray-400 print:text-[8px] print-fit-table">
+                      <colgroup>
+                        <col className="w-[32px]" />
+                        <col className="w-[86px]" />
+                        <col className="w-[92px]" />
+                        <col className="w-[88px]" />
                         {leaveReportColumns.allCols.map((col) => (
-                          <th
-                            key={col.type}
-                            className="border border-gray-400 py-2 px-2 text-center whitespace-nowrap min-w-[58px] print:min-w-0 print:whitespace-normal print:px-0.5 print:py-1 print:leading-tight"
-                            title={col.type}
-                          >
-                            {col.shortLabel}
-                          </th>
+                          <col key={col.type} className="w-[46px]" />
                         ))}
-                        <th className="border border-gray-400 py-2 px-2 text-center bg-amber-50 whitespace-nowrap print:w-[34px] print:whitespace-normal print:px-0.5 print:py-1 print:leading-tight">
-                          รวมวันลา
-                        </th>
-                        <th className="border border-gray-400 py-2 px-3 text-left min-w-[260px] print:min-w-0 print:w-[140px] print:px-1 print:py-1 print:leading-tight">
-                          เหตุผลการลาและวันที่ลา
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {leaveReportData.rows.length === 0 ? (
+                        <col className="w-[46px]" />
+                        <col />
+                      </colgroup>
+                      <thead className="bg-slate-100 text-gray-900 font-bold">
                         <tr>
-                          <td
-                            colSpan={6 + leaveReportColumns.allCols.length}
-                            className="border border-gray-400 py-8 text-center text-gray-400"
-                          >
-                            ไม่พบข้อมูลการลาในตัวกรองที่เลือก
-                          </td>
+                          <th className="border border-gray-400 py-1.5 px-1 text-center print:px-0.5 print:py-1">
+                            ลำดับ
+                          </th>
+                          <th className="border border-gray-400 py-1.5 px-1.5 text-left print:px-1 print:py-1">
+                            ชื่อ
+                          </th>
+                          <th className="border border-gray-400 py-1.5 px-1.5 text-left print:px-1 print:py-1">
+                            สกุล
+                          </th>
+                          <th className="border border-gray-400 py-1.5 px-1.5 text-center print:px-1 print:py-1">
+                            ตำแหน่ง
+                          </th>
+                          {leaveReportColumns.allCols.map((col) => (
+                            <th
+                              key={col.type}
+                              className="border border-gray-400 py-1.5 px-0.5 text-center leading-tight break-words print:px-0.5 print:py-1"
+                              title={col.type}
+                            >
+                              {col.shortLabel}
+                            </th>
+                          ))}
+                          <th className="border border-gray-400 py-1.5 px-0.5 text-center bg-amber-50 leading-tight print:px-0.5 print:py-1">
+                            รวมวันลา
+                          </th>
+                          <th className="border border-gray-400 py-1.5 px-2 text-left leading-tight print:px-1 print:py-1">
+                            เหตุผลการลาและวันที่ลา
+                          </th>
                         </tr>
-                      ) : (
-                        leaveReportData.rows.map((row, idx) => (
-                          <tr
-                            key={row.id}
-                            className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}
-                          >
-                            <td className="border border-gray-400 py-1.5 px-2 text-center text-gray-700 font-medium print:px-0.5 print:py-1">
-                              {idx + 1}
-                            </td>
-                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 font-semibold whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
-                              {row.firstName}
-                            </td>
-                            <td className="border border-gray-400 py-1.5 px-2.5 text-gray-900 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
-                              {row.lastName}
-                            </td>
-                            <td className="border border-gray-400 py-1.5 px-2 text-center font-semibold text-gray-800 whitespace-nowrap print:whitespace-normal print:px-1 print:py-1 print:leading-tight">
-                              {formatPositionLabel(row.position)}
-                            </td>
-                            {leaveReportColumns.allCols.map((col) => {
-                              const val = row.daysByType[col.type] || 0;
-                              return (
-                                <td
-                                  key={col.type}
-                                  className={`border border-gray-400 py-1.5 px-2 text-center print:px-0.5 print:py-1 ${
-                                    val > 0 ? 'font-bold text-amber-900 bg-amber-50/40' : 'text-gray-400'
-                                  }`}
-                                >
-                                  {val > 0 ? val : ''}
-                                </td>
-                              );
-                            })}
-                            <td className="border border-gray-400 py-1.5 px-2 text-center font-extrabold text-amber-950 bg-amber-50/60 print:px-0.5 print:py-1">
-                              {row.totalLeaveDays > 0 ? row.totalLeaveDays : ''}
-                            </td>
-                            <td className="border border-gray-400 py-1.5 px-3 text-[11px] text-gray-800 print:px-1 print:py-1 print:text-[8px] print:leading-tight">
-                              {row.details.length > 0 ? (
-                                <ul className="space-y-0.5 list-disc list-inside print:list-outside print:pl-2.5">
-                                  {row.details.map((d, dIdx) => (
-                                    <li key={dIdx}>{d}</li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <span className="text-gray-300">-</span>
-                              )}
+                      </thead>
+                      <tbody>
+                        {leaveReportData.rows.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={6 + leaveReportColumns.allCols.length}
+                              className="border border-gray-400 py-8 text-center text-gray-400"
+                            >
+                              ไม่พบข้อมูลการลาในตัวกรองที่เลือก
                             </td>
                           </tr>
-                        ))
-                      )}
-                    </tbody>
-                    {leaveReportData.rows.length > 0 && (
-                      <tfoot className="bg-slate-100 font-bold text-gray-900">
-                        <tr>
-                          <td colSpan={4} className="border border-gray-400 py-2 px-3 text-right print:px-1 print:py-1">
-                            รวมทั้งหมด ({leaveReportData.rows.length} คน)
-                          </td>
-                          {leaveReportColumns.allCols.map((col) => (
-                            <td key={col.type} className="border border-gray-400 py-2 px-2 text-center print:px-0.5 print:py-1">
-                              {leaveReportData.totalsByType[col.type] > 0
-                                ? leaveReportData.totalsByType[col.type]
-                                : '-'}
+                        ) : (
+                          leaveReportData.rows.map((row, idx) => (
+                            <tr
+                              key={row.id}
+                              className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}
+                            >
+                              <td className="border border-gray-400 py-1.5 px-1 text-center text-gray-700 font-medium print:px-0.5 print:py-1">
+                                {idx + 1}
+                              </td>
+                              <td className="border border-gray-400 py-1.5 px-1.5 text-gray-900 font-semibold whitespace-normal break-words leading-tight print:px-1 print:py-1">
+                                {row.firstName}
+                              </td>
+                              <td className="border border-gray-400 py-1.5 px-1.5 text-gray-900 whitespace-normal break-words leading-tight print:px-1 print:py-1">
+                                {row.lastName}
+                              </td>
+                              <td className="border border-gray-400 py-1.5 px-1 text-center font-semibold text-gray-800 whitespace-normal break-words leading-tight print:px-1 print:py-1">
+                                {formatPositionLabel(row.position)}
+                              </td>
+                              {leaveReportColumns.allCols.map((col) => {
+                                const val = row.daysByType[col.type] || 0;
+                                return (
+                                  <td
+                                    key={col.type}
+                                    className={`border border-gray-400 py-1.5 px-0.5 text-center print:px-0.5 print:py-1 ${
+                                      val > 0 ? 'font-bold text-amber-900 bg-amber-50/40' : 'text-gray-400'
+                                    }`}
+                                  >
+                                    {val > 0 ? val : ''}
+                                  </td>
+                                );
+                              })}
+                              <td className="border border-gray-400 py-1.5 px-0.5 text-center font-extrabold text-amber-950 bg-amber-50/60 print:px-0.5 print:py-1">
+                                {row.totalLeaveDays > 0 ? row.totalLeaveDays : ''}
+                              </td>
+                              <td className="border border-gray-400 py-1.5 px-2 text-[10.5px] text-gray-800 break-words leading-tight print:px-1 print:py-1 print:text-[8px]">
+                                {row.details.length > 0 ? (
+                                  <ul className="space-y-0.5 list-disc list-outside pl-3">
+                                    {row.details.map((d, dIdx) => (
+                                      <li key={dIdx}>{d}</li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <span className="text-gray-300">-</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      {leaveReportData.rows.length > 0 && (
+                        <tfoot className="bg-slate-100 font-bold text-gray-900">
+                          <tr>
+                            <td colSpan={4} className="border border-gray-400 py-1.5 px-2 text-right print:px-1 print:py-1">
+                              รวมทั้งหมด ({leaveReportData.rows.length} คน)
                             </td>
-                          ))}
-                          <td className="border border-gray-400 py-2 px-2 text-center bg-amber-100 text-amber-950 font-extrabold print:px-0.5 print:py-1">
-                            {leaveReportData.grandTotalDays}
-                          </td>
-                          <td className="border border-gray-400 py-2 px-3 text-[11px] text-gray-600 font-normal print:px-1 print:py-1 print:text-[8px]">
-                            หน่วยนับ: วันทำการ/วันลา
-                          </td>
-                        </tr>
-                      </tfoot>
-                    )}
-                  </table>
-                </div>
-
-                <div className="pt-4 grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-6 text-center text-xs print:text-[10px] text-gray-700 print:break-inside-avoid">
-                  <div>
-                    <p className="mb-8">ผู้จัดทำรายงาน</p>
-                    <p>ลงชื่อ......................................................</p>
-                    <p className="mt-1">(......................................................)</p>
+                            {leaveReportColumns.allCols.map((col) => (
+                              <td key={col.type} className="border border-gray-400 py-1.5 px-0.5 text-center print:px-0.5 print:py-1">
+                                {leaveReportData.totalsByType[col.type] > 0
+                                  ? leaveReportData.totalsByType[col.type]
+                                  : '-'}
+                              </td>
+                            ))}
+                            <td className="border border-gray-400 py-1.5 px-0.5 text-center bg-amber-100 text-amber-950 font-extrabold print:px-0.5 print:py-1">
+                              {leaveReportData.grandTotalDays}
+                            </td>
+                            <td className="border border-gray-400 py-1.5 px-2 text-[10.5px] text-gray-600 font-normal print:px-1 print:py-1 print:text-[8px]">
+                              หน่วยนับ: วันทำการ/วันลา
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
                   </div>
-                  <div>
-                    <p className="mb-8">ผู้ตรวจทาน / รับรองข้อมูล</p>
-                    <p>ลงชื่อ......................................................</p>
-                    <p className="mt-1">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</p>
+
+                  <div className="pt-4 grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-6 text-center text-xs print:text-[10px] text-gray-700 print:break-inside-avoid">
+                    <div>
+                      <p className="mb-8">ผู้จัดทำรายงาน</p>
+                      <p>ลงชื่อ......................................................</p>
+                      <p className="mt-1">(......................................................)</p>
+                    </div>
+                    <div>
+                      <p className="mb-8">ผู้ตรวจทาน / รับรองข้อมูล</p>
+                      <p>ลงชื่อ......................................................</p>
+                      <p className="mt-1">(หัวหน้าหน่วยการพยาบาลผู้ป่วยนอก)</p>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -4742,23 +4787,23 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             )}
           </div>
 
-          {/* Official Printable / JPEG OT Payment Evidence Form (Image 4 Exact Layout) */}
+          {/* Official Printable / JPEG OT Payment Evidence Form (Fits A4 Landscape Without Clipping) */}
           <div className="overflow-x-auto border border-gray-200 rounded-xl print:border-none print:overflow-visible">
             <div
               ref={otPaymentReportRef}
-              className="print-landscape-sheet min-w-[1180px] bg-white p-4 sm:p-5 text-black font-sarabun print:min-w-0 print:w-full print:p-0"
+              className="print-landscape-sheet w-[1040px] max-w-full print:w-full mx-auto bg-white p-3.5 sm:p-4 text-black font-sarabun print:p-0"
             >
               {/* Top Right Cost Center */}
-              <div className="text-right text-[12px] font-bold leading-tight mb-0.5 print:text-[10px]">
+              <div className="text-right text-[11.5px] font-bold leading-tight mb-0.5 print:text-[10px]">
                 Cost Center {resolvedOtPayCostCenter}
               </div>
 
               {/* Centered Header Titles */}
-              <div className="text-center space-y-0.5 mb-2.5">
-                <div className="text-[15px] font-bold leading-snug print:text-[12px]">
+              <div className="text-center space-y-0.5 mb-2">
+                <div className="text-[14px] font-bold leading-snug print:text-[12px]">
                   หลักฐานการจ่ายเงินค่าตอบแทนการปฏิบัติงานคลินิกนอกเวลาราชการ
                 </div>
-                <div className="text-[14px] font-bold leading-snug print:text-[11px]">
+                <div className="text-[13px] font-bold leading-snug print:text-[11px]">
                   <span>หน่วยงาน การพยาบาลผู้ป่วยนอก {formatOtOfficialClinicName(otPayClinic)}</span>
                   <span className="inline-block w-8" />
                   <span>ประจำเดือน</span>
@@ -4771,94 +4816,81 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
               </div>
 
-              {/* Official 2-Row Header Monthly OT Grid Table */}
-              <table className="w-full border-collapse border border-black text-[11px] print:text-[8px]">
+              {/* Official 2-Row Header Monthly OT Grid Table (Fixed columns sized to fit A4 Landscape completely) */}
+              <table className="w-full table-fixed border-collapse border border-black text-[9.5px] leading-tight print:text-[8px] print-fit-table">
+                <colgroup>
+                  <col className="w-[26px]" />
+                  <col className="w-[52px]" />
+                  <col className="w-[110px]" />
+                  <col className="w-[66px]" />
+                  {otPaymentReportData.dayColumns.map((d) => (
+                    <col key={d.dayNum} />
+                  ))}
+                  <col className="w-[34px]" />
+                  <col className="w-[34px]" />
+                  <col className="w-[54px]" />
+                  <col className="w-[44px]" />
+                  <col className="w-[54px]" />
+                  <col className="w-[48px]" />
+                </colgroup>
                 <thead>
                   <tr className="bg-white font-bold text-center">
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1 py-1 leading-tight w-[34px] print:w-[24px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
                       ลำดับ
                       <br />
                       ที่
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1.5 py-1 whitespace-nowrap w-[66px] print:w-[46px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
                       รหัสบุคลากร
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-2 py-1 whitespace-nowrap min-w-[138px] print:min-w-0 print:w-[105px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-1 py-1">
                       ชื่อ สกุล
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1.5 py-1 whitespace-nowrap w-[76px] print:w-[56px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-1 py-1">
                       ตำแหน่ง
                     </th>
                     <th
                       colSpan={otPaymentReportData.daysInMonth}
-                      className="border border-black px-1 py-0.5 text-center font-bold"
+                      className="border border-black px-0.5 py-0.5 text-center font-bold"
                     >
                       วันที่ปฏิบัติงาน
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1 py-1 leading-tight w-[42px] print:w-[30px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
                       อัตรา/
                       <br />
                       ชั่วโมง
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1 py-1 leading-tight w-[44px] print:w-[32px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
                       จำนวน
                       <br />
                       ชั่วโมง
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1.5 py-1 leading-tight w-[68px] print:w-[48px]"
-                    >
-                      จำนวนเงินที่
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
+                      จำนวนเงิน
                       <br />
-                      เบิก
+                      ที่เบิก
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1 py-1 leading-tight whitespace-nowrap w-[58px] print:w-[40px]"
-                    >
-                      หักภาษี 5%
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
+                      หักภาษี
+                      <br />
+                      5%
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1.5 py-1 leading-tight w-[68px] print:w-[48px]"
-                    >
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
                       จำนวนเงิน
                       <br />
                       คงเหลือ
                     </th>
-                    <th
-                      rowSpan={2}
-                      className="border border-black px-1.5 py-1 leading-tight w-[72px] print:w-[54px]"
-                    >
-                      ลายมือชื่อผู้รับ
+                    <th rowSpan={2} className="border border-black px-0.5 py-1 leading-tight">
+                      ลายมือชื่อ
                       <br />
-                      เงิน
+                      ผู้รับเงิน
                     </th>
                   </tr>
                   <tr className="bg-white text-center font-semibold">
                     {otPaymentReportData.dayColumns.map((d) => (
                       <th
                         key={d.dayNum}
-                        className="border border-black py-0.5 px-0 text-center w-[20px] min-w-[18px] print:w-auto print:min-w-0"
+                        className="border border-black py-0.5 px-0 text-center text-[8.5px] print:text-[7.5px]"
                         title={d.holidayName || d.iso}
                       >
                         {d.dayNum}
@@ -4880,14 +4912,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   ) : (
                     otPaymentReportData.rows.map((row, idx) => (
                       <tr key={`${row.staffName}-${row.positionLabel}-${idx}`}>
-                        <td className="border border-black py-1 px-1 text-center">{idx + 1}</td>
-                        <td className="border border-black py-1 px-1.5 text-center font-mono whitespace-nowrap">
+                        <td className="border border-black py-1 px-0.5 text-center">{idx + 1}</td>
+                        <td className="border border-black py-1 px-0.5 text-center font-mono text-[8.5px] print:text-[7.5px] break-all">
                           {row.employeeCode || ''}
                         </td>
-                        <td className="border border-black py-1 px-2 text-left whitespace-nowrap">
+                        <td className="border border-black py-1 px-1 text-left whitespace-normal break-words leading-tight">
                           {row.staffName}
                         </td>
-                        <td className="border border-black py-1 px-1.5 text-center whitespace-nowrap">
+                        <td className="border border-black py-1 px-0.5 text-center whitespace-normal break-words leading-tight">
                           {row.positionLabel}
                         </td>
                         {otPaymentReportData.dayColumns.map((d) => {
@@ -4895,7 +4927,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                           return (
                             <td
                               key={d.dayNum}
-                              className={`border border-black py-1 px-0 text-center ${
+                              className={`border border-black py-1 px-0 text-center text-[8.5px] print:text-[7.5px] ${
                                 d.isShaded ? 'bg-[#d1d5db]' : 'bg-white'
                               }`}
                               title={d.holidayName || d.iso}
@@ -4904,22 +4936,22 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                             </td>
                           );
                         })}
-                        <td className="border border-black py-1 px-1 text-center">
+                        <td className="border border-black py-1 px-0.5 text-center tabular-nums">
                           {row.hourlyRate}
                         </td>
-                        <td className="border border-black py-1 px-1 text-center">
+                        <td className="border border-black py-1 px-0.5 text-center tabular-nums">
                           {formatOtHourNum(row.totalHours)}
                         </td>
-                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                        <td className="border border-black py-1 px-1 text-right tabular-nums whitespace-nowrap">
                           {formatOtMoney(row.grossAmount)}
                         </td>
-                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                        <td className="border border-black py-1 px-1 text-right tabular-nums whitespace-nowrap">
                           {formatOtMoney(row.taxAmount)}
                         </td>
-                        <td className="border border-black py-1 px-1.5 text-right whitespace-nowrap">
+                        <td className="border border-black py-1 px-1 text-right tabular-nums whitespace-nowrap">
                           {formatOtMoney(row.netAmount)}
                         </td>
-                        <td className="border border-black py-1 px-1" />
+                        <td className="border border-black py-1 px-0.5" />
                       </tr>
                     ))
                   )}
@@ -4932,32 +4964,32 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       <tr className="font-bold">
                         <td
                           colSpan={4 + leftPart}
-                          className="border border-black py-1.5 px-2 text-right"
+                          className="border border-black py-1.5 px-1.5 text-right"
                         >
                           (ตัวอักษร)
                         </td>
                         <td
                           colSpan={rightPart}
-                          className="border border-black py-1.5 px-2 text-center"
+                          className="border border-black py-1.5 px-1.5 text-center break-words"
                         >
                           {otPaymentReportData.bahtText}
                         </td>
-                        <td className="border border-black py-1.5 px-1 text-center bg-white">
+                        <td className="border border-black py-1.5 px-0.5 text-center bg-white">
                           รวม
                         </td>
-                        <td className="border border-black py-1.5 px-1 text-center bg-[#fef08a]">
+                        <td className="border border-black py-1.5 px-0.5 text-center bg-[#fef08a] tabular-nums">
                           {formatOtHourNum(otPaymentReportData.grandTotalHours)}
                         </td>
-                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                        <td className="border border-black py-1.5 px-1 text-right bg-[#fef08a] tabular-nums whitespace-nowrap">
                           {formatOtMoney(otPaymentReportData.grandTotalGross)}
                         </td>
-                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                        <td className="border border-black py-1.5 px-1 text-right bg-[#fef08a] tabular-nums whitespace-nowrap">
                           {formatOtMoney(otPaymentReportData.grandTotalTax)}
                         </td>
-                        <td className="border border-black py-1.5 px-1.5 text-right bg-[#fef08a] whitespace-nowrap">
+                        <td className="border border-black py-1.5 px-1 text-right bg-[#fef08a] tabular-nums whitespace-nowrap">
                           {formatOtMoney(otPaymentReportData.grandTotalNet)}
                         </td>
-                        <td className="border border-black py-1.5 px-1 bg-white" />
+                        <td className="border border-black py-1.5 px-0.5 bg-white" />
                       </tr>
                     </tfoot>
                   );
@@ -4965,8 +4997,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </table>
 
               {/* Two Bordered Signature Boxes at Bottom (Image 4 Exact Style) */}
-              <div className="grid grid-cols-2 border border-black mt-3 text-[12px] print:text-[9.5px] print:break-inside-avoid">
-                <div className="border-r border-black p-4 flex flex-col items-center justify-center text-center space-y-2.5 print:p-2.5 print:space-y-1.5">
+              <div className="grid grid-cols-2 border border-black mt-3 text-[11px] print:text-[9.5px] print:break-inside-avoid">
+                <div className="border-r border-black p-3.5 flex flex-col items-center justify-center text-center space-y-2 print:p-2.5 print:space-y-1.5">
                   <div>ได้ตรวจสอบจำนวนเงินถูกต้องแล้ว</div>
                   <div>ลงชื่อ....................................................ผู้ตรวจ</div>
                 </div>
