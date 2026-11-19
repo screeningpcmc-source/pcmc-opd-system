@@ -23,10 +23,16 @@ import {
   getOtHourlyRate,
   getStaffEmployeeCode,
   isLegacyGeneratedStaffId,
-  isValidEmployeeCodeValue
+  isValidEmployeeCodeValue,
+  DailyWorkload,
+  WorkShift,
+  WORKLOAD_SHIFTS,
+  DEFAULT_LINE_AUTO_TIME,
+  LineAutoReportDayMode
 } from '../types';
-import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
+import { markReferralClinicRemovedByAdmin, LineAutomationStatusInfo } from '../services/sheetsService';
 import { formatThaiShortDate, getLocalTodayIso } from '../utils/thaiDate';
+import { buildDailyCensusLineMessage, resolveLineAutoReportDate } from '../utils/lineReport';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
 import {
   verifyAdminPinWithOwner,
@@ -64,11 +70,19 @@ import {
   CalendarOff,
   Pencil,
   Calendar,
-  X
+  X,
+  Send,
+  BellRing,
+  Clock,
+  Loader2,
+  MessageSquare,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
   staffList: StaffMember[];
+  workloads?: DailyWorkload[];
   settings: SystemSettings;
   inTimeClinics: string[];
   outTimeClinics: string[];
@@ -96,10 +110,29 @@ interface AdminPanelTabProps {
   onLockAdmin?: () => void;
   lastSyncedAt?: string | null;
   onToggleAutoSync?: (enabled: boolean) => void;
+  onConfigureLineAutomation?: (config: {
+    enabled: boolean;
+    time: string;
+    reportDayMode: LineAutoReportDayMode;
+    shift: 'ALL' | WorkShift;
+    targetId: string;
+    channelAccessToken?: string;
+    clearToken?: boolean;
+  }) => Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }>;
+  onSendLineReportNow?: (params: {
+    targetId?: string;
+    date?: string;
+    shift?: string;
+    reportDayMode?: LineAutoReportDayMode;
+    message?: string;
+    channelAccessToken?: string;
+  }) => Promise<boolean>;
+  onFetchLineStatus?: () => Promise<LineAutomationStatusInfo | null>;
 }
 
 export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   staffList,
+  workloads = [],
   settings,
   inTimeClinics,
   outTimeClinics,
@@ -126,6 +159,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   onLockAdmin,
   lastSyncedAt = null,
   onToggleAutoSync,
+  onConfigureLineAutomation,
+  onSendLineReportNow,
+  onFetchLineStatus,
 }) => {
   // Staff search & filters
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -225,6 +261,32 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   );
   const [settingsSaved, setSettingsSaved] = useState<boolean>(false);
 
+  // LINE Messaging API Automation state
+  const [lineAutoEnabled, setLineAutoEnabled] = useState<boolean>(Boolean(settings.lineAutoEnabled));
+  const [lineAutoTime, setLineAutoTime] = useState<string>(
+    settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
+  );
+  const [lineAutoReportDayMode, setLineAutoReportDayMode] = useState<LineAutoReportDayMode>(
+    settings.lineAutoReportDayMode || 'YESTERDAY'
+  );
+  const [lineAutoShift, setLineAutoShift] = useState<'ALL' | WorkShift>(
+    settings.lineAutoShift || 'ALL'
+  );
+  const [lineTargetId, setLineTargetId] = useState<string>(settings.lineTargetId || '');
+  const [lineTokenDraft, setLineTokenDraft] = useState<string>('');
+  const [showLineToken, setShowLineToken] = useState<boolean>(false);
+  const [isSavingLineAuto, setIsSavingLineAuto] = useState<boolean>(false);
+  const [isTestingLineSend, setIsTestingLineSend] = useState<boolean>(false);
+  const [isCheckingLineStatus, setIsCheckingLineStatus] = useState<boolean>(false);
+  const [lineStatusInfo, setLineStatusInfo] = useState<LineAutomationStatusInfo | null>(null);
+  const [lineActionFeedback, setLineActionFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+  const [showLinePreview, setShowLinePreview] = useState<boolean>(false);
+  const [showLineSetupGuide, setShowLineSetupGuide] = useState<boolean>(false);
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState<boolean>(false);
+
   useEffect(() => {
     setNhppd(settings.nhppd);
     setScreeningNhppd(settings.screeningNhppd ?? 0.1);
@@ -249,7 +311,206 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setOtRateNa(getOtHourlyRate('NA', settings.otHourlyRates));
     setOtRateClerk(getOtHourlyRate('Clerk', settings.otHourlyRates));
     setOtRateServiceWorker(getOtHourlyRate('Service Worker', settings.otHourlyRates));
+    setLineAutoEnabled(Boolean(settings.lineAutoEnabled));
+    setLineAutoTime(settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME);
+    setLineAutoReportDayMode(settings.lineAutoReportDayMode || 'YESTERDAY');
+    setLineAutoShift(settings.lineAutoShift || 'ALL');
+    setLineTargetId(settings.lineTargetId || '');
   }, [settings]);
+
+  useEffect(() => {
+    if (!isAdminUnlocked || !onFetchLineStatus || !settings.gasUrl) return;
+    let cancelled = false;
+    onFetchLineStatus().then((status) => {
+      if (!cancelled && status) {
+        setLineStatusInfo(status);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminUnlocked, settings.gasUrl, onFetchLineStatus]);
+
+  const resolvedLinePreviewDate = useMemo(
+    () => resolveLineAutoReportDate(workloads, lineAutoReportDayMode),
+    [workloads, lineAutoReportDayMode]
+  );
+
+  const linePreviewMessage = useMemo(
+    () =>
+      buildDailyCensusLineMessage({
+        workloads,
+        date: resolvedLinePreviewDate,
+        shiftFilter: lineAutoShift,
+        premiumSubClinics,
+        includeClinicBreakdown: true,
+      }),
+    [workloads, resolvedLinePreviewDate, lineAutoShift, premiumSubClinics]
+  );
+
+  const handleSaveLineAutomation = async () => {
+    setLineActionFeedback(null);
+    const cleanTargetId = lineTargetId.trim();
+    const cleanToken = lineTokenDraft.trim();
+    const cleanTime = /^\d{2}:\d{2}$/.test(lineAutoTime.trim())
+      ? lineAutoTime.trim()
+      : DEFAULT_LINE_AUTO_TIME;
+    const tokenAvailable = Boolean(cleanToken || lineStatusInfo?.hasToken || settings.lineChannelTokenSet);
+
+    if (lineAutoEnabled && !cleanTargetId) {
+      setLineActionFeedback({
+        type: 'error',
+        text: 'กรุณาระบุ LINE Group ID (ขึ้นต้นด้วย C...) ก่อนเปิดใช้งานส่งอัตโนมัติ',
+      });
+      return;
+    }
+    if (lineAutoEnabled && !tokenAvailable) {
+      setLineActionFeedback({
+        type: 'error',
+        text: 'กรุณาระบุ LINE Channel Access Token ก่อนเปิดใช้งานส่งอัตโนมัติ',
+      });
+      return;
+    }
+
+    if (!onConfigureLineAutomation) return;
+    setIsSavingLineAuto(true);
+    try {
+      const res = await onConfigureLineAutomation({
+        enabled: lineAutoEnabled,
+        time: cleanTime,
+        reportDayMode: lineAutoReportDayMode,
+        shift: lineAutoShift,
+        targetId: cleanTargetId,
+        ...(cleanToken ? { channelAccessToken: cleanToken } : {}),
+      });
+      if (res.ok) {
+        if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
+        setLineTokenDraft('');
+        setLineActionFeedback({
+          type: 'success',
+          text: lineAutoEnabled
+            ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำเร็จ${
+                res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
+              }`
+            : 'บันทึกการตั้งค่าและปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
+        });
+      } else {
+        setLineActionFeedback({
+          type: 'error',
+          text: res.error || 'ตั้งค่า Google Apps Script Trigger ไม่สำเร็จ',
+        });
+      }
+    } finally {
+      setIsSavingLineAuto(false);
+    }
+  };
+
+  const handleTestSendLineNow = async () => {
+    setLineActionFeedback(null);
+    const cleanTargetId = lineTargetId.trim();
+    const cleanToken = lineTokenDraft.trim();
+    if (!cleanTargetId) {
+      setLineActionFeedback({
+        type: 'error',
+        text: 'กรุณาระบุ LINE Group ID ก่อนทดสอบส่งเข้ากลุ่ม',
+      });
+      return;
+    }
+    if (!cleanToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
+      setLineActionFeedback({
+        type: 'error',
+        text: 'กรุณาระบุ LINE Channel Access Token ก่อนทดสอบส่ง',
+      });
+      return;
+    }
+    if (!onSendLineReportNow) return;
+    setIsTestingLineSend(true);
+    try {
+      const ok = await onSendLineReportNow({
+        targetId: cleanTargetId,
+        date: resolvedLinePreviewDate,
+        shift: lineAutoShift,
+        reportDayMode: lineAutoReportDayMode,
+        message: linePreviewMessage,
+        ...(cleanToken ? { channelAccessToken: cleanToken } : {}),
+      });
+      if (ok) {
+        if (cleanToken) setLineTokenDraft('');
+        setLineActionFeedback({
+          type: 'success',
+          text: `ส่งรายงานวันที่ ${formatThaiShortDate(resolvedLinePreviewDate)} เข้ากลุ่ม LINE สำเร็จ!`,
+        });
+        if (onFetchLineStatus) {
+          const fresh = await onFetchLineStatus();
+          if (fresh) setLineStatusInfo(fresh);
+        }
+      } else {
+        setLineActionFeedback({
+          type: 'error',
+          text: 'ส่งรายงานเข้ากลุ่ม LINE ไม่สำเร็จ กรุณาตรวจสอบ Token, Group ID และการ Deploy Code.gs',
+        });
+      }
+    } finally {
+      setIsTestingLineSend(false);
+    }
+  };
+
+  const handleClearLineToken = async () => {
+    if (!onConfigureLineAutomation) return;
+    setIsSavingLineAuto(true);
+    setLineActionFeedback(null);
+    try {
+      const res = await onConfigureLineAutomation({
+        enabled: false,
+        time: lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+        reportDayMode: lineAutoReportDayMode,
+        shift: lineAutoShift,
+        targetId: lineTargetId.trim(),
+        clearToken: true,
+      });
+      if (res.ok) {
+        setLineAutoEnabled(false);
+        setLineTokenDraft('');
+        if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
+        setLineActionFeedback({
+          type: 'info',
+          text: 'ล้าง LINE Channel Access Token และปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
+        });
+      } else {
+        setLineActionFeedback({
+          type: 'error',
+          text: res.error || 'ไม่สามารถล้าง Token ได้',
+        });
+      }
+    } finally {
+      setIsSavingLineAuto(false);
+    }
+  };
+
+  const handleRefreshLineStatus = async () => {
+    if (!onFetchLineStatus) return;
+    setIsCheckingLineStatus(true);
+    setLineActionFeedback(null);
+    try {
+      const fresh = await onFetchLineStatus();
+      if (fresh) {
+        setLineStatusInfo(fresh);
+        setLineActionFeedback({
+          type: 'info',
+          text: fresh.triggerInstalled
+            ? `เชื่อมต่อ Google Apps Script ปกติ • ติดตั้งทริกเกอร์แล้ว ${fresh.triggerCount} ตัว (รอบถัดไป: ${fresh.nextRunAt || '-'})`
+            : 'เชื่อมต่อ Google Apps Script ปกติ • ยังไม่ได้ติดตั้งทริกเกอร์ส่งอัตโนมัติ',
+        });
+      } else {
+        setLineActionFeedback({
+          type: 'error',
+          text: 'ยังไม่ได้Deploy ฟังก์ชัน LINE ล่าสุดใน Code.gs หรือ Web App URL ไม่ตอบสนอง',
+        });
+      }
+    } finally {
+      setIsCheckingLineStatus(false);
+    }
+  };
 
   useEffect(() => {
     if (inTimeClinics.length > 0 && !inTimeClinics.includes(newClinic)) {
@@ -2254,6 +2515,390 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </button>
           </div>
         </form>
+      </div>
+
+      {/* SECTION 5: LINE Group Daily Patient Report Automation (03:59 AM Asia/Bangkok) */}
+      <div className="bg-white rounded-2xl shadow-xs border border-emerald-200/90 p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-emerald-100 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <BellRing className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-gray-900">
+                ระบบออโตเมชั่นส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่ม (Auto Daily Report)
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                รันอัตโนมัติทุกวันผ่าน Google Apps Script (เวลาไทย UTC+7) แม้ปิดเบราว์เซอร์ • ค่าเริ่มต้น 03:59 น.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {lineStatusInfo?.triggerInstalled ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>ทริกเกอร์ทำงานอัตโนมัติ ({lineStatusInfo.time} น.)</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-[11px] font-semibold">
+                <Clock className="w-3.5 h-3.5 text-slate-500" />
+                <span>{lineAutoEnabled ? 'รอติดตั้งทริกเกอร์บน Apps Script' : 'ยังไม่เปิดใช้งานอัตโนมัติ'}</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleRefreshLineStatus}
+              disabled={isCheckingLineStatus || !settings.gasUrl}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3 h-3 ${isCheckingLineStatus ? 'animate-spin' : ''}`} />
+              <span>เช็คสถานะ Trigger</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Live Telemetry Summary Strip */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+          <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
+            <div className="text-[10px] font-semibold text-slate-500 uppercase">สถานะ Channel Token</div>
+            <div className="mt-1 font-bold flex items-center justify-between gap-2">
+              {lineStatusInfo?.hasToken || settings.lineChannelTokenSet ? (
+                <span className="text-emerald-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> บันทึก Token บน Apps Script แล้ว
+                </span>
+              ) : (
+                <span className="text-amber-700 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> ยังไม่ได้ระบุ Token
+                </span>
+              )}
+              {(lineStatusInfo?.hasToken || settings.lineChannelTokenSet) && (
+                <button
+                  type="button"
+                  onClick={handleClearLineToken}
+                  className="text-[10px] text-red-600 hover:underline font-semibold cursor-pointer"
+                >
+                  ล้าง Token
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
+            <div className="text-[10px] font-semibold text-slate-500 uppercase">รอบส่งอัตโนมัติถัดไป</div>
+            <div className="mt-1 font-bold text-gray-800 font-mono text-[11px]">
+              {lineStatusInfo?.nextRunAt
+                ? `${lineStatusInfo.nextRunAt} น.`
+                : lineAutoEnabled
+                ? `ทุกวันเวลา ${lineAutoTime || DEFAULT_LINE_AUTO_TIME} น.`
+                : '- (ปิดอยู่)'}
+            </div>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
+            <div className="text-[10px] font-semibold text-slate-500 uppercase">ผลส่งครั้งล่าสุด</div>
+            <div className="mt-1 font-semibold text-gray-800 text-[11px] truncate" title={settings.lineLastStatus || lineStatusInfo?.lastStatus || ''}>
+              {(lineStatusInfo?.lastStatus || settings.lineLastStatus)
+                ? `${lineStatusInfo?.lastStatus || settings.lineLastStatus}`
+                : 'ยังไม่เคยส่งรายงานผ่าน LINE'}
+            </div>
+            {(lineStatusInfo?.lastSentAt || settings.lineLastSentAt) && (
+              <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                เมื่อ {lineStatusInfo?.lastSentAt || settings.lineLastSentAt}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Auto-Detected Group ID Banner from Webhook */}
+        {(lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId) &&
+          (lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId) !== lineTargetId.trim() && (
+            <div className="p-3 rounded-xl bg-cyan-50 border border-cyan-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 text-cyan-950">
+                <MessageSquare className="w-4 h-4 text-cyan-700 shrink-0" />
+                <span>
+                  ตรวจพบ Group ID จาก LINE Webhook:{' '}
+                  <strong className="font-mono">
+                    {lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId}
+                  </strong>
+                  {(lineStatusInfo?.detectedGroupName || settings.lineDetectedGroupName) && (
+                    <span className="ml-1 text-cyan-800">
+                      ({lineStatusInfo?.detectedGroupName || settings.lineDetectedGroupName})
+                    </span>
+                  )}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setLineTargetId(
+                    lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId || ''
+                  )
+                }
+                className="px-3 py-1 rounded-lg bg-cyan-700 hover:bg-cyan-800 text-white text-[11px] font-bold cursor-pointer"
+              >
+                ใช้รหัสกลุ่มนี้
+              </button>
+            </div>
+          )}
+
+        {lineActionFeedback && (
+          <div
+            className={`p-3 rounded-xl border text-xs font-medium flex items-center gap-2 ${
+              lineActionFeedback.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : lineActionFeedback.type === 'error'
+                ? 'bg-red-50 border-red-200 text-red-800'
+                : 'bg-blue-50 border-blue-200 text-blue-900'
+            }`}
+          >
+            {lineActionFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{lineActionFeedback.text}</span>
+          </div>
+        )}
+
+        {/* Configuration Fields */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 bg-emerald-50/35 border border-emerald-200/70 rounded-xl p-4">
+          <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-emerald-100">
+            <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={lineAutoEnabled}
+                onChange={(e) => setLineAutoEnabled(e.target.checked)}
+                className="w-4 h-4 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+              />
+              <span className="text-xs font-bold text-emerald-950">
+                เปิดใช้งานส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มอัตโนมัติทุกวัน
+              </span>
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setLineAutoEnabled(true);
+                setLineAutoTime('03:59');
+                setLineAutoReportDayMode('YESTERDAY');
+                setLineAutoShift('ALL');
+              }}
+              className="px-2.5 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-50 text-[11px] font-bold cursor-pointer"
+            >
+              ตั้งค่าแนะนำ: 03:59 น. (ยอดเมื่อวานทุกกะ)
+            </button>
+          </div>
+
+          <div className="md:col-span-3">
+            <label className="block text-[11px] font-bold text-gray-700 mb-1">
+              เวลาส่งอัตโนมัติ (เวลาไทย) *
+            </label>
+            <input
+              type="time"
+              value={lineAutoTime}
+              onChange={(e) => setLineAutoTime(e.target.value)}
+              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-mono font-bold text-emerald-950 bg-white"
+            />
+            <span className="text-[10px] text-gray-500">ค่าเริ่มต้น 03:59 น.</span>
+          </div>
+
+          <div className="md:col-span-5">
+            <label className="block text-[11px] font-bold text-gray-700 mb-1">
+              ช่วงข้อมูลวันที่ต้องการสรุปส่ง
+            </label>
+            <select
+              value={lineAutoReportDayMode}
+              onChange={(e) => setLineAutoReportDayMode(e.target.value as LineAutoReportDayMode)}
+              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-semibold text-gray-900 bg-white"
+            >
+              <option value="YESTERDAY">
+                ข้อมูลของเมื่อวาน (แนะนำสำหรับเวลา 03:59 น. — ครบทั้งในเวลา/นอกเวลา)
+              </option>
+              <option value="TODAY">ข้อมูลของวันที่ตรงกับวันส่ง (วันนี้)</option>
+              <option value="LATEST_WITH_DATA">ข้อมูลวันล่าสุดที่มีการบันทึกในระบบ</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="block text-[11px] font-bold text-gray-700 mb-1">
+              กะเวลาที่สรุปส่ง
+            </label>
+            <select
+              value={lineAutoShift}
+              onChange={(e) => setLineAutoShift(e.target.value as 'ALL' | WorkShift)}
+              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-semibold text-gray-900 bg-white"
+            >
+              <option value="ALL">สรุปภาพรวมทุกกะ (ในเวลา + นอกเวลา)</option>
+              {WORKLOAD_SHIFTS.map((sh) => (
+                <option key={sh} value={sh}>
+                  {sh}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="md:col-span-6">
+            <label className="block text-[11px] font-bold text-gray-700 mb-1">
+              LINE Group ID ปลายทาง (รหัสกลุ่ม C...) *
+            </label>
+            <input
+              type="text"
+              value={lineTargetId}
+              onChange={(e) => setLineTargetId(e.target.value)}
+              placeholder="เช่น C1234567890abcdef1234567890abcdef"
+              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono font-semibold text-gray-900 bg-white"
+            />
+            <span className="text-[10px] text-gray-500">
+              ได้จากการพิมพ์ <code className="bg-slate-100 px-1 rounded">/groupid</code> ในกลุ่ม LINE ที่มีบอทอยู่ (Webhook)
+            </span>
+          </div>
+
+          <div className="md:col-span-6">
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] font-bold text-gray-700">
+                LINE Channel Access Token (Messaging API) *
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowLineToken((prev) => !prev)}
+                className="text-[10px] text-emerald-700 hover:text-emerald-900 font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                {showLineToken ? (
+                  <>
+                    <EyeOff className="w-3 h-3" /> <span>ซ่อน</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3 h-3" /> <span>แสดง</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <input
+              type={showLineToken ? 'text' : 'password'}
+              value={lineTokenDraft}
+              onChange={(e) => setLineTokenDraft(e.target.value)}
+              placeholder={
+                lineStatusInfo?.hasToken || settings.lineChannelTokenSet
+                  ? 'บันทึกบน Apps Script แล้ว (ใส่ใหม่เฉพาะเมื่อต้องการเปลี่ยน)'
+                  : 'วาง Long-lived Channel Access Token ที่นี่'
+              }
+              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono text-gray-900 bg-white"
+            />
+            <span className="text-[10px] text-gray-500">
+              เก็บรักษาไว้เฉพาะใน ScriptProperties บน Google Apps Script (ไม่เปิดเผยในชีทสาธารณะ)
+            </span>
+          </div>
+        </div>
+
+        {/* Collapsible Preview & Setup Guide */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowLinePreview((p) => !p)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+            >
+              {showLinePreview ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span>ดูตัวอย่างข้อความรายงาน ({formatThaiShortDate(resolvedLinePreviewDate)})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowLineSetupGuide((p) => !p)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer"
+            >
+              {showLineSetupGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span>คู่มือเชื่อมต่อ LINE + Apps Script (3 ขั้นตอน)</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleTestSendLineNow}
+              disabled={isTestingLineSend || !settings.gasUrl}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              {isTestingLineSend ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              <span>{isTestingLineSend ? 'กำลังส่ง...' : 'ทดสอบส่งเข้า LINE กลุ่มทันที'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSaveLineAutomation}
+              disabled={isSavingLineAuto || !settings.gasUrl}
+              className="inline-flex items-center gap-1.5 px-5 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+            >
+              {isSavingLineAuto ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Save className="w-4 h-4" />
+              )}
+              <span>
+                {isSavingLineAuto
+                  ? 'กำลังบันทึกและตั้ง Trigger...'
+                  : `บันทึกและตั้งเวลาอัตโนมัติ (${lineAutoTime || '03:59'} น.)`}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {showLinePreview && (
+          <div className="bg-slate-900 text-slate-100 rounded-xl p-4 text-xs font-mono whitespace-pre-wrap leading-relaxed max-h-72 overflow-y-auto border border-slate-700">
+            {linePreviewMessage}
+          </div>
+        )}
+
+        {showLineSetupGuide && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
+            <div className="font-bold text-slate-900">
+              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 03:59 น. (ใช้ LINE Messaging API แทน LINE Notify ที่ปิดบริการแล้ว)
+            </div>
+            <ol className="list-decimal list-inside space-y-1.5">
+              <li>
+                เข้า <span className="font-semibold">LINE Developers Console</span> → เลือก Messaging API Channel → เปิดใช้งาน{' '}
+                <span className="font-semibold">Allow bot to join group chats</span> และคัดลอก{' '}
+                <span className="font-semibold">Channel access token (long-lived)</span> มาใส่ในช่องด้านบน จากนั้นเชิญ LINE Bot เข้ากลุ่ม OPD
+              </li>
+              <li>
+                หากต้องการดึงรหัสกลุ่มอัตโนมัติ ให้นำ{' '}
+                <span className="font-semibold">Webhook URL</span> ด้านล่างไปวางใน LINE Developers แล้วเปิด Use webhook จากนั้นพิมพ์{' '}
+                <code className="bg-white border px-1.5 py-0.5 rounded font-mono">/groupid</code> ในกลุ่ม LINE:
+                {settings.gasUrl && (
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={settings.gasUrl}
+                      className="flex-1 text-[11px] font-mono bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(settings.gasUrl || '');
+                        setCopiedWebhookUrl(true);
+                        setTimeout(() => setCopiedWebhookUrl(false), 2000);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-[11px] font-semibold cursor-pointer"
+                    >
+                      {copiedWebhookUrl ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedWebhookUrl ? 'คัดลอกแล้ว' : 'คัดลอก URL'}</span>
+                    </button>
+                  </div>
+                )}
+              </li>
+              <li>
+                นำโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุดไปอัปเดตและ{' '}
+                <span className="font-semibold">Deploy → New version</span> ใน Google Apps Script (สิทธิ์ Who has access: Anyone) แล้วกดปุ่ม{' '}
+                <span className="font-semibold text-emerald-800">บันทึกและตั้งเวลาอัตโนมัติ (03:59 น.)</span> ด้านบน
+              </li>
+            </ol>
+          </div>
+        )}
       </div>
 
       {/* Edit Staff Modal (Name, Position, Clinic, Status, Start Date & End Date) */}

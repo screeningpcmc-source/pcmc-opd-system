@@ -5,7 +5,8 @@ import {
   OTAttendance,
   SystemSettings,
   LEAVE_TYPES,
-  DEFAULT_PREMIUM_SUB_CLINICS
+  DEFAULT_PREMIUM_SUB_CLINICS,
+  DEFAULT_LINE_AUTO_TIME
 } from '../types';
 import { DEFAULT_PRIMARY_ADMIN_OWNER, buildDefaultAdditionalAdminPins } from '../services/adminSecurity';
 
@@ -61,7 +62,13 @@ export const INITIAL_SETTINGS: SystemSettings = {
   premiumSubClinics: [...DEFAULT_PREMIUM_SUB_CLINICS],
   leaveTypes: [...LEAVE_TYPES],
   customHolidays: [],
-  autoSync: true
+  autoSync: true,
+  lineAutoEnabled: false,
+  lineAutoTime: DEFAULT_LINE_AUTO_TIME,
+  lineAutoReportDayMode: 'YESTERDAY',
+  lineAutoShift: 'ALL',
+  lineTargetId: '',
+  lineChannelTokenSet: false,
 };
 
 // Production mode: start with empty data ready for real hospital records

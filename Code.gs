@@ -65,6 +65,9 @@ function onOpen() {
       .addItem('🔗 สร้างลิงก์เชื่อมต่ออัตโนมัติ (แชร์ทีม OPD)', 'showShareLinkDialog')
       .addItem('⚙️ บันทึก Web App URL (/exec) ลงในชีท', 'promptAndSaveGasUrl')
       .addSeparator()
+      .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (03:59 น.)', 'setupLineDailyTrigger0359Ui')
+      .addItem('📨 ทดสอบส่งรายงานผู้ป่วยประจำวันเข้า LINE ทันที', 'manualSendDailyCensusToLineUi')
+      .addSeparator()
       .addItem('📋 ตรวจสอบ/สร้างหัวตารางทั้ง 6 ชีท', 'setupOpdDatabase')
       .addToUi();
   } catch (e) {
@@ -124,7 +127,11 @@ function setupOpdDatabase() {
         ['Premium_Sub_Clinics', DEFAULT_PREMIUM_SUB_CLINICS.join(', ')],
         ['Leave_Types', DEFAULT_LEAVE_TYPES.join(', ')],
         ['Custom_Holidays', '[]'],
-        ['Gas_Web_App_URL', getSavedGasUrl_()]
+        ['Gas_Web_App_URL', getSavedGasUrl_()],
+        ['Line_Auto_Enabled', 'false'],
+        ['Line_Auto_Time', '03:59'],
+        ['Line_Auto_Report_Day', 'YESTERDAY'],
+        ['Line_Auto_Shift', 'ALL']
       ]
     }
   ];
@@ -255,6 +262,12 @@ function doPost(e) {
   try {
     var bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '{}';
     var req = JSON.parse(bodyText);
+
+    // Handle LINE Messaging API Webhook Events (auto-detect Group ID when bot joins or receives a message)
+    if (req && Array.isArray(req.events)) {
+      return jsonResponse_(handleLineWebhookEvents_(req.events));
+    }
+
     var action = String(req.action || '').trim();
     var payload = req.payload;
     var adminPin = String(req.adminPin || (payload && payload.adminPin) || '').trim();
@@ -279,7 +292,8 @@ function doPost(e) {
       'updateSettingsKeys',
       'updateWorkload', 'deleteWorkload',
       'updateLeave', 'deleteLeave',
-      'updateOT', 'deleteOT'
+      'updateOT', 'deleteOT',
+      'configureLineAutomation', 'sendLineReportNow', 'getLineAutomationStatus'
     ];
     if (adminActions.indexOf(action) !== -1) {
       if (!verifyAdminPinInGas_(adminPin)) {
@@ -332,6 +346,15 @@ function doPost(e) {
       if (action === 'appendAudit') {
         appendAuditRowsToSheet_(Array.isArray(payload) ? payload : [payload]);
         return jsonResponse_({ success: true });
+      }
+      if (action === 'configureLineAutomation') {
+        return jsonResponse_(configureLineAutomationFromApi_(payload || {}));
+      }
+      if (action === 'sendLineReportNow') {
+        return jsonResponse_(sendDailyCensusToLineNowFromApi_(payload || {}));
+      }
+      if (action === 'getLineAutomationStatus') {
+        return jsonResponse_(getLineAutomationStatusFromApi_());
       }
     }
 
@@ -492,8 +515,20 @@ function buildPublicReadAllPayload_() {
 
     var activeGasUrl = getSavedGasUrl_();
     var settingsRows = settingsData.rows
-      .filter(function(r) { return r[0] && r[0] !== 'Admin_Pin'; })
+      .filter(function(r) {
+        return r[0] && r[0] !== 'Admin_Pin' && r[0] !== 'Line_Channel_Token';
+      })
       .map(function(r) { return r.slice(0, 2); });
+
+    var hasLineToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+    var hasTokenSetRow = settingsRows.some(function(r) { return r[0] === 'Line_Channel_Token_Set'; });
+    if (!hasTokenSetRow) {
+      settingsRows.push(['Line_Channel_Token_Set', hasLineToken ? 'true' : 'false']);
+    } else {
+      settingsRows = settingsRows.map(function(r) {
+        return r[0] === 'Line_Channel_Token_Set' ? ['Line_Channel_Token_Set', hasLineToken ? 'true' : 'false'] : r;
+      });
+    }
 
     if (activeGasUrl) {
       var hasGasRow = settingsRows.some(function(r) { return r[0] === 'Gas_Web_App_URL' && r[1]; });
@@ -896,6 +931,17 @@ function writeSettingsToSheet_(settings) {
     ? JSON.stringify(settings.staffEmployeeCodes)
     : (existingMap['Staff_Employee_Codes'] || '');
 
+  var hasLineTokenProp = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  var lineAutoEnabledVal = settings.lineAutoEnabled !== undefined
+    ? (settings.lineAutoEnabled ? 'true' : 'false')
+    : (existingMap['Line_Auto_Enabled'] || 'false');
+  var lineAutoTimeVal = String(settings.lineAutoTime || existingMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
+  var lineAutoReportDayVal = String(settings.lineAutoReportDayMode || existingMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim() || 'YESTERDAY';
+  var lineAutoShiftVal = String(settings.lineAutoShift || existingMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+  var lineTargetIdVal = settings.lineTargetId !== undefined
+    ? String(settings.lineTargetId || '').trim()
+    : String(existingMap['Line_Target_Id'] || '').trim();
+
   var entries = [
     ['NHPPD', String(settings.nhppd || 0.4)],
     ['Screening_NHPPD', String(settings.screeningNhppd || 0.1)],
@@ -913,8 +959,19 @@ function writeSettingsToSheet_(settings) {
     ['Default_Cost_Center', resolvedDefaultCostCenter],
     ['Clinic_Cost_Centers', resolvedClinicCostCenters],
     ['OT_Hourly_Rates', resolvedOtHourlyRates],
-    ['OT_Controller_Name', resolvedOtControllerName]
+    ['OT_Controller_Name', resolvedOtControllerName],
+    ['Line_Auto_Enabled', lineAutoEnabledVal],
+    ['Line_Auto_Time', lineAutoTimeVal],
+    ['Line_Auto_Report_Day', lineAutoReportDayVal],
+    ['Line_Auto_Shift', lineAutoShiftVal],
+    ['Line_Target_Id', lineTargetIdVal],
+    ['Line_Channel_Token_Set', hasLineTokenProp ? 'true' : 'false']
   ];
+  if (existingMap['Line_Last_Sent_At']) entries.push(['Line_Last_Sent_At', existingMap['Line_Last_Sent_At']]);
+  if (existingMap['Line_Last_Sent_Report_Date']) entries.push(['Line_Last_Sent_Report_Date', existingMap['Line_Last_Sent_Report_Date']]);
+  if (existingMap['Line_Last_Status']) entries.push(['Line_Last_Status', existingMap['Line_Last_Status']]);
+  if (existingMap['Line_Detected_Group_ID']) entries.push(['Line_Detected_Group_ID', existingMap['Line_Detected_Group_ID']]);
+  if (existingMap['Line_Detected_Group_Name']) entries.push(['Line_Detected_Group_Name', existingMap['Line_Detected_Group_Name']]);
   if (resolvedStaffEmployeeCodes && resolvedStaffEmployeeCodes !== '{}') {
     entries.push(['Staff_Employee_Codes', resolvedStaffEmployeeCodes]);
   }
@@ -1661,5 +1718,703 @@ function syncAdminAllFromApi_(payload) {
   }
   return buildPublicReadAllPayload_();
 }
+
+/**
+ * ==============================================================================
+ * LINE Messaging API Automation (Daily OPD Census Report at 03:59 Asia/Bangkok)
+ * ==============================================================================
+ */
+
+function readSettingsMapGas_() {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.SETTINGS, ['Key', 'Value']);
+  var data = getSheetRowsNormalized_(SHEET_NAMES.SETTINGS, 2);
+  var map = {};
+  data.rows.forEach(function(r) {
+    if (r[0]) map[String(r[0]).trim()] = String(r[1] || '').trim();
+  });
+  return map;
+}
+
+function upsertSettingsEntriesGas_(pairs) {
+  if (!pairs || pairs.length === 0) return;
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.SETTINGS, ['Key', 'Value']);
+  var existingRowByKey = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i][0] || '').trim();
+      if (k && !existingRowByKey[k]) {
+        existingRowByKey[k] = i + 2;
+      }
+    }
+  }
+  for (var j = 0; j < pairs.length; j++) {
+    var key = String(pairs[j][0] || '').trim();
+    var val = String(pairs[j][1] === undefined || pairs[j][1] === null ? '' : pairs[j][1]);
+    if (!key) continue;
+    var rIdx = existingRowByKey[key];
+    if (rIdx) {
+      sheet.getRange(rIdx, 2).setValue(val);
+    } else {
+      sheet.appendRow([key, val]);
+      existingRowByKey[key] = sheet.getLastRow();
+    }
+  }
+  SpreadsheetApp.flush();
+}
+
+function parseLineAutoTimeGas_(timeStr) {
+  var m = String(timeStr || '03:59').trim().match(/^(\d{1,2}):(\d{1,2})$/);
+  var hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 3;
+  var mm = m ? Math.min(59, Math.max(0, Number(m[2]))) : 59;
+  return {
+    hour: hh,
+    minute: mm,
+    formatted: (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm
+  };
+}
+
+function getBangkokDatePartsGas_(dateObj) {
+  var d = dateObj || new Date();
+  var ymd = Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd');
+  var hm = Utilities.formatDate(d, 'Asia/Bangkok', 'HH:mm');
+  var p = ymd.split('-');
+  return {
+    ymd: ymd,
+    hm: hm,
+    year: Number(p[0]),
+    month: Number(p[1]),
+    day: Number(p[2])
+  };
+}
+
+function addDaysIsoGas_(ymd, deltaDays) {
+  var p = String(ymd || '').split('-');
+  if (p.length !== 3) return getBangkokDatePartsGas_().ymd;
+  var dt = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + Number(deltaDays || 0)));
+  return dt.getUTCFullYear() + '-' +
+    (dt.getUTCMonth() + 1 < 10 ? '0' : '') + (dt.getUTCMonth() + 1) + '-' +
+    (dt.getUTCDate() < 10 ? '0' : '') + dt.getUTCDate();
+}
+
+function formatThaiFullDateGas_(ymd) {
+  var p = String(ymd || '').split('-');
+  if (p.length !== 3) return String(ymd || '-');
+  var y = Number(p[0]);
+  var m = Number(p[1]);
+  var d = Number(p[2]);
+  var thaiDays = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  var thaiMonths = [
+    'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+    'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'
+  ];
+  var dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return 'วัน' + thaiDays[dow] + 'ที่ ' + d + ' ' + thaiMonths[m - 1] + ' พ.ศ. ' + (y + 543);
+}
+
+function computeNextBangkokRunEpochGas_(timeStr, forceNextDay) {
+  var t = parseLineAutoTimeGas_(timeStr);
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var targetEpoch = Date.UTC(bkk.year, bkk.month - 1, bkk.day, t.hour - 7, t.minute, 0, 0);
+  if (forceNextDay || targetEpoch <= Date.now() + 60000) {
+    targetEpoch = Date.UTC(bkk.year, bkk.month - 1, bkk.day + 1, t.hour - 7, t.minute, 0, 0);
+  }
+  return targetEpoch;
+}
+
+function removeLineTriggersGas_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    var fn = triggers[i].getHandlerFunction();
+    if (fn === 'runLineDailyCensusTrigger_' || fn === 'runLineDailyBackupTrigger_' || fn === 'runLineDailyCensusTrigger') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+function syncLineAutomationTriggers_(enabled, timeStr) {
+  removeLineTriggersGas_();
+  if (!enabled) {
+    return { installed: false, count: 0, nextRunAt: '' };
+  }
+  var parsed = parseLineAutoTimeGas_(timeStr);
+  var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, false);
+  ScriptApp.newTrigger('runLineDailyCensusTrigger_')
+    .timeBased()
+    .at(new Date(nextEpoch))
+    .create();
+
+  // Safety-net daily trigger (~10 minutes later) ensures tomorrow's exact HH:mm trigger is always refreshed
+  var totalMins = parsed.hour * 60 + parsed.minute + 10;
+  var backupHour = Math.floor((totalMins % 1440) / 60);
+  var backupMin = totalMins % 60;
+  ScriptApp.newTrigger('runLineDailyBackupTrigger_')
+    .timeBased()
+    .everyDays(1)
+    .atHour(backupHour)
+    .nearMinute(backupMin)
+    .inTimezone('Asia/Bangkok')
+    .create();
+
+  var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+  return { installed: true, count: 2, nextRunAt: nextRunThai };
+}
+
+function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
+  var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
+  var hasId = workloadData.headers[0] === 'Record_ID';
+  var off = hasId ? 1 : 0;
+
+  var premiumSubRaw = (settingsMap && settingsMap['Premium_Sub_Clinics']) || DEFAULT_PREMIUM_SUB_CLINICS.join(', ');
+  var premiumSubs = premiumSubRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+  var shiftTarget = String(shiftFilter || 'ALL').trim() || 'ALL';
+
+  var parsedRows = [];
+  workloadData.rows.forEach(function(r) {
+    var d = String(r[off] || '').trim();
+    var sh = String(r[off + 1] || '').trim();
+    var cl = String(r[off + 2] || '').trim();
+    if (!d || !cl) return;
+    if (d !== targetDate) return;
+    if (shiftTarget !== 'ALL' && sh !== shiftTarget) return;
+
+    var adultPt = Number(r[off + 4] || 0) || 0;
+    var childPt = Number(r[off + 5] || 0) || 0;
+    var totalPt = Math.max(Number(r[off + 3] || 0) || 0, adultPt + childPt);
+    var admit = Number(r[off + 6] || 0) || 0;
+    var hn = Number(r[off + 7] || 0) || 0;
+    var rn = Number(r[off + 8] || 0) || 0;
+    var pn = Number(r[off + 9] || 0) || 0;
+    var na = Number(r[off + 10] || 0) || 0;
+    var rawNote = String(r[off + 13] || '').trim();
+    var reporter = String(r[off + 14] || '').trim();
+    var clinicGroup = String(r[off + 15] || '').trim();
+    var recordType = String(r[off + 17] || 'STANDARD').trim();
+
+    var referralData = null;
+    var refMatch = rawNote.match(/\[\[REFERRAL_JSON:([\s\S]*?)\]\]/);
+    if (refMatch) {
+      try {
+        referralData = JSON.parse(refMatch[1]);
+      } catch (e) {
+        referralData = null;
+      }
+    }
+
+    var isPremium = recordType === 'PREMIUM_POOL' || recordType === 'PREMIUM_SUB' ||
+      clinicGroup === 'ศูนย์ปัญญาภิรมย์' || clinicGroup === 'คลินิกพิเศษ PREMIUM' ||
+      cl.indexOf('ศูนย์ปัญญาภิรมย์') === 0 || /-Premium$/i.test(cl) || premiumSubs.indexOf(cl) !== -1;
+
+    parsedRows.push({
+      date: d, shift: sh, clinic: cl,
+      totalPt: totalPt, adultPt: adultPt, childPt: childPt, admit: admit,
+      hn: hn, rn: rn, pn: pn, na: na,
+      reporter: reporter,
+      recordType: isPremium ? (recordType === 'PREMIUM_POOL' || cl.indexOf('กำลังคนรวม') !== -1 ? 'PREMIUM_POOL' : 'PREMIUM_SUB') : 'STANDARD',
+      isPremium: isPremium,
+      referralData: referralData
+    });
+  });
+
+  var formattedThaiDate = formatThaiFullDateGas_(targetDate);
+  var shiftLabel = shiftTarget === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftTarget;
+
+  if (parsedRows.length === 0) {
+    return {
+      text: '📊 รายงานสถิติผู้ป่วยนอก OPD PCMC\n🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน\n📅 ประจำวันที่: ' + formattedThaiDate + ' (' + shiftLabel + ')\n──────────────────\n⚠️ ยังไม่พบข้อมูลบันทึกภาระงานในวันที่และกะเวลาที่กำหนด',
+      clinicCount: 0,
+      totalPt: 0
+    };
+  }
+
+  var regularRows = [];
+  var premiumGroupsMap = {};
+  parsedRows.forEach(function(w) {
+    if (!w.isPremium) {
+      regularRows.push(w);
+      return;
+    }
+    var gKey = w.date + '|' + w.shift;
+    if (!premiumGroupsMap[gKey]) {
+      premiumGroupsMap[gKey] = { shift: w.shift, poolRows: [], subRows: [] };
+    }
+    if (w.recordType === 'PREMIUM_POOL') premiumGroupsMap[gKey].poolRows.push(w);
+    else premiumGroupsMap[gKey].subRows.push(w);
+  });
+
+  var refKeys = [
+    { key: 'admitPrivate', label: 'Admit พิเศษ' },
+    { key: 'admitGeneral', label: 'Admit สามัญ' },
+    { key: 'referIn', label: 'Refer in' },
+    { key: 'referOut', label: 'Refer out' },
+    { key: 'reservePrivateRoom', label: 'จองห้องพิเศษ' },
+    { key: 'cancelPrivateRoom', label: 'ยกเลิกห้องพิเศษ' }
+  ];
+
+  var totals = { totalPt: 0, adultPt: 0, childPt: 0, admit: 0, rn: 0, pn: 0, na: 0 };
+  var regularLines = [];
+  var referralRows = [];
+
+  regularRows.forEach(function(w) {
+    var effPt = w.totalPt;
+    if ((w.clinic === 'ศูนย์รับ - ส่งต่อผู้ป่วย' || w.referralData) && w.referralData) {
+      referralRows.push(w);
+      var rTot = 0;
+      refKeys.forEach(function(rk) {
+        rTot += Number((w.referralData[rk.key] && w.referralData[rk.key].count) || 0);
+      });
+      effPt = rTot;
+    }
+    totals.totalPt += effPt;
+    totals.adultPt += w.adultPt;
+    totals.childPt += w.childPt;
+    totals.admit += w.admit;
+    totals.rn += w.rn;
+    totals.pn += w.pn;
+    totals.na += w.na;
+    var nursing = w.rn + w.pn + w.na;
+    regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ' + effPt + ' ราย' + (w.admit > 0 ? ' | Admit ' + w.admit : '') + ' | พยาบาล ' + nursing.toFixed(1));
+  });
+
+  var premiumBlocks = [];
+  var premKeys = Object.keys(premiumGroupsMap);
+  premKeys.forEach(function(pk) {
+    var grp = premiumGroupsMap[pk];
+    var staffSrc = grp.poolRows.length > 0 ? grp.poolRows : grp.subRows;
+    var pAdult = 0, pChild = 0, pTotal = 0, pAdmit = 0, pRn = 0, pPn = 0, pNa = 0;
+    grp.subRows.forEach(function(sr) {
+      pAdult += sr.adultPt; pChild += sr.childPt; pTotal += sr.totalPt; pAdmit += sr.admit;
+    });
+    staffSrc.forEach(function(sr) {
+      pRn += sr.rn; pPn += sr.pn; pNa += sr.na;
+    });
+    pTotal = Math.max(pTotal, pAdult + pChild);
+    totals.totalPt += pTotal; totals.adultPt += pAdult; totals.childPt += pChild; totals.admit += pAdmit;
+    totals.rn += pRn; totals.pn += pPn; totals.na += pNa;
+    var pNursing = pRn + pPn + pNa;
+    var lines = ['🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ' + pTotal + ' ราย (Admit ' + pAdmit + ') | พยาบาล ' + pNursing.toFixed(1) + ' แรง'];
+    grp.subRows.forEach(function(sr) {
+      lines.push('  ↳ ' + sr.clinic + ': ' + sr.totalPt + ' ราย' + (sr.admit > 0 ? ' (Admit ' + sr.admit + ')' : ''));
+    });
+    premiumBlocks.push(lines.join('\n'));
+  });
+
+  var referralSection = '';
+  if (referralRows.length > 0) {
+    var refSum = 0;
+    var refLines = refKeys.map(function(rk) {
+      var cnt = 0;
+      var reasons = [];
+      referralRows.forEach(function(rr) {
+        var entry = rr.referralData && rr.referralData[rk.key];
+        if (entry) {
+          cnt += Number(entry.count || 0);
+          if (entry.reason) reasons.push(String(entry.reason).trim());
+        }
+      });
+      refSum += cnt;
+      return '  • ' + rk.label + ': ' + (cnt > 0 ? cnt : '-') + (reasons.length > 0 ? ' (' + reasons.join(', ') + ')' : '');
+    });
+    var reporters = referralRows.map(function(rr) { return rr.reporter; }).filter(Boolean);
+    referralSection = '\n──────────────────\n🚑 ห้องรับ - ส่งต่อผู้ป่วย (รวม ' + refSum + ' รายการ)\n' + refLines.join('\n') +
+      (reporters.length > 0 ? '\nผู้รายงาน: ' + reporters.join(', ') : '');
+  }
+
+  var totalNursing = totals.rn + totals.pn + totals.na;
+  var clinicCount = regularRows.length + premKeys.length;
+  var msg = '📊 รายงานภาระงานผู้ป่วยนอก OPD PCMC\n' +
+    '🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน\n' +
+    '📅 ประจำวันที่: ' + formattedThaiDate + ' (' + shiftLabel + ')\n' +
+    '──────────────────\n' +
+    '👥 ผู้ป่วยนอกรวม: ' + totals.totalPt + ' ราย (ผู้ใหญ่ ' + totals.adultPt + ' | เด็ก ' + totals.childPt + ')\n' +
+    '🛌 รับไว้รักษา (Admit): ' + totals.admit + ' ราย\n' +
+    '👩‍⚕️ กำลังคนพยาบาลปฏิบัติงาน (RN+PN+NA): ' + totalNursing.toFixed(1) + ' แรง\n' +
+    '(RN: ' + totals.rn.toFixed(1) + ' | PN: ' + totals.pn.toFixed(1) + ' | NA: ' + totals.na.toFixed(1) + ')' +
+    (regularLines.length > 0 ? '\n──────────────────\n📋 รายละเอียดแยกห้องตรวจ:\n' + regularLines.join('\n') : '') +
+    (premiumBlocks.length > 0 ? '\n──────────────────\n' + premiumBlocks.join('\n') : '') +
+    referralSection +
+    '\n──────────────────\nบันทึกทั้งหมด ' + clinicCount + ' คลินิกหลัก';
+
+  if (msg.length > 4950) {
+    msg = msg.slice(0, 4900) + '\n...(ข้อความถูกย่อตามขีดจำกัด LINE)';
+  }
+  return { text: msg, clinicCount: clinicCount, totalPt: totals.totalPt };
+}
+
+function pushLineMessageGas_(channelAccessToken, targetId, text) {
+  var token = String(channelAccessToken || '').trim();
+  var to = String(targetId || '').trim();
+  if (!token) return { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token' };
+  if (!to) return { ok: false, error: 'ยังไม่ได้ระบุ LINE Group ID / Target ID' };
+
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({
+      to: to,
+      messages: [{ type: 'text', text: String(text || '') }]
+    }),
+    muteHttpExceptions: true
+  });
+  var code = res.getResponseCode();
+  if (code >= 200 && code < 300) {
+    return { ok: true };
+  }
+  return { ok: false, error: 'LINE API HTTP ' + code + ': ' + res.getContentText() };
+}
+
+function replyLineMessageGas_(channelAccessToken, replyToken, text) {
+  if (!channelAccessToken || !replyToken) return;
+  try {
+    UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + channelAccessToken },
+      payload: JSON.stringify({
+        replyToken: replyToken,
+        messages: [{ type: 'text', text: String(text || '') }]
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    // ignore reply failure
+  }
+}
+
+function fetchLineGroupNameGas_(channelAccessToken, groupId) {
+  if (!channelAccessToken || !groupId) return '';
+  try {
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(groupId) + '/summary', {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + channelAccessToken },
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() === 200) {
+      var data = JSON.parse(res.getContentText());
+      return String(data.groupName || '').trim();
+    }
+  } catch (e) {
+    // ignore
+  }
+  return '';
+}
+
+function handleLineWebhookEvents_(events) {
+  var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    if (!ev || !ev.source) continue;
+    var detectedId = String(ev.source.groupId || ev.source.roomId || ev.source.userId || '').trim();
+    if (!detectedId) continue;
+
+    var groupName = ev.source.groupId ? fetchLineGroupNameGas_(token, detectedId) : '';
+    var updates = [['Line_Detected_Group_ID', detectedId]];
+    if (groupName) updates.push(['Line_Detected_Group_Name', groupName]);
+    upsertSettingsEntriesGas_(updates);
+
+    var txt = ev.type === 'message' && ev.message && ev.message.type === 'text'
+      ? String(ev.message.text || '').trim().toLowerCase()
+      : '';
+    if (token && ev.replyToken && (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id')) {
+      replyLineMessageGas_(
+        token,
+        ev.replyToken,
+        'รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n' + detectedId + (groupName ? '\nกลุ่ม: ' + groupName : '')
+      );
+    }
+  }
+  return { success: true };
+}
+
+function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
+  if (mode === 'TODAY') return bkkTodayYmd;
+  if (mode === 'LATEST_WITH_DATA') {
+    var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
+    var hasId = workloadData.headers[0] === 'Record_ID';
+    var off = hasId ? 1 : 0;
+    var dates = [];
+    workloadData.rows.forEach(function(r) {
+      var d = String(r[off] || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && dates.indexOf(d) === -1) dates.push(d);
+    });
+    dates.sort();
+    return dates.length > 0 ? dates[dates.length - 1] : addDaysIsoGas_(bkkTodayYmd, -1);
+  }
+  return addDaysIsoGas_(bkkTodayYmd, -1);
+}
+
+function sendScheduledCensusReportGas_(sourceTag) {
+  var settingsMap = readSettingsMapGas_();
+  var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+  if (!enabled && sourceTag !== 'MANUAL') {
+    return { success: false, skipped: true, reason: 'Automation disabled' };
+  }
+
+  var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
+  var targetId = String(settingsMap['Line_Target_Id'] || '').trim();
+  var reportDayMode = String(settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim();
+  var shiftFilter = String(settingsMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var targetDate = resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
+
+  if (sourceTag !== 'MANUAL') {
+    var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY') || '').trim();
+    if (lastSentTriggerDay === bkk.ymd) {
+      return { success: true, skipped: true, reason: 'Already sent today (' + bkk.ymd + ')' };
+    }
+  }
+
+  var report = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
+  var pushRes = pushLineMessageGas_(token, targetId, report.text);
+  var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+
+  if (pushRes.ok) {
+    if (sourceTag !== 'MANUAL') {
+      PropertiesService.getScriptProperties().setProperty('LINE_LAST_TRIGGER_BKK_DAY', bkk.ymd);
+    }
+    var okStatus = 'ส่งสำเร็จ (' + report.clinicCount + ' คลินิก, ผู้ป่วย ' + report.totalPt + ' ราย)';
+    upsertSettingsEntriesGas_([
+      ['Line_Last_Sent_At', nowThai],
+      ['Line_Last_Sent_Report_Date', targetDate],
+      ['Line_Last_Status', okStatus]
+    ]);
+    return { success: true, targetDate: targetDate, statusText: okStatus, sentAt: nowThai };
+  } else {
+    var errStatus = 'ส่งไม่สำเร็จ: ' + pushRes.error;
+    upsertSettingsEntriesGas_([
+      ['Line_Last_Sent_At', nowThai],
+      ['Line_Last_Status', errStatus]
+    ]);
+    return { success: false, error: pushRes.error, statusText: errStatus };
+  }
+}
+
+function runLineDailyCensusTrigger_() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    sendScheduledCensusReportGas_('AUTO_EXACT');
+  } finally {
+    var settingsMap = readSettingsMapGas_();
+    var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+    var timeStr = String(settingsMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
+    if (enabled) {
+      var parsed = parseLineAutoTimeGas_(timeStr);
+      // Schedule specifically for tomorrow so it triggers once per day at HH:mm
+      var existing = ScriptApp.getProjectTriggers();
+      for (var i = 0; i < existing.length; i++) {
+        if (existing[i].getHandlerFunction() === 'runLineDailyCensusTrigger_') {
+          ScriptApp.deleteTrigger(existing[i]);
+        }
+      }
+      var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, true);
+      ScriptApp.newTrigger('runLineDailyCensusTrigger_')
+        .timeBased()
+        .at(new Date(nextEpoch))
+        .create();
+      var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+      PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+    }
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function runLineDailyBackupTrigger_() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var settingsMap = readSettingsMapGas_();
+    var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+    if (!enabled) {
+      removeLineTriggersGas_();
+      return;
+    }
+    var timeStr = String(settingsMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
+    var parsed = parseLineAutoTimeGas_(timeStr);
+    var bkk = getBangkokDatePartsGas_(new Date());
+    var lastSentDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY') || '').trim();
+    if (lastSentDay !== bkk.ymd && bkk.hm >= parsed.formatted) {
+      sendScheduledCensusReportGas_('AUTO_BACKUP');
+    }
+    // Ensure tomorrow's exact HH:mm trigger is present
+    var hasExact = ScriptApp.getProjectTriggers().some(function(t) {
+      return t.getHandlerFunction() === 'runLineDailyCensusTrigger_';
+    });
+    if (!hasExact) {
+      var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, false);
+      ScriptApp.newTrigger('runLineDailyCensusTrigger_')
+        .timeBased()
+        .at(new Date(nextEpoch))
+        .create();
+      var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+      PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function configureLineAutomationFromApi_(payload) {
+  var enabled = Boolean(payload.enabled);
+  var parsed = parseLineAutoTimeGas_(payload.time || '03:59');
+  var reportDayMode = String(payload.reportDayMode || 'YESTERDAY').trim() || 'YESTERDAY';
+  var shift = String(payload.shift || 'ALL').trim() || 'ALL';
+  var targetId = String(payload.targetId || '').trim();
+  var incomingToken = String(payload.channelAccessToken || '').trim();
+
+  if (payload.clearToken) {
+    PropertiesService.getScriptProperties().deleteProperty('LINE_CHANNEL_ACCESS_TOKEN');
+  } else if (incomingToken) {
+    PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', incomingToken);
+  }
+
+  var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  var triggerInfo = syncLineAutomationTriggers_(enabled, parsed.formatted);
+
+  upsertSettingsEntriesGas_([
+    ['Line_Auto_Enabled', enabled ? 'true' : 'false'],
+    ['Line_Auto_Time', parsed.formatted],
+    ['Line_Auto_Report_Day', reportDayMode],
+    ['Line_Auto_Shift', shift],
+    ['Line_Target_Id', targetId],
+    ['Line_Channel_Token_Set', hasToken ? 'true' : 'false']
+  ]);
+
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  res.lineAutomation = {
+    enabled: enabled,
+    time: parsed.formatted,
+    triggerInstalled: triggerInfo.installed,
+    triggerCount: triggerInfo.count,
+    nextRunAt: triggerInfo.nextRunAt,
+    hasToken: hasToken
+  };
+  return res;
+}
+
+function sendDailyCensusToLineNowFromApi_(payload) {
+  var settingsMap = readSettingsMapGas_();
+  var token = String(payload.channelAccessToken || '').trim() ||
+    String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
+  var targetId = String(payload.targetId || settingsMap['Line_Target_Id'] || '').trim();
+
+  if (payload.channelAccessToken) {
+    PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', String(payload.channelAccessToken).trim());
+  }
+
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var targetDate = String(payload.date || '').trim() ||
+    resolveAutoReportTargetDateGas_(String(payload.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY'), bkk.ymd);
+  var shiftFilter = String(payload.shift || settingsMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+
+  var textToSend = String(payload.message || '').trim();
+  var metaClinicCount = 0;
+  var metaTotalPt = 0;
+  if (!textToSend) {
+    var built = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
+    textToSend = built.text;
+    metaClinicCount = built.clinicCount;
+    metaTotalPt = built.totalPt;
+  }
+
+  var pushRes = pushLineMessageGas_(token, targetId, textToSend);
+  var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  var statusText = pushRes.ok
+    ? (metaClinicCount > 0 ? 'ส่งทันทีสำเร็จ (' + metaClinicCount + ' คลินิก, ผู้ป่วย ' + metaTotalPt + ' ราย)' : 'ส่งรายงานเข้า LINE สำเร็จ')
+    : 'ส่งไม่สำเร็จ: ' + pushRes.error;
+
+  upsertSettingsEntriesGas_([
+    ['Line_Last_Sent_At', nowThai],
+    ['Line_Last_Sent_Report_Date', targetDate],
+    ['Line_Last_Status', statusText],
+    ['Line_Channel_Token_Set', Boolean(token) ? 'true' : 'false']
+  ]);
+
+  var res = buildPublicReadAllPayload_();
+  res.success = pushRes.ok;
+  if (!pushRes.ok) res.error = pushRes.error;
+  res.statusText = statusText;
+  res.sentAt = nowThai;
+  res.targetDate = targetDate;
+  return res;
+}
+
+function getLineAutomationStatusFromApi_() {
+  var settingsMap = readSettingsMapGas_();
+  var triggers = ScriptApp.getProjectTriggers().filter(function(t) {
+    var fn = t.getHandlerFunction();
+    return fn === 'runLineDailyCensusTrigger_' || fn === 'runLineDailyBackupTrigger_';
+  });
+  var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  return {
+    success: true,
+    enabled: String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true',
+    time: String(settingsMap['Line_Auto_Time'] || '03:59'),
+    triggerInstalled: triggers.length > 0,
+    triggerCount: triggers.length,
+    nextRunAt: String(PropertiesService.getScriptProperties().getProperty('LINE_NEXT_RUN_AT') || ''),
+    hasToken: hasToken,
+    targetId: String(settingsMap['Line_Target_Id'] || ''),
+    detectedGroupId: String(settingsMap['Line_Detected_Group_ID'] || ''),
+    detectedGroupName: String(settingsMap['Line_Detected_Group_Name'] || ''),
+    lastSentAt: String(settingsMap['Line_Last_Sent_At'] || ''),
+    lastSentReportDate: String(settingsMap['Line_Last_Sent_Report_Date'] || ''),
+    lastStatus: String(settingsMap['Line_Last_Status'] || '')
+  };
+}
+
+function setupLineDailyTrigger0359Ui() {
+  var ui = SpreadsheetApp.getUi();
+  var settingsMap = readSettingsMapGas_();
+  var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  var targetId = String(settingsMap['Line_Target_Id'] || '').trim();
+  if (!hasToken) {
+    var tokPrompt = ui.prompt(
+      'LINE Channel Access Token',
+      'วาง Channel Access Token (Long-lived) จาก LINE Official Account / LINE Developers:',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (tokPrompt.getSelectedButton() !== ui.Button.OK) return;
+    var tokVal = String(tokPrompt.getResponseText() || '').trim();
+    if (!tokVal) return;
+    PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', tokVal);
+  }
+  if (!targetId) {
+    var grpPrompt = ui.prompt(
+      'LINE Group ID (รหัสกลุ่ม)',
+      'วาง LINE Group ID (ขึ้นต้นด้วย C...) ที่ต้องการให้ส่งรายงานเวลา 03:59 น.:',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (grpPrompt.getSelectedButton() !== ui.Button.OK) return;
+    targetId = String(grpPrompt.getResponseText() || '').trim();
+    if (!targetId) return;
+  }
+  var triggerInfo = syncLineAutomationTriggers_(true, '03:59');
+  upsertSettingsEntriesGas_([
+    ['Line_Auto_Enabled', 'true'],
+    ['Line_Auto_Time', '03:59'],
+    ['Line_Auto_Report_Day', settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY'],
+    ['Line_Auto_Shift', settingsMap['Line_Auto_Shift'] || 'ALL'],
+    ['Line_Target_Id', targetId],
+    ['Line_Channel_Token_Set', 'true']
+  ]);
+  ui.alert('ตั้งเวลาส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มเวลา 03:59 น. (Asia/Bangkok) สำเร็จ!\nรอบถัดไป: ' + triggerInfo.nextRunAt);
+}
+
+function manualSendDailyCensusToLineUi() {
+  var ui = SpreadsheetApp.getUi();
+  var res = sendScheduledCensusReportGas_('MANUAL');
+  if (res.success) {
+    ui.alert('ส่งรายงานผู้ป่วยประจำวันเข้า LINE สำเร็จ!\n' + (res.statusText || ''));
+  } else {
+    ui.alert('ส่งเข้า LINE ไม่สำเร็จ: ' + (res.error || 'กรุณาตั้งค่า Token และ Group ID ก่อน'));
+  }
+}
+
 
 

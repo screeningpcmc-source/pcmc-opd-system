@@ -31,6 +31,8 @@ import {
   getStaffEmployeeCode,
   isLegacyGeneratedStaffId,
   isValidEmployeeCodeValue,
+  DEFAULT_LINE_AUTO_TIME,
+  LineAutoReportDayMode,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -288,6 +290,11 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['Clinic_Cost_Centers', JSON.stringify(settings.clinicCostCenters || {})],
     ['OT_Hourly_Rates', JSON.stringify(settings.otHourlyRates || {})],
     ['OT_Controller_Name', (settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME).trim()],
+    ['Line_Auto_Enabled', settings.lineAutoEnabled ? 'true' : 'false'],
+    ['Line_Auto_Time', (settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME).trim()],
+    ['Line_Auto_Report_Day', settings.lineAutoReportDayMode || 'YESTERDAY'],
+    ['Line_Auto_Shift', settings.lineAutoShift || 'ALL'],
+    ['Line_Target_Id', (settings.lineTargetId || '').trim()],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
   if (Object.keys(codeMap).length > 0) {
@@ -1766,6 +1773,52 @@ export const syncAllWithGoogleSheet = async (
       : settingsMap['OT_Controller_Name'] ||
         db.settings.otControllerName ||
         DEFAULT_OT_CONTROLLER_NAME,
+    lineAutoEnabled: settingsDirty
+      ? Boolean(db.settings.lineAutoEnabled)
+      : settingsMap['Line_Auto_Enabled'] !== undefined
+      ? settingsMap['Line_Auto_Enabled'].toLowerCase() === 'true'
+      : Boolean(db.settings.lineAutoEnabled),
+    lineAutoTime: settingsDirty
+      ? db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
+      : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+    lineAutoReportDayMode: ((): LineAutoReportDayMode => {
+      const raw = settingsDirty
+        ? db.settings.lineAutoReportDayMode
+        : settingsMap['Line_Auto_Report_Day'] || db.settings.lineAutoReportDayMode;
+      return raw === 'TODAY' || raw === 'LATEST_WITH_DATA' ? raw : 'YESTERDAY';
+    })(),
+    lineAutoShift: settingsDirty
+      ? db.settings.lineAutoShift || 'ALL'
+      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
+    lineTargetId: settingsDirty
+      ? db.settings.lineTargetId || ''
+      : settingsMap['Line_Target_Id'] !== undefined
+      ? settingsMap['Line_Target_Id']
+      : db.settings.lineTargetId || '',
+    lineChannelTokenSet:
+      settingsMap['Line_Channel_Token_Set'] !== undefined
+        ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
+        : Boolean(db.settings.lineChannelTokenSet),
+    lineLastSentAt:
+      settingsMap['Line_Last_Sent_At'] !== undefined
+        ? settingsMap['Line_Last_Sent_At']
+        : db.settings.lineLastSentAt,
+    lineLastSentReportDate:
+      settingsMap['Line_Last_Sent_Report_Date'] !== undefined
+        ? settingsMap['Line_Last_Sent_Report_Date']
+        : db.settings.lineLastSentReportDate,
+    lineLastStatus:
+      settingsMap['Line_Last_Status'] !== undefined
+        ? settingsMap['Line_Last_Status']
+        : db.settings.lineLastStatus,
+    lineDetectedGroupId:
+      settingsMap['Line_Detected_Group_ID'] !== undefined
+        ? settingsMap['Line_Detected_Group_ID']
+        : db.settings.lineDetectedGroupId,
+    lineDetectedGroupName:
+      settingsMap['Line_Detected_Group_Name'] !== undefined
+        ? settingsMap['Line_Detected_Group_Name']
+        : db.settings.lineDetectedGroupName,
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -2777,6 +2830,52 @@ function mergeRemoteDataRows(
       : settingsMap['OT_Controller_Name'] ||
         db.settings.otControllerName ||
         DEFAULT_OT_CONTROLLER_NAME,
+    lineAutoEnabled: settingsDirty
+      ? Boolean(db.settings.lineAutoEnabled)
+      : settingsMap['Line_Auto_Enabled'] !== undefined
+      ? settingsMap['Line_Auto_Enabled'].toLowerCase() === 'true'
+      : Boolean(db.settings.lineAutoEnabled),
+    lineAutoTime: settingsDirty
+      ? db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
+      : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+    lineAutoReportDayMode: ((): LineAutoReportDayMode => {
+      const raw = settingsDirty
+        ? db.settings.lineAutoReportDayMode
+        : settingsMap['Line_Auto_Report_Day'] || db.settings.lineAutoReportDayMode;
+      return raw === 'TODAY' || raw === 'LATEST_WITH_DATA' ? raw : 'YESTERDAY';
+    })(),
+    lineAutoShift: settingsDirty
+      ? db.settings.lineAutoShift || 'ALL'
+      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
+    lineTargetId: settingsDirty
+      ? db.settings.lineTargetId || ''
+      : settingsMap['Line_Target_Id'] !== undefined
+      ? settingsMap['Line_Target_Id']
+      : db.settings.lineTargetId || '',
+    lineChannelTokenSet:
+      settingsMap['Line_Channel_Token_Set'] !== undefined
+        ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
+        : Boolean(db.settings.lineChannelTokenSet),
+    lineLastSentAt:
+      settingsMap['Line_Last_Sent_At'] !== undefined
+        ? settingsMap['Line_Last_Sent_At']
+        : db.settings.lineLastSentAt,
+    lineLastSentReportDate:
+      settingsMap['Line_Last_Sent_Report_Date'] !== undefined
+        ? settingsMap['Line_Last_Sent_Report_Date']
+        : db.settings.lineLastSentReportDate,
+    lineLastStatus:
+      settingsMap['Line_Last_Status'] !== undefined
+        ? settingsMap['Line_Last_Status']
+        : db.settings.lineLastStatus,
+    lineDetectedGroupId:
+      settingsMap['Line_Detected_Group_ID'] !== undefined
+        ? settingsMap['Line_Detected_Group_ID']
+        : db.settings.lineDetectedGroupId,
+    lineDetectedGroupName:
+      settingsMap['Line_Detected_Group_Name'] !== undefined
+        ? settingsMap['Line_Detected_Group_Name']
+        : db.settings.lineDetectedGroupName,
   };
 
   return {
@@ -4663,3 +4762,232 @@ export const appendAuditViaAppsScript = async (
     return false;
   }
 };
+
+export interface LineAutomationStatusInfo {
+  enabled: boolean;
+  time: string;
+  triggerInstalled: boolean;
+  triggerCount: number;
+  nextRunAt: string;
+  hasToken: boolean;
+  targetId?: string;
+  detectedGroupId?: string;
+  detectedGroupName?: string;
+  lastSentAt?: string;
+  lastSentReportDate?: string;
+  lastStatus?: string;
+}
+
+export const configureLineAutomationViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  config: {
+    enabled: boolean;
+    time: string;
+    reportDayMode: LineAutoReportDayMode;
+    shift: 'ALL' | WorkShift;
+    targetId: string;
+    channelAccessToken?: string;
+    clearToken?: boolean;
+  };
+  db: AppDatabase;
+  expectedDirtyVersion?: number;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  syncedDb?: AppDatabase;
+  lineAutomation?: LineAutomationStatusInfo;
+}> => {
+  const { gasUrl, adminPin, config, db, expectedDirtyVersion } = params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'configureLineAutomation',
+        adminPin,
+        payload: config,
+      }),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    if (!data || data.success === false) {
+      return {
+        ok: false,
+        error: String(data?.error || 'Google Apps Script ปฏิเสธการตั้งค่า LINE อัตโนมัติ (กรุณาตรวจสอบการ Deploy Code.gs)'),
+      };
+    }
+    clearSettingsDirty(expectedDirtyVersion);
+    const merged = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      db
+    );
+    const resolvedSheetId =
+      merged.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    return {
+      ok: true,
+      syncedDb: {
+        ...merged,
+        settings: {
+          ...merged.settings,
+          spreadsheetId: resolvedSheetId || undefined,
+          spreadsheetUrl:
+            merged.settings.spreadsheetUrl ||
+            (resolvedSheetId
+              ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit`
+              : undefined),
+          gasUrl: merged.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+        },
+      },
+      lineAutomation: data.lineAutomation,
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+export const sendLineDailyCensusNowViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+  targetId?: string;
+  date?: string;
+  shift?: string;
+  reportDayMode?: LineAutoReportDayMode;
+  message?: string;
+  channelAccessToken?: string;
+  db: AppDatabase;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  statusText?: string;
+  sentAt?: string;
+  targetDate?: string;
+  syncedDb?: AppDatabase;
+}> => {
+  const { gasUrl, adminPin, targetId, date, shift, reportDayMode, message, channelAccessToken, db } =
+    params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'sendLineReportNow',
+        adminPin,
+        payload: {
+          ...(targetId !== undefined ? { targetId } : {}),
+          ...(date ? { date } : {}),
+          ...(shift ? { shift } : {}),
+          ...(reportDayMode ? { reportDayMode } : {}),
+          ...(message ? { message } : {}),
+          ...(channelAccessToken ? { channelAccessToken } : {}),
+        },
+      }),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    const merged = Array.isArray(data?.settingsRows)
+      ? mergeRemoteDataRows(
+          {
+            staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+            workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+            leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+            otRows: Array.isArray(data.otRows) ? data.otRows : [],
+            settingsRows: data.settingsRows,
+            auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+          },
+          db
+        )
+      : undefined;
+
+    if (!data || data.success === false) {
+      return {
+        ok: false,
+        error: String(data?.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ'),
+        statusText: data?.statusText,
+        syncedDb: merged,
+      };
+    }
+
+    return {
+      ok: true,
+      statusText: data.statusText,
+      sentAt: data.sentAt,
+      targetDate: data.targetDate,
+      syncedDb: merged,
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+export const fetchLineAutomationStatusViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin: string;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  status?: LineAutomationStatusInfo;
+}> => {
+  const { gasUrl, adminPin } = params;
+  if (!gasUrl || !adminPin) {
+    return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+  }
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'getLineAutomationStatus',
+        adminPin,
+        payload: {},
+      }),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    if (!data || data.success === false) {
+      return {
+        ok: false,
+        error: String(data?.error || 'ไม่สามารถอ่านสถานะ LINE อัตโนมัติได้'),
+      };
+    }
+    return {
+      ok: true,
+      status: {
+        enabled: Boolean(data.enabled),
+        time: String(data.time || DEFAULT_LINE_AUTO_TIME),
+        triggerInstalled: Boolean(data.triggerInstalled),
+        triggerCount: Number(data.triggerCount) || 0,
+        nextRunAt: String(data.nextRunAt || ''),
+        hasToken: Boolean(data.hasToken),
+        targetId: String(data.targetId || ''),
+        detectedGroupId: String(data.detectedGroupId || ''),
+        detectedGroupName: String(data.detectedGroupName || ''),
+        lastSentAt: String(data.lastSentAt || ''),
+        lastSentReportDate: String(data.lastSentReportDate || ''),
+        lastStatus: String(data.lastStatus || ''),
+      },
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+

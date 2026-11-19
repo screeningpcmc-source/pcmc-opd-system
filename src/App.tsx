@@ -31,7 +31,10 @@ import {
   isLegacyGeneratedStaffId,
   isValidEmployeeCodeValue,
   isOtDuplicateConflict,
-  parseLeavePeriodFromNote
+  parseLeavePeriodFromNote,
+  WorkShift,
+  DEFAULT_LINE_AUTO_TIME,
+  LineAutoReportDayMode
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -96,7 +99,12 @@ import {
   removeLeaveRecentlySaved,
   markOtRecentlySaved,
   removeOtRecentlySaved,
-  clearAllRecentlySaved
+  clearAllRecentlySaved,
+  configureLineAutomationViaAppsScript,
+  sendLineDailyCensusNowViaAppsScript,
+  fetchLineAutomationStatusViaAppsScript,
+  LineAutomationStatusInfo,
+  AppDatabase
 } from './services/sheetsService';
 import { formatThaiLeaveRange, formatThaiShortDate, getLocalTodayIso } from './utils/thaiDate';
 import { 
@@ -2426,6 +2434,153 @@ export default function App() {
     );
   };
 
+  // Handler: Configure LINE Group Daily Report Automation (Code.gs Trigger)
+  const handleConfigureLineAutomation = async (config: {
+    enabled: boolean;
+    time: string;
+    reportDayMode: LineAutoReportDayMode;
+    shift: 'ALL' | WorkShift;
+    targetId: string;
+    channelAccessToken?: string;
+    clearToken?: boolean;
+  }): Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }> => {
+    if (!isAdmin) {
+      showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
+      return { ok: false, error: 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น' };
+    }
+    const baseDb = dbRef.current;
+    const gasUrl = (baseDb.settings.gasUrl || '').trim();
+    const adminPin = unlockedAdminPinRef.current;
+    if (!gasUrl || !adminPin) {
+      showToast('กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน', 'error');
+      return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+    }
+
+    const dirtyVer = markSettingsDirty();
+    const optimisticSettings: SystemSettings = {
+      ...baseDb.settings,
+      lineAutoEnabled: config.enabled,
+      lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+      lineAutoReportDayMode: config.reportDayMode,
+      lineAutoShift: config.shift,
+      lineTargetId: config.targetId.trim(),
+      lineChannelTokenSet: config.clearToken
+        ? false
+        : Boolean(config.channelAccessToken?.trim() || baseDb.settings.lineChannelTokenSet),
+    };
+    const optimisticDb: AppDatabase = { ...baseDb, settings: optimisticSettings };
+    dbRef.current = optimisticDb;
+    setDb(optimisticDb);
+
+    const res = await configureLineAutomationViaAppsScript({
+      gasUrl,
+      adminPin,
+      config,
+      db: optimisticDb,
+      expectedDirtyVersion: dirtyVer,
+    });
+
+    if (!res.ok) {
+      showToast(res.error || 'ตั้งค่า LINE อัตโนมัติบน Apps Script ไม่สำเร็จ', 'error');
+      return { ok: false, error: res.error };
+    }
+
+    if (res.syncedDb) {
+      const mergedSettings: SystemSettings = {
+        ...res.syncedDb.settings,
+        lineAutoEnabled: config.enabled,
+        lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+        lineAutoReportDayMode: config.reportDayMode,
+        lineAutoShift: config.shift,
+        lineTargetId: config.targetId.trim(),
+        lineChannelTokenSet:
+          res.lineAutomation?.hasToken ??
+          (config.clearToken
+            ? false
+            : Boolean(config.channelAccessToken?.trim() || res.syncedDb.settings.lineChannelTokenSet)),
+      };
+      const syncedFinal: AppDatabase = { ...res.syncedDb, settings: mergedSettings };
+      dbRef.current = syncedFinal;
+      setDb(syncedFinal);
+    }
+
+    showToast(
+      config.enabled
+        ? `ตั้งเวลาส่งรายงานเข้า LINE กลุ่มเวลา ${config.time || '03:59'} น. สำเร็จ`
+        : 'บันทึกการปิดส่งรายงาน LINE อัตโนมัติแล้ว',
+      'success'
+    );
+    return { ok: true, lineAutomation: res.lineAutomation };
+  };
+
+  // Handler: Immediate push to LINE Group via Code.gs
+  const handleSendLineReportNow = async (params: {
+    targetId?: string;
+    date?: string;
+    shift?: string;
+    reportDayMode?: LineAutoReportDayMode;
+    message?: string;
+    channelAccessToken?: string;
+  }): Promise<boolean> => {
+    if (!isAdmin) {
+      showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
+      return false;
+    }
+    const baseDb = dbRef.current;
+    const gasUrl = (baseDb.settings.gasUrl || '').trim();
+    const adminPin = unlockedAdminPinRef.current;
+    if (!gasUrl || !adminPin) {
+      showToast('กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน', 'error');
+      return false;
+    }
+
+    const res = await sendLineDailyCensusNowViaAppsScript({
+      gasUrl,
+      adminPin,
+      ...params,
+      db: baseDb,
+    });
+
+    if (res.syncedDb) {
+      dbRef.current = res.syncedDb;
+      setDb(res.syncedDb);
+    }
+
+    if (res.ok) {
+      showToast(res.statusText || 'ส่งรายงานเข้ากลุ่ม LINE เรียบร้อยแล้ว!', 'success');
+      return true;
+    }
+    showToast(res.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ', 'error');
+    return false;
+  };
+
+  const handleFetchLineStatus = useCallback(async (): Promise<LineAutomationStatusInfo | null> => {
+    const baseDb = dbRef.current;
+    const gasUrl = (baseDb.settings.gasUrl || '').trim();
+    const adminPin = unlockedAdminPinRef.current;
+    if (!gasUrl || !adminPin) return null;
+    const res = await fetchLineAutomationStatusViaAppsScript({ gasUrl, adminPin });
+    if (!res.ok || !res.status) return null;
+    const latest = dbRef.current;
+    const updatedSettings: SystemSettings = {
+      ...latest.settings,
+      lineAutoEnabled: res.status.enabled,
+      lineAutoTime: res.status.time || latest.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+      lineChannelTokenSet: res.status.hasToken,
+      lineTargetId: res.status.targetId || latest.settings.lineTargetId,
+      lineDetectedGroupId: res.status.detectedGroupId || latest.settings.lineDetectedGroupId,
+      lineDetectedGroupName: res.status.detectedGroupName || latest.settings.lineDetectedGroupName,
+      lineLastSentAt: res.status.lastSentAt || latest.settings.lineLastSentAt,
+      lineLastSentReportDate:
+        res.status.lastSentReportDate || latest.settings.lineLastSentReportDate,
+      lineLastStatus: res.status.lastStatus || latest.settings.lineLastStatus,
+    };
+    const nextDb = { ...latest, settings: updatedSettings };
+    dbRef.current = nextDb;
+    setDb(nextDb);
+    return res.status;
+  }, []);
+
   // Handler: Reset to clean empty production data
   const handleResetData = () => {
     if (!isAdmin) {
@@ -2598,9 +2753,11 @@ export default function App() {
           <DailyCensusTab
             workloads={db.workloads}
             premiumSubClinics={premiumSubClinics}
+            settings={db.settings}
             isAdmin={isAdmin}
             onUpdateWorkload={handleUpdateWorkload}
             onDeleteWorkload={handleDeleteWorkload}
+            onSendLineReportNow={handleSendLineReportNow}
           />
         )}
 
@@ -2622,6 +2779,7 @@ export default function App() {
         {activeTab === 'admin' && (
           <AdminPanelTab
             staffList={db.staff}
+            workloads={db.workloads}
             settings={db.settings}
             inTimeClinics={inTimeClinics}
             outTimeClinics={outTimeClinics}
@@ -2649,6 +2807,9 @@ export default function App() {
             onLockAdmin={handleLockAdmin}
             lastSyncedAt={lastSyncedAt}
             onToggleAutoSync={handleToggleAutoSync}
+            onConfigureLineAutomation={handleConfigureLineAutomation}
+            onSendLineReportNow={handleSendLineReportNow}
+            onFetchLineStatus={handleFetchLineStatus}
           />
         )}
       </main>

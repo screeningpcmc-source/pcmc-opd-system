@@ -439,7 +439,22 @@ export interface SystemSettings {
   clinicCostCenters?: Record<string, string>;
   otHourlyRates?: Partial<Record<StaffPosition, number>>;
   otControllerName?: string;
+  // LINE Messaging API Daily Patient Report Automation
+  lineAutoEnabled?: boolean;
+  lineAutoTime?: string; // Default '03:59' (Asia/Bangkok)
+  lineAutoReportDayMode?: 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
+  lineAutoShift?: 'ALL' | WorkShift;
+  lineTargetId?: string;
+  lineChannelTokenSet?: boolean;
+  lineLastSentAt?: string;
+  lineLastSentReportDate?: string;
+  lineLastStatus?: string;
+  lineDetectedGroupId?: string;
+  lineDetectedGroupName?: string;
 }
+
+export const DEFAULT_LINE_AUTO_TIME = '03:59';
+export type LineAutoReportDayMode = 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
 
 export const DEFAULT_OT_COST_CENTER = '2012000000';
 export const DEFAULT_OT_CONTROLLER_NAME = 'นางสาว ประภัสสร พันธุ์วา';

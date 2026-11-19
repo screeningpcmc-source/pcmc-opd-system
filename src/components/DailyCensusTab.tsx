@@ -15,8 +15,10 @@ import {
   getReferralTotalCount,
   isReferralWorkload,
   normalizeReferralData,
+  SystemSettings,
 } from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
+import { buildDailyCensusLineMessage } from '../utils/lineReport';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
@@ -37,15 +39,19 @@ import {
   Save,
   ImageDown,
   AlertCircle,
-  Star
+  Star,
+  Send,
+  Loader2
 } from 'lucide-react';
 
 interface DailyCensusTabProps {
   workloads: DailyWorkload[];
   isAdmin?: boolean;
   premiumSubClinics?: string[];
+  settings?: SystemSettings;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
   onDeleteWorkload?: (id: string, reason: string) => void;
+  onSendLineReportNow?: (params: { date: string; shift: string; message: string }) => Promise<boolean>;
 }
 
 interface PremiumCensusGroup {
@@ -73,14 +79,17 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   workloads,
   isAdmin = false,
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
+  settings,
   onUpdateWorkload,
-  onDeleteWorkload
+  onDeleteWorkload,
+  onSendLineReportNow,
 }) => {
   const todayStr = getLocalTodayIso();
 
   const [date, setDate] = useState<string>(todayStr);
   const [shiftFilter, setShiftFilter] = useState<string>('ALL');
   const [copied, setCopied] = useState<boolean>(false);
+  const [isSendingLine, setIsSendingLine] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
   const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
@@ -348,45 +357,38 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     document.body.removeChild(link);
   };
 
+  const currentLineMessage = useMemo(
+    () =>
+      buildDailyCensusLineMessage({
+        workloads,
+        date,
+        shiftFilter,
+        premiumSubClinics,
+        includeClinicBreakdown: true,
+      }),
+    [workloads, date, shiftFilter, premiumSubClinics]
+  );
+
   // Copy Summary text for LINE message
   const handleCopySummary = () => {
-    const shiftLabel = shiftFilter === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftFilter;
-    let premiumSection = '';
-    if (premiumGroups.length > 0) {
-      const premiumLines = premiumGroups.map((grp) => {
-        const nursing = grp.rn + grp.pn + grp.na;
-        const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง`;
-        const subLines = grp.subRows.map(
-          (sub) => `  ↳ ${sub.clinic}: ${getEffectiveTotalPt(sub).toLocaleString()} ราย${sub.admit > 0 ? ` (Admit ${sub.admit})` : ''}`
-        );
-        return [headerLine, ...subLines].join('\n');
-      });
-      premiumSection = `\n──────────────────\n${premiumLines.join('\n')}`;
-    }
-
-    let referralSection = '';
-    if (referralSummarySheet) {
-      const refLines = referralSummarySheet.rows.map(
-        (r) => `  • ${r.label}: ${r.count > 0 ? r.count : '-'}${r.reason ? ` (${r.reason})` : ''}`
-      );
-      referralSection = `\n──────────────────\n🚑 ห้องรับ - ส่งต่อผู้ป่วย (รวม ${referralSummarySheet.totalCount} รายการ)\n${refLines.join('\n')}\nผู้รายงาน: ${referralSummarySheet.reporterText}`;
-    }
-
-    const text = `📊 รายงานภาระงานผู้ป่วยนอก OPD PCMC
-🏥 รพ.ศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน
-📅 ประจำวันที่: ${formattedThaiDate} (${shiftLabel})
-──────────────────
-👥 ผู้ป่วยนอกรวม: ${totals.totalPt.toLocaleString()} ราย
-🛌 รับไว้รักษา (Admit): ${totals.admit.toLocaleString()} ราย
-👩‍⚕️ กำลังคนพยาบาลปฏิบัติงาน (RN+PN+NA): ${totalNursingOnDuty.toFixed(1)} แรง
-(RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})${premiumSection}${referralSection}
-──────────────────
-บันทึกทั้งหมด ${clinicCount} คลินิกหลัก`;
-
-    navigator.clipboard.writeText(text).then(() => {
+    navigator.clipboard.writeText(currentLineMessage).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     });
+  };
+
+  const handleSendLineNowClick = async () => {
+    if (!onSendLineReportNow || isSendingLine) return;
+    setIsSendingLine(true);
+    try {
+      await onSendLineReportNow({
+        date,
+        shift: shiftFilter,
+        message: currentLineMessage,
+      });
+    } finally {
+      setIsSendingLine(false);
+    }
   };
 
   return (
@@ -417,6 +419,26 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             {copied ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
             <span>{copied ? 'คัดลอกข้อความแล้ว!' : 'คัดลอกสรุปส่ง LINE'}</span>
           </button>
+          {isAdmin && onSendLineReportNow && (
+            <button
+              type="button"
+              onClick={handleSendLineNowClick}
+              disabled={isSendingLine}
+              title={
+                settings?.lineTargetId && settings?.lineChannelTokenSet
+                  ? `ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้า LINE กลุ่มทันที`
+                  : 'ตั้งค่า LINE Group ID และ Token ในเมนูที่ 5 ก่อนส่ง'
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              {isSendingLine ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Send className="w-3.5 h-3.5" />
+              )}
+              <span>{isSendingLine ? 'กำลังส่งเข้า LINE...' : 'ส่งเข้า LINE กลุ่มทันที'}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleExportCSV}
