@@ -86,6 +86,12 @@ interface LeaveSelectionDraft {
   note: string;
 }
 
+interface TrainingSelectionDraft {
+  staffId: string;
+  days: 1 | 0.5;
+  periodLabel: HalfDayPeriod;
+}
+
 interface CrossCoverageDraft {
   tempId: string;
   direction: 'outgoing' | 'incoming';
@@ -182,7 +188,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [leaveSearch, setLeaveSearch] = useState<string>('');
 
   const [hasTraining, setHasTraining] = useState<boolean>(false);
-  const [selectedTrainingStaffIds, setSelectedTrainingStaffIds] = useState<string[]>([]);
+  const [selectedTrainingItems, setSelectedTrainingItems] = useState<TrainingSelectionDraft[]>([]);
   const [trainingSearch, setTrainingSearch] = useState<string>('');
   const [trainingTopic, setTrainingTopic] = useState<string>('');
   const [trainingNote, setTrainingNote] = useState<string>('');
@@ -515,8 +521,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   );
 
   // Live 3-Point Verification across ALL 5 core workload buckets:
-  // (1) Working staff entered == (3) Full department roster - (2) Leaves & Outgoing Cross-Cover (0.5 / 1.0) + Incoming Cross-Cover/Substitute
-  // IMPORTANT BUSINESS RULE: "ไปอบรม/ประชุม" counts as normal workday (NOT leave / NOT subtracted)
+  // (1) Working staff entered == (3) Full department roster - (2) Leaves, Training & Outgoing Cross-Cover (0.5 / 1.0) + Incoming Cross-Cover/Substitute
+  // IMPORTANT BUSINESS RULE: "ไปอบรม/ประชุม" counts as attendance in Menu 2 (NOT leave),
+  // but does NOT count toward the unit's daily workload (deducted from expected unit working headcount).
   const dayStaffingCheck = useMemo(() => {
     const normalizeUnit = (c?: string) => {
       const trimmed = (c || '').trim();
@@ -562,15 +569,16 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       nursingPositions.includes(normalizePos(s.position))
     ).length;
 
-    const absents: { name: string; pos: StaffPosition; amount: number; detail: string }[] = [];
+    const absents: { name: string; pos: StaffPosition; amount: number; kind: 'leave' | 'training' | 'outgoing'; detail: string }[] = [];
     const incomings: { name: string; pos: StaffPosition; amount: number; detail: string }[] = [];
-    const trainings: { name: string; pos: StaffPosition; detail: string }[] = [];
+    const trainings: { name: string; pos: StaffPosition; amount: number; detail: string }[] = [];
     const nonDeptSelections: string[] = [];
     const conflictErrors: string[] = [];
 
     const savedLeaveAmtByName = new Map<string, number>();
     const savedLeaveDetailsByName = new Map<string, string[]>();
-    const trainingNameSet = new Set<string>();
+    const savedTrainingAmtByName = new Map<string, number>();
+    const savedTrainingDetailsByName = new Map<string, string[]>();
     const absentTrackKeys = new Set<string>();
     const incomingTrackKeys = new Set<string>();
 
@@ -588,21 +596,37 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         const unit = normalizeUnit(l.clinic || staffUnitMap.get(name) || '');
         if (unit !== targetUnit) return;
 
-        if (isTrainingLeaveType(l.leaveType)) {
-          if (!trainingNameSet.has(name)) {
-            trainingNameSet.add(name);
-            trainings.push({
-              name,
-              pos: normalizePos(l.position),
-              detail: `${name} (ไปอบรม/ประชุม - ทำงานปกติ)`,
-            });
-          }
-          return;
-        }
-
         const isSingleDayHalf = sDate === eDate && Number(l.days) === 0.5;
         const amt = isSingleDayHalf ? 0.5 : 1;
         const pLabel = isSingleDayHalf ? parseLeavePeriodFromNote(l.note) : '';
+
+        if (isTrainingLeaveType(l.leaveType)) {
+          const tKey = `TRN|${name}|${pLabel || 'FULL'}`;
+          if (absentTrackKeys.has(tKey)) return;
+          absentTrackKeys.add(tKey);
+
+          savedTrainingAmtByName.set(name, Math.min(1, (savedTrainingAmtByName.get(name) || 0) + amt));
+          const trDesc = `ไปอบรม/ประชุม${isSingleDayHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''}`;
+          const prevTr = savedTrainingDetailsByName.get(name) || [];
+          savedTrainingDetailsByName.set(name, [...prevTr, trDesc]);
+
+          const detailText = `${name} (${trDesc} - ไม่นับภาระงานหน่วย)`;
+          trainings.push({
+            name,
+            pos: resolvedPos,
+            amount: amt,
+            detail: detailText,
+          });
+          absents.push({
+            name,
+            pos: resolvedPos,
+            amount: amt,
+            kind: 'training',
+            detail: detailText,
+          });
+          return;
+        }
+
         const tKey = `LV|${name}|${pLabel || 'FULL'}`;
         if (absentTrackKeys.has(tKey)) return;
         absentTrackKeys.add(tKey);
@@ -616,6 +640,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           name,
           pos: resolvedPos,
           amount: amt,
+          kind: 'leave',
           detail: `${name} (${desc})`,
         });
       });
@@ -648,33 +673,57 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               name: st.name,
               pos: normalizePos(st.position),
               amount: item.days,
+              kind: 'leave',
               detail: `${st.name} (${item.leaveType}${item.days === 0.5 ? ` 0.5 ${itemPeriod}` : ''})`,
             });
           }
         });
       }
 
-      // Selected in Section 4 Block 2: Training / Meeting (Normal workday - NOT subtracted)
+      // Selected in Section 4 Block 2: Training / Meeting (Counts as attendance in Menu 2, deducted from unit daily workload)
       if (hasTraining) {
-        selectedTrainingStaffIds.forEach(id => {
-          const st = staffList.find(s => s.staffId === id);
+        selectedTrainingItems.forEach(item => {
+          const st = staffList.find(s => s.staffId === item.staffId);
           if (!st) return;
           if (normalizeUnit(st.homeClinic) !== targetUnit) {
             nonDeptSelections.push(`${st.name} ไปอบรม/ประชุม (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
             return;
           }
-          const leaveSum = absents
-            .filter(a => a.name === st.name && a.detail && !a.detail.includes('ไปช่วย'))
-            .reduce((s, a) => s + a.amount, 0);
-          if (leaveSum >= 1) {
-            conflictErrors.push(`${st.name} ถูกระบุลาเต็มวันแล้ว ไม่สามารถเลือกไปอบรม/ประชุมเต็มวันซ้ำได้`);
+          const existingSavedTrAmt = savedTrainingAmtByName.get(st.name) || 0;
+          const existingTrDescs = savedTrainingDetailsByName.get(st.name) || [];
+          if (existingSavedTrAmt > 0 || existingTrDescs.length > 0) {
+            conflictErrors.push(
+              `${st.name} มีประวัติ (${existingTrDescs.join(', ')}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกซ้ำในวันเดียวกันได้`
+            );
+            return;
           }
-          if (!trainingNameSet.has(st.name)) {
-            trainingNameSet.add(st.name);
+          const leaveSum = absents
+            .filter(a => a.name === st.name && a.kind === 'leave')
+            .reduce((s, a) => s + a.amount, 0);
+          if (leaveSum + item.days > 1.001) {
+            conflictErrors.push(
+              `${st.name} มียอดวันลา (${leaveSum}) และไปอบรม/ประชุม (${item.days}) รวมกันเกิน 1 วันในวันเดียวกัน`
+            );
+            return;
+          }
+          const itemPeriod: HalfDayPeriod =
+            item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '';
+          const tKey = `TRN|${st.name}|${itemPeriod || 'FULL'}`;
+          if (!absentTrackKeys.has(tKey)) {
+            absentTrackKeys.add(tKey);
+            const detailText = `${st.name} (ไปอบรม/ประชุม${item.days === 0.5 ? ` 0.5 ${itemPeriod}` : ''} - ไม่นับภาระงานหน่วย)`;
             trainings.push({
               name: st.name,
               pos: normalizePos(st.position),
-              detail: `${st.name} (ไปอบรม/ประชุม - ทำงานปกติ)`,
+              amount: item.days,
+              detail: detailText,
+            });
+            absents.push({
+              name: st.name,
+              pos: normalizePos(st.position),
+              amount: item.days,
+              kind: 'training',
+              detail: detailText,
             });
           }
         });
@@ -700,6 +749,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               name: o.staffName,
               pos,
               amount: amt,
+              kind: 'outgoing',
               detail: `${o.staffName} (ไปช่วย ${parsedWork.clinic}${pSuffix})`,
             });
           }
@@ -744,6 +794,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 name: st.name,
                 pos: normalizePos(st.position),
                 amount: amt,
+                kind: 'outgoing',
                 detail: `${st.name} (ไปช่วย ${item.otherClinic}${pSuffix})`,
               });
             }
@@ -829,13 +880,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       if (!isBalanced) {
         if (diff < 0) {
           const lack = Math.abs(diff);
-          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/ไปช่วย (${absent})${
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ไปช่วย (${absent})${
             incoming > 0 ? ` − มาช่วย (${incoming})` : ''
-          } = ${accounted} คน (ต้องระบุผู้ลาหรือไปช่วยห้องอื่นเพิ่ม ${lack} แรง หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
+          } = ${accounted} คน (ต้องระบุผู้ลา/อบรม หรือไปช่วยห้องอื่นเพิ่ม ${lack} แรง หรือปรับยอดปฏิบัติงานเป็น ${expectedWorking})`;
         } else {
-          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/ไปช่วย (${absent})${
+          issueText = `${positionShortLabels[pos]}: ประจำ ${full} คน แต่ปฏิบัติงาน (${working}) + ลา/อบรม/ไปช่วย (${absent})${
             incoming > 0 ? ` − มาช่วย (${incoming})` : ''
-          } = ${accounted} คน (เกินจำนวนเต็ม +${diff} แรง — หากมีคนจากห้องอื่น/ภายนอกมาช่วย ${diff} แรง ให้เพิ่มในหัวข้อ 'ไปช่วย/รับคนมาช่วย' หรือลดยอดลา/ปรับปฏิบัติงานเป็น ${expectedWorking})`;
+          } = ${accounted} คน (เกินจำนวนเต็ม +${diff} แรง — หากมีคนจากห้องอื่น/ภายนอกมาช่วย ${diff} แรง ให้เพิ่มในหัวข้อ 'ไปช่วย/รับคนมาช่วย' หรือลดยอดลา/อบรม/ปรับปฏิบัติงานเป็น ${expectedWorking})`;
         }
       }
 
@@ -949,7 +1000,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     hasStaffLeave,
     selectedLeaveItems,
     hasTraining,
-    selectedTrainingStaffIds,
+    selectedTrainingItems,
     effectiveCrossItems,
     premiumSubClinics,
   ]);
@@ -999,11 +1050,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     }
 
     let trainingData: WorkloadTrainingPayload[] | null = null;
-    if (hasTraining && selectedTrainingStaffIds.length > 0) {
-      trainingData = selectedTrainingStaffIds.map(staffId => {
-        const staff = staffList.find(s => s.staffId === staffId);
+    if (hasTraining && selectedTrainingItems.length > 0) {
+      trainingData = selectedTrainingItems.map(item => {
+        const staff = staffList.find(s => s.staffId === item.staffId);
         return {
-          staffName: staff?.name || staffId,
+          staffName: staff?.name || item.staffId,
+          days: item.days,
+          periodLabel: item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '',
           topic: trainingTopic.trim() || 'ไปอบรม/ประชุม',
           note: trainingNote.trim(),
         };
@@ -1139,7 +1192,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setSelectedLeaveItems([]);
       setLeaveSearch('');
       setHasTraining(false);
-      setSelectedTrainingStaffIds([]);
+      setSelectedTrainingItems([]);
       setTrainingSearch('');
       setTrainingTopic('');
       setTrainingNote('');
@@ -1213,7 +1266,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setSelectedLeaveItems([]);
     setLeaveSearch('');
     setHasTraining(false);
-    setSelectedTrainingStaffIds([]);
+    setSelectedTrainingItems([]);
     setTrainingSearch('');
     setTrainingTopic('');
     setTrainingNote('');
@@ -1795,7 +1848,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       <div>
                         <div className="font-bold">
                           ตรวจเช็กความสัมพันธ์ 3 จุด แผนก {clinic}: ประจำทั้งหมด {dayStaffingCheck.baseTotalAll} คน
-                          {dayStaffingCheck.totalAbsentAll > 0 && ` − ลา/ไปช่วย ${dayStaffingCheck.totalAbsentAll} แรง`}
+                          {dayStaffingCheck.totalAbsentAll > 0 && ` − ลา/อบรม/ไปช่วย ${dayStaffingCheck.totalAbsentAll} แรง`}
                           {dayStaffingCheck.totalIncomingAll > 0 && ` + มาช่วย/ขึ้นแทน ${dayStaffingCheck.totalIncomingAll} แรง`}
                           {` = คาดการณ์ปฏิบัติงาน ${dayStaffingCheck.expectedTotalAll} แรง`}
                           <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${
@@ -1804,21 +1857,25 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                             {dayStaffingCheck.canSave3Points ? 'ตรงกันครบทุกตำแหน่ง (บันทึกได้)' : 'ไม่ตรงจำนวนเต็ม (ยังบันทึกไม่ได้)'}
                           </span>
                         </div>
-                        {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0 || dayStaffingCheck.trainings.length > 0) && (
+                        {(dayStaffingCheck.absents.length > 0 || dayStaffingCheck.incomings.length > 0) && (
                           <div className="text-[10.5px] opacity-90 flex flex-wrap gap-1.5 pt-1">
                             {dayStaffingCheck.absents.map((a, idx) => (
-                              <span key={`ab-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-amber-200 text-amber-950 font-medium">
+                              <span
+                                key={`ab-${idx}`}
+                                className={`px-1.5 py-0.5 rounded bg-white font-medium border ${
+                                  a.kind === 'training'
+                                    ? 'border-cyan-200 text-cyan-900'
+                                    : a.kind === 'outgoing'
+                                    ? 'border-purple-200 text-purple-900'
+                                    : 'border-amber-200 text-amber-950'
+                                }`}
+                              >
                                 {a.detail}
                               </span>
                             ))}
                             {dayStaffingCheck.incomings.map((inc, idx) => (
                               <span key={`inc-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-emerald-200 text-emerald-900 font-medium">
                                 {inc.detail}
-                              </span>
-                            ))}
-                            {dayStaffingCheck.trainings.map((tr, idx) => (
-                              <span key={`tr-${idx}`} className="px-1.5 py-0.5 rounded bg-white border border-cyan-200 text-cyan-900 font-medium">
-                                {tr.detail}
                               </span>
                             ))}
                           </div>
@@ -1832,7 +1889,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         onClick={applyExpectedAllPositions}
                         className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[10.5px] shadow-2xs transition-colors cursor-pointer"
                       >
-                        ตั้งยอดปฏิบัติงานตามจำนวนเต็ม − วันลา
+                        ตั้งยอดปฏิบัติงานตามจำนวนเต็ม − ลา/อบรม/ช่วย
                       </button>
                     )}
                   </div>
@@ -1857,7 +1914,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                           </span>
                         </div>
                         <div className="text-[10px] text-gray-600 mt-0.5">
-                          เต็ม <strong>{r.full}</strong> | ทำจริง <strong>{r.working}</strong> | ลา/ช่วยงาน <strong>{r.absent}</strong>
+                          เต็ม <strong>{r.full}</strong> | ทำจริง <strong>{r.working}</strong> | ลา/อบรม/ช่วย <strong>{r.absent}</strong>
                           {r.incoming > 0 ? ` | แทน +${r.incoming}` : ''}
                         </div>
                       </div>
@@ -2088,10 +2145,10 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     }`}
                   >
                     <GraduationCap className="w-3.5 h-3.5" />
-                    <span>ไปอบรม/ประชุม (ทำงานปกติ)</span>
-                    {selectedTrainingStaffIds.length > 0 && (
+                    <span>ไปอบรม/ประชุม (ไม่นับภาระงานหน่วย)</span>
+                    {selectedTrainingItems.length > 0 && (
                       <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${hasTraining ? 'bg-white/25 text-white' : 'bg-cyan-100 text-cyan-800'}`}>
-                        {selectedTrainingStaffIds.length}
+                        {selectedTrainingItems.length}
                       </span>
                     )}
                   </button>
@@ -2349,7 +2406,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                 </div>
               )}
 
-              {/* Block 2: Training / Meeting (Normal workday - NOT leave) */}
+              {/* Block 2: Training / Meeting (Counts as attendance in Menu 2, deducted from unit daily workload) */}
               {hasTraining && (
                 <div className="bg-white rounded-xl border border-cyan-200/90 p-3.5 space-y-3 shadow-2xs text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-100 pb-2">
@@ -2359,34 +2416,69 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         2. รายชื่อเจ้าหน้าที่ไปอบรม / ประชุม (สมาชิกแผนก {clinic})
                       </span>
                       <span className="text-[10.5px] text-cyan-700 font-medium">
-                        การไปอบรม/ประชุม ถือเป็นวันทำงานตามปกติ (ไม่นับเป็นวันลาและไม่หักยอดกำลังคน)
+                        การไปอบรม/ประชุม นับว่ามาปฏิบัติงาน (ไม่นับเป็นวันลา) แต่ไม่นับเป็นภาระงานในหน่วยงาน (หักออกจากกำลังคนปฏิบัติงานประจำวันของหน่วยงาน)
                       </span>
                     </div>
                     <span className="text-[11px] font-semibold text-cyan-700">
-                      เลือกแล้ว {selectedTrainingStaffIds.length} คน
+                      เลือกแล้ว {selectedTrainingItems.length} คน
                     </span>
                   </div>
 
-                  {/* Selected Chips */}
-                  {selectedTrainingStaffIds.length > 0 && (
+                  {/* Selected Chips with 1.0 / 0.5 Day Period Selector */}
+                  {selectedTrainingItems.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
-                      {selectedTrainingStaffIds.map(id => {
-                        const s = staffList.find(st => st.staffId === id);
+                      {selectedTrainingItems.map(item => {
+                        const s = staffList.find(st => st.staffId === item.staffId);
                         if (!s) return null;
+                        const periodSelectValue =
+                          item.days === 1
+                            ? 'FULL'
+                            : item.periodLabel === 'ครึ่งวันบ่าย'
+                              ? 'HALF_PM'
+                              : 'HALF_AM';
                         return (
-                          <span
-                            key={id}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-cyan-50 border border-cyan-200 text-cyan-900 font-semibold text-[11px]"
+                          <div
+                            key={item.staffId}
+                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-cyan-50 border border-cyan-200 text-cyan-900 font-semibold text-[11px]"
                           >
                             <span>{s.name} ({formatPositionLabel(s.position)})</span>
+                            <select
+                              value={periodSelectValue}
+                              onChange={e => {
+                                const v = e.target.value;
+                                setSelectedTrainingItems(prev =>
+                                  prev.map(x =>
+                                    x.staffId === item.staffId
+                                      ? {
+                                          ...x,
+                                          days: v === 'FULL' ? 1 : 0.5,
+                                          periodLabel:
+                                            v === 'HALF_AM'
+                                              ? 'ครึ่งวันเช้า'
+                                              : v === 'HALF_PM'
+                                                ? 'ครึ่งวันบ่าย'
+                                                : '',
+                                        }
+                                      : x
+                                  )
+                                );
+                              }}
+                              className="rounded border border-cyan-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-cyan-900 outline-none"
+                            >
+                              <option value="FULL">เต็มวัน (1.0)</option>
+                              <option value="HALF_AM">ครึ่งวันเช้า (0.5)</option>
+                              <option value="HALF_PM">ครึ่งวันบ่าย (0.5)</option>
+                            </select>
                             <button
                               type="button"
-                              onClick={() => setSelectedTrainingStaffIds(prev => prev.filter(x => x !== id))}
+                              onClick={() =>
+                                setSelectedTrainingItems(prev => prev.filter(x => x.staffId !== item.staffId))
+                              }
                               className="text-cyan-600 hover:text-red-600 cursor-pointer"
                             >
                               <X className="w-3 h-3" />
                             </button>
-                          </span>
+                          </div>
                         );
                       })}
                     </div>
@@ -2427,31 +2519,48 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         );
                       })
                       .map(s => {
-                        const checked = selectedTrainingStaffIds.includes(s.staffId);
+                        const checked = selectedTrainingItems.some(it => it.staffId === s.staffId);
+                        const existingSavedTrainings = leaves.filter(l => {
+                          if (!isTrainingLeaveType(l.leaveType)) return false;
+                          const sDate = (l.startDate || '').trim();
+                          const eDate = (l.endDate || l.startDate || '').trim();
+                          return l.staffName === s.name && sDate && date >= sDate && date <= eDate;
+                        });
+                        const isBlockedAlready = existingSavedTrainings.length > 0;
                         return (
                           <div
                             key={s.staffId}
                             onClick={() => {
-                              setSelectedTrainingStaffIds(prev =>
-                                checked ? prev.filter(id => id !== s.staffId) : [...prev, s.staffId]
+                              if (isBlockedAlready && !checked) return;
+                              setSelectedTrainingItems(prev =>
+                                checked
+                                  ? prev.filter(it => it.staffId !== s.staffId)
+                                  : [...prev, { staffId: s.staffId, days: 1, periodLabel: '' }]
                               );
                             }}
-                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-all ${
-                              checked
-                                ? 'bg-cyan-50/90 border-cyan-300 text-cyan-950 font-semibold'
-                                : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700'
+                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border transition-all ${
+                              isBlockedAlready && !checked
+                                ? 'bg-red-50/50 border-red-200 text-gray-400 cursor-not-allowed'
+                                : checked
+                                  ? 'bg-cyan-50/90 border-cyan-300 text-cyan-950 font-semibold cursor-pointer'
+                                  : 'bg-white border-gray-100 hover:bg-slate-50 text-gray-700 cursor-pointer'
                             }`}
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
                               {checked ? (
                                 <CheckSquare className="w-4 h-4 text-cyan-600 shrink-0" />
                               ) : (
                                 <Square className="w-4 h-4 text-gray-300 shrink-0" />
                               )}
-                              <span>{s.name}</span>
-                              <span className="text-[10px] text-gray-400">({s.homeClinic})</span>
+                              <span className="truncate">{s.name}</span>
+                              <span className="text-[10px] text-gray-400 shrink-0">({s.homeClinic})</span>
+                              {isBlockedAlready && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-800 border border-cyan-200 font-semibold shrink-0">
+                                  มีบันทึกอบรมในฐานข้อมูลแล้ว
+                                </span>
+                              )}
                             </div>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold shrink-0">
                               {formatPositionLabel(s.position)}
                             </span>
                           </div>

@@ -888,6 +888,8 @@ export interface WorkloadCrossCoveragePayload {
 
 export interface WorkloadTrainingPayload {
   staffName: string;
+  days?: number;
+  periodLabel?: HalfDayPeriod;
   topic: string;
   note: string;
 }

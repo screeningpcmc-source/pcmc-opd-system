@@ -484,7 +484,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           const isTraining = isTrainingLeaveType(l.leaveType);
           const halfSuffix = isHalfDay ? ` (${periodLabel || 'ครึ่งวัน'} 0.5 วัน)` : '';
           const text = isTraining
-            ? `${prefix}${l.staffName} ไปอบรม/ประชุม${extra ? ` (${extra})` : ''}`
+            ? `${prefix}${l.staffName} ไปอบรม/ประชุม${halfSuffix}${extra ? ` (${extra})` : ''}`
             : `${prefix}${l.staffName} ${l.leaveType}${halfSuffix}${extra ? ` (${extra})` : ''}`;
 
           pushUniqueNote(row.notes, text, l.staffName, l.leaveType);
@@ -588,8 +588,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     premiumSubClinics,
   ]);
 
-  // Daily Staffing Headcount Verification (Master Staff - Leaves/Outgoing + Incoming vs Recorded RN+PN+NA)
-  // NOTE: "ไปอบรม/ประชุม" is treated as normal working day (displayed for reference, NOT deducted)
+  // Daily Staffing Headcount Verification (Master Staff - Leaves/Training/Outgoing + Incoming vs Recorded RN+PN+NA)
+  // NOTE: "ไปอบรม/ประชุม" counts as attendance (NOT leave), but does NOT count toward the unit's daily workload (deducted from unit headcount)
   const staffingVerification = useMemo(() => {
     const isOutTimeOnlyFilter =
       selectedShift === 'นอกเวลาเย็น 16:00-20:00' || selectedShift === 'นอกเวลาวันหยุด 08:00-12:00';
@@ -763,16 +763,16 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         const name = (l.staffName || '').trim();
         if (!name) return;
         const isTraining = isTrainingLeaveType(l.leaveType);
-        const isHalf = !isTraining && start === end && Number(l.days) === 0.5;
+        const isHalf = start === end && Number(l.days) === 0.5;
         const pLabel = isHalf ? parseLeavePeriodFromNote(l.note) : '';
-        const amt = isTraining ? 0 : isHalf ? 0.5 : 1;
+        const amt = isHalf ? 0.5 : 1;
         const extra = cleanAutoLeaveNote(stripLeavePeriodFromNote(l.note));
         const keyId = `${isTraining ? 'TRN' : 'LV'}|${name}|${pLabel || 'FULL'}`;
         if (absentMap.has(keyId)) return;
         absentMap.set(keyId, {
           name,
           label: isTraining
-            ? `${name} (ไปอบรม/ประชุม - ทำงานปกติ${extra ? `: ${extra}` : ''})`
+            ? `${name} (ไปอบรม/ประชุม${isHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''} - ไม่นับภาระงานหน่วย${extra ? `: ${extra}` : ''})`
             : `${name} (${l.leaveType}${isHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''}${extra ? `: ${extra}` : ''})`,
           kind: isTraining ? 'training' : 'leave',
           amount: amt,

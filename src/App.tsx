@@ -799,8 +799,21 @@ export default function App() {
     }
 
     if (trainingData) {
+      const existingLeaves = dbRef.current.leaves;
       trainingData.forEach((td, idx) => {
+        const cleanName = (td.staffName || '').trim();
+        const isDuplicateInDb = existingLeaves.some(l => {
+          if (!isTrainingLeaveType(l.leaveType)) return false;
+          const sDate = (l.startDate || '').trim();
+          const eDate = (l.endDate || l.startDate || '').trim();
+          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+        });
+        if (isDuplicateInDb) return;
         const staff = db.staff.find(s => s.name === td.staffName);
+        const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
+        const rawNote =
+          [td.topic, td.note].filter(Boolean).join(' — ') ||
+          `ไปอบรม/ประชุม (บันทึกจาก ${entry.clinic})`;
         newLeaveEntries.push({
           id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
           startDate: entry.date,
@@ -809,8 +822,8 @@ export default function App() {
           position: staff ? staff.position : 'RN',
           clinic: staff ? staff.homeClinic : entry.clinic,
           leaveType: 'ไปอบรม/ประชุม',
-          days: 1,
-          note: [td.topic, td.note].filter(Boolean).join(' — ') || `ไปอบรม/ประชุม (บันทึกจาก ${entry.clinic})`,
+          days: numericDays,
+          note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
         });
       });
     }
@@ -958,8 +971,21 @@ export default function App() {
     }
 
     if (trainingData) {
+      const existingLeaves = dbRef.current.leaves;
       trainingData.forEach((td, idx) => {
+        const cleanName = (td.staffName || '').trim();
+        const isDuplicateInDb = existingLeaves.some(l => {
+          if (!isTrainingLeaveType(l.leaveType)) return false;
+          const sDate = (l.startDate || '').trim();
+          const eDate = (l.endDate || l.startDate || '').trim();
+          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+        });
+        if (isDuplicateInDb) return;
         const staff = db.staff.find(s => s.name === td.staffName);
+        const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
+        const rawNote =
+          [td.topic, td.note].filter(Boolean).join(' — ') ||
+          `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`;
         newLeaveEntries.push({
           id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
           startDate: primaryEntry.date,
@@ -968,8 +994,8 @@ export default function App() {
           position: staff ? staff.position : 'RN',
           clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
           leaveType: 'ไปอบรม/ประชุม',
-          days: 1,
-          note: [td.topic, td.note].filter(Boolean).join(' — ') || `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`,
+          days: numericDays,
+          note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
         });
       });
     }

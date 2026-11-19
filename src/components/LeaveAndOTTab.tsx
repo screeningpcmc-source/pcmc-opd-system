@@ -863,7 +863,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           new Set(
             staffLeavesAll.map((l) =>
               isTrainingLeaveType(l.leaveType)
-                ? `ไปอบรม/ประชุม (${l.days} วัน - ทำงานปกติ)`
+                ? `ไปอบรม/ประชุม (${l.days} วัน - นับมาปฏิบัติงาน)`
                 : `${l.leaveType} (${l.days} วัน)`
             )
           )
@@ -1775,13 +1775,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 >
                   {leaveTypes.map((lt) => (
                     <option key={lt} value={lt}>
-                      {isTrainingLeaveType(lt) ? `${lt} (ทำงานปกติ ไม่นับเป็นวันลา)` : lt}
+                      {isTrainingLeaveType(lt) ? `${lt} (นับมาปฏิบัติงาน ไม่นับวันลา/ไม่นับภาระงานหน่วย)` : lt}
                     </option>
                   ))}
                 </select>
                 {isTrainingLeaveType(leaveType) && (
                   <p className="mt-1.5 text-[11px] text-cyan-800 bg-cyan-50 border border-cyan-200 rounded-lg px-2.5 py-1.5">
-                    การไปอบรม/ประชุม <strong>ไม่นับเป็นวันลา</strong> ให้ถือเป็นวันทำงานตามปกติ (ไม่หักกำลังคนในตารางและไม่นับรวมในรายงานวันลา)
+                    การไปอบรม/ประชุม <strong>นับว่ามาปฏิบัติงาน (ไม่นับเป็นวันลา)</strong> ในรายงานวันลาและ Unit Cost แต่<strong>จะไม่นับเป็นภาระงานในหน่วยงาน</strong> (หักออกจากกำลังคนปฏิบัติงานประจำวันของหน่วยงานในเมนู 1 และ 4)
                   </p>
                 )}
               </div>
@@ -2009,7 +2009,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     </span>
                     {totalFilteredTrainingDays > 0 && (
                       <span className="bg-cyan-50 text-cyan-800 font-bold px-2.5 py-0.5 rounded-lg border border-cyan-200 text-xs">
-                        ไปอบรม/ประชุม: {totalFilteredTrainingDays} วัน (ทำงานปกติ ไม่นับวันลา)
+                        ไปอบรม/ประชุม: {totalFilteredTrainingDays} วัน (นับมาปฏิบัติงาน ไม่นับวันลา)
                       </span>
                     )}
                     <span className="text-gray-500 text-[11px]">
@@ -2113,7 +2113,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                     {lv.leaveType}
                                   </span>
                                   {isTraining && (
-                                    <span className="text-[9px] text-cyan-700 font-medium">ทำงานปกติ</span>
+                                    <span className="text-[9px] text-cyan-700 font-medium">นับมาปฏิบัติงาน</span>
                                   )}
                                   {lv.days === 0.5 && halfPeriod && (
                                     <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
