@@ -342,6 +342,22 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     );
   }, [workloads, date, shift]);
 
+  const existingDuplicateWorkload = useMemo(() => {
+    if (isPremiumClinic) return null;
+    const targetClinic = (clinic || '').trim();
+    if (!targetClinic || !date || !shift) return null;
+    return (
+      workloads.find(
+        w =>
+          w.date === date &&
+          w.shift === shift &&
+          (w.clinic || '').trim() === targetClinic &&
+          w.recordType !== 'PREMIUM_SUB' &&
+          w.recordType !== 'PREMIUM_POOL'
+      ) || null
+    );
+  }, [workloads, date, shift, clinic, isPremiumClinic]);
+
   const premiumSummary = useMemo(() => {
     let activeCount = 0;
     let adultSum = 0;
@@ -1023,6 +1039,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     e.preventDefault();
     setFormError('');
 
+    if (existingDuplicateWorkload) {
+      setFormError(
+        `ไม่สามารถบันทึกซ้ำได้: แผนก ${clinic} วันที่ ${formatThaiShortDate(date)} กะเวลา "${shift}" มีข้อมูลอยู่ในระบบแล้ว (รายงานโดย ${existingDuplicateWorkload.reporter || '-'})`
+      );
+      return;
+    }
+
     if (!reporter.trim()) {
       setFormError('กรุณาระบุชื่อผู้รายงานก่อนบันทึก');
       return;
@@ -1110,8 +1133,16 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       if (activeSubs.length === 0) {
         setFormError(
           existingPremiumPool
-            ? 'พบกำลังคนรวมในกะนี้แล้ว กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตาราง'
+            ? 'พบกำลังคนรวมในกะนี้แล้ว กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยที่ยังไม่เคยบันทึกในกะนี้'
             : 'กรุณากรอกยอดผู้ป่วยหรือ Admit อย่างน้อย 1 แผนกย่อยในตารางศูนย์ปัญญาภิรมย์'
+        );
+        return;
+      }
+
+      const duplicateSubs = activeSubs.filter(item => existingPremiumSubClinics.has(item.sub));
+      if (duplicateSubs.length > 0) {
+        setFormError(
+          `ไม่สามารถบันทึกซ้ำได้: แผนกย่อย (${duplicateSubs.map(d => d.sub).join(', ')}) ในวันที่ ${formatThaiShortDate(date)} กะเวลา "${shift}" มีการบันทึกไว้แล้ว`
         );
         return;
       }
@@ -1382,6 +1413,26 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               </div>
             </div>
 
+            {existingDuplicateWorkload && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-xs text-red-950 flex items-start gap-2.5 shadow-2xs">
+                <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <div className="font-bold text-red-800">
+                    ตรวจพบข้อมูลภาระงานซ้ำในวันและกะเวลาเดียวกัน (ห้ามบันทึกซ้ำ)
+                  </div>
+                  <div>
+                    แผนก <strong>{clinic}</strong> วันที่ <strong>{formatThaiShortDate(date)}</strong> กะเวลา{' '}
+                    <strong>{shift}</strong> มีข้อมูลบันทึกไว้ในระบบแล้ว (ผู้ป่วย{' '}
+                    <strong>{getEffectiveTotalPt(existingDuplicateWorkload)}</strong> ราย • รายงานโดย{' '}
+                    <strong>{existingDuplicateWorkload.reporter || '-'}</strong>)
+                  </div>
+                  <div className="text-[11px] text-red-700">
+                    หากต้องการแก้ไขตัวเลข กรุณาใช้ปุ่มแก้ไขหรือลบรายการเดิมในตารางด้านขวา (เฉพาะ Admin)
+                  </div>
+                </div>
+              </div>
+            )}
+
             {isPremiumClinic ? (
               <div className="space-y-4">
                 {/* Premium Header Banner */}
@@ -1559,12 +1610,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                               </td>
                               <td className="py-1.5 px-3">
                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className={`font-semibold ${isRowActive ? 'text-orange-950' : 'text-gray-800'}`}>
+                                  <span className={`font-semibold ${alreadySaved ? 'text-gray-500' : isRowActive ? 'text-orange-950' : 'text-gray-800'}`}>
                                     {sub}
                                   </span>
                                   {alreadySaved && (
-                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                                      บันทึกแล้วในกะนี้
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">
+                                      บันทึกแล้วในกะนี้ (ห้ามบันทึกซ้ำ)
                                     </span>
                                   )}
                                 </div>
@@ -1574,11 +1625,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                                   type="number"
                                   min="0"
                                   placeholder="0"
-                                  value={rowVal.adultPt || ''}
+                                  disabled={alreadySaved}
+                                  value={alreadySaved ? '' : rowVal.adultPt || ''}
                                   onChange={(e) =>
                                     updatePremiumSubInput(sub, 'adultPt', Number(e.target.value) || 0)
                                   }
-                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white"
+                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                                 />
                               </td>
                               <td className="py-1.5 px-2">
@@ -1586,11 +1638,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                                   type="number"
                                   min="0"
                                   placeholder="0"
-                                  value={rowVal.childPt || ''}
+                                  disabled={alreadySaved}
+                                  value={alreadySaved ? '' : rowVal.childPt || ''}
                                   onChange={(e) =>
                                     updatePremiumSubInput(sub, 'childPt', Number(e.target.value) || 0)
                                   }
-                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white"
+                                  className="w-full text-center text-xs font-semibold rounded-lg border border-gray-300 focus:border-orange-500 focus:ring-orange-500 py-1 px-1.5 bg-white disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                                 />
                               </td>
                               <td className="py-1.5 px-2">
@@ -1598,11 +1651,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                                   type="number"
                                   min="0"
                                   placeholder="0"
-                                  value={rowVal.admit || ''}
+                                  disabled={alreadySaved}
+                                  value={alreadySaved ? '' : rowVal.admit || ''}
                                   onChange={(e) =>
                                     updatePremiumSubInput(sub, 'admit', Number(e.target.value) || 0)
                                   }
-                                  className="w-full text-center text-xs font-bold rounded-lg border border-red-200 bg-red-50/30 text-red-700 focus:border-red-400 py-1 px-1.5"
+                                  className="w-full text-center text-xs font-bold rounded-lg border border-red-200 bg-red-50/30 text-red-700 focus:border-red-400 py-1 px-1.5 disabled:bg-gray-100 disabled:border-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed"
                                 />
                               </td>
                               <td className="py-1.5 px-2.5 text-right font-extrabold text-orange-950 bg-orange-50/40">
@@ -2987,7 +3041,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             <div className="mt-auto pt-2 flex justify-end">
               <button
                 type="submit"
-                className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg ${
+                disabled={Boolean(existingDuplicateWorkload)}
+                className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed disabled:shadow-none ${
                   isPremiumClinic
                     ? 'bg-orange-600 hover:bg-orange-500 active:bg-orange-700'
                     : isReferralClinic
@@ -2997,7 +3052,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               >
                 <FileCheck2 className="w-4 h-4" />
                 <span>
-                  {isPremiumClinic
+                  {existingDuplicateWorkload
+                    ? 'มีข้อมูลภาระงานกะนี้แล้ว (บันทึกซ้ำไม่ได้)'
+                    : isPremiumClinic
                     ? 'บันทึกข้อมูลศูนย์ปัญญาภิรมย์ (กำลังคน + ยอดผู้ป่วย)'
                     : isReferralClinic
                     ? 'บันทึกข้อมูลห้องรับ - ส่งต่อผู้ป่วย'
@@ -3587,10 +3644,25 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     setEditModalError('กรุณาระบุชื่อผู้บันทึกรายงาน');
                     return;
                   }
+                  const dupWorkload = workloads.find(
+                    w =>
+                      w.id !== editingWorkload.id &&
+                      w.date === editingWorkload.date &&
+                      w.shift === editingWorkload.shift &&
+                      (w.clinic || '').trim() === (editingWorkload.clinic || '').trim() &&
+                      (w.recordType || 'STANDARD') === (editingWorkload.recordType || 'STANDARD')
+                  );
+                  if (dupWorkload) {
+                    setEditModalError(
+                      `ไม่สามารถบันทึกซ้ำได้: แผนก ${editingWorkload.clinic} วันที่ ${formatThaiShortDate(editingWorkload.date)} กะเวลา "${editingWorkload.shift}" มีรายการอื่นบันทึกไว้แล้ว`
+                    );
+                    return;
+                  }
                   if (!editWorkloadReason.trim()) {
                     setEditWorkloadReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
                     return;
                   }
+                  setEditModalError('');
                   onUpdateWorkload(editingWorkload, editWorkloadReason.trim());
                   setEditingWorkload(null);
                   setEditWorkloadReason('');

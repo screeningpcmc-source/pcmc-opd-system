@@ -84,7 +84,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const currentMonthStr = new Date().toISOString().slice(0, 7);
 
   const [selectedMonth, setSelectedMonth] = useState<string>(currentMonthStr);
-  const [selectedShift, setSelectedShift] = useState<string>('ALL');
+  const [selectedShift, setSelectedShift] = useState<string>('ในเวลา 08:00-16:00');
   const [selectedClinic, setSelectedClinic] = useState<string>('ALL');
   const [excludeLasik, setExcludeLasik] = useState<boolean>(true); // Default exclude LASIK as per standard OPD nursing formula
   const [excludeReferral, setExcludeReferral] = useState<boolean>(false);

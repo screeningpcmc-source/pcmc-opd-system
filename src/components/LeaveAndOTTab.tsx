@@ -37,6 +37,7 @@ import {
   normalizeStaffPosition,
   compareStaffByPositionAndStartDate as _compareRoster,
   getStaffEmployeeCode,
+  isOtDuplicateConflict,
 } from '../types';
 import {
   CalendarClock,
@@ -325,21 +326,43 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     targetLeaveType: string,
     startIso: string,
     endIso: string,
-    excludeId?: string
+    excludeId?: string,
+    targetDays?: number,
+    targetPeriod?: HalfDayPeriod
   ): LeaveRecord | null => {
-    const cleanName = (targetStaffName || '').trim();
+    const cleanName = (targetStaffName || '').trim().replace(/\s+/g, ' ');
     if (!cleanName || !startIso) return null;
     const rangeEnd = (endIso || startIso).trim();
     const targetIsTraining = isTrainingLeaveType(targetLeaveType);
+    const effTargetDays = targetDays ?? (startIso === rangeEnd ? Number(leaveDays) || 1 : 1);
+    const effTargetPeriod = targetPeriod ?? (effTargetDays === 0.5 ? leaveHalfPeriod : '');
     return (
       leaves.find((lv) => {
         if (excludeId && lv.id === excludeId) return false;
-        if ((lv.staffName || '').trim() !== cleanName) return false;
-        if (isTrainingLeaveType(lv.leaveType) !== targetIsTraining) return false;
+        if ((lv.staffName || '').trim().replace(/\s+/g, ' ') !== cleanName) return false;
         const lvStart = (lv.startDate || '').trim();
         const lvEnd = (lv.endDate || lvStart).trim();
         if (!lvStart) return false;
-        return startIso <= lvEnd && rangeEnd >= lvStart;
+        if (!(startIso <= lvEnd && rangeEnd >= lvStart)) return false;
+
+        const lvIsTraining = isTrainingLeaveType(lv.leaveType);
+        if (lvIsTraining === targetIsTraining) return true;
+
+        // Leave vs Training on overlapping date: only allow if BOTH are 0.5 single-day with distinct periods
+        const lvDays = Number(lv.days) || 1;
+        const lvPeriod = parseLeavePeriodFromNote(lv.note);
+        if (
+          lvStart === lvEnd &&
+          startIso === rangeEnd &&
+          lvDays === 0.5 &&
+          effTargetDays === 0.5 &&
+          lvPeriod &&
+          effTargetPeriod &&
+          lvPeriod !== effTargetPeriod
+        ) {
+          return false;
+        }
+        return true;
       }) || null
     );
   };
@@ -350,9 +373,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       selectedLeaveStaff.name,
       leaveType,
       leaveStartDate,
-      leaveEndDate
+      leaveEndDate,
+      undefined,
+      Number(leaveDays) || 1,
+      leaveHalfPeriod
     );
-  }, [selectedLeaveStaff, leaveType, leaveStartDate, leaveEndDate, leaves]);
+  }, [selectedLeaveStaff, leaveType, leaveStartDate, leaveEndDate, leaveDays, leaveHalfPeriod, leaves]);
 
   const filteredLeaveDropdownStaff = useMemo(() => {
     const q = leaveStaffQuery.toLowerCase().trim();
@@ -466,6 +492,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [editingOT, setEditingOT] = useState<OTAttendance | null>(null);
   const [editOtReason, setEditOtReason] = useState<string>('');
   const [editOtReasonError, setEditOtReasonError] = useState<string>('');
+  const [editOtDuplicateError, setEditOtDuplicateError] = useState<string>('');
   const [deletingOT, setDeletingOT] = useState<OTAttendance | null>(null);
   const [deleteOtReason, setDeleteOtReason] = useState<string>('');
   const [deleteOtReasonError, setDeleteOtReasonError] = useState<string>('');
@@ -496,6 +523,38 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   }, [otWorkClinicOptions, workClinic]);
 
   const totalOtSelectedCount = selectedStaffIds.length + externalOtStaff.length;
+
+  const findOtConflictForName = (name: string, dateIso: string, shiftVal: WorkShift, targetClinic: string, excludeId?: string) => {
+    return otRecords.find((o) =>
+      isOtDuplicateConflict(o, { date: dateIso, shift: shiftVal, staffName: name, workClinic: targetClinic }, excludeId)
+    ) || null;
+  };
+
+  const conflictingSelectedOtList = useMemo(() => {
+    const conflicts: { name: string; existingClinic: string }[] = [];
+    const seenNames = new Set<string>();
+    selectedStaffIds.forEach((id) => {
+      const staff = staffList.find((s) => s.staffId === id);
+      const name = (staff ? staff.name : id).trim();
+      const dup = findOtConflictForName(name, otDate, otShift, workClinic);
+      if (dup) {
+        conflicts.push({ name, existingClinic: parseOtWorkClinic(dup.workClinic).clinic || dup.workClinic });
+      }
+      seenNames.add(name.replace(/\s+/g, ' '));
+    });
+    externalOtStaff.forEach((ext) => {
+      const name = ext.name.trim();
+      const norm = name.replace(/\s+/g, ' ');
+      const dup = findOtConflictForName(name, otDate, otShift, workClinic);
+      if (dup) {
+        conflicts.push({ name, existingClinic: parseOtWorkClinic(dup.workClinic).clinic || dup.workClinic });
+      } else if (seenNames.has(norm)) {
+        conflicts.push({ name, existingClinic: 'ซ้ำในชุดที่กำลังบันทึก' });
+      }
+      seenNames.add(norm);
+    });
+    return conflicts;
+  }, [selectedStaffIds, externalOtStaff, staffList, otRecords, otDate, otShift, workClinic]);
 
   const leaveCalendarStaffOptions = useMemo(() => {
     const set = new Set<string>();
@@ -584,7 +643,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       staff.name,
       leaveType,
       leaveStartDate,
-      leaveEndDate
+      leaveEndDate,
+      undefined,
+      Number(leaveDays) || 1,
+      leaveHalfPeriod
     );
     if (conflict) {
       setLeaveFormError(
@@ -667,6 +729,25 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       setExtError('กรุณากรอกทั้ง ชื่อ-สกุล และ สังกัด / หน่วยงานต้นสังกัด');
       return;
     }
+    const normExtName = trimmedName.replace(/\s+/g, ' ');
+    const dupInBatch =
+      externalOtStaff.some((x) => x.name.trim().replace(/\s+/g, ' ') === normExtName) ||
+      selectedStaffIds.some((id) => {
+        const st = staffList.find((s) => s.staffId === id);
+        return (st?.name || '').trim().replace(/\s+/g, ' ') === normExtName;
+      });
+    if (dupInBatch) {
+      setExtError(`ไม่สามารถเพิ่มซ้ำได้: ${trimmedName} ถูกเลือกอยู่ในรายการบันทึกชุดนี้แล้ว`);
+      return;
+    }
+    const dupInDb = findOtConflictForName(trimmedName, otDate, otShift, workClinic);
+    if (dupInDb) {
+      const exClinic = parseOtWorkClinic(dupInDb.workClinic).clinic || dupInDb.workClinic;
+      setExtError(
+        `ไม่สามารถเพิ่มซ้ำได้: ${trimmedName} มีประวัติขึ้นเวร (${exClinic}) วันที่ ${formatThaiShortDate(otDate)} กะ "${otShift}" อยู่ในฐานข้อมูลแล้ว`
+      );
+      return;
+    }
     setExtError('');
     setOtFormError('');
     setExternalOtStaff((prev) => [
@@ -691,6 +772,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     e.preventDefault();
     if (totalOtSelectedCount === 0) {
       setOtFormError('กรุณาเลือกเจ้าหน้าที่ OPD หรือเพิ่มเจ้าหน้าที่เฉพาะกิจอย่างน้อย 1 คน');
+      return;
+    }
+    if (conflictingSelectedOtList.length > 0) {
+      const summary = conflictingSelectedOtList
+        .map((c) => `${c.name} (${c.existingClinic})`)
+        .join(', ');
+      setOtFormError(
+        `ไม่สามารถบันทึกซ้ำได้: พบรายชื่อที่มีบันทึกเวรในวันที่ ${formatThaiShortDate(otDate)} กะ "${otShift}" แล้ว ได้แก่ ${summary}`
+      );
       return;
     }
     setOtFormError('');
@@ -2970,6 +3060,19 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   )}
                 </div>
 
+                {conflictingSelectedOtList.length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-red-50 border border-red-300 text-[11px] text-red-900 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold text-red-800">ตรวจพบบันทึกเวรซ้ำในวันและกะเวลาเดียวกัน</div>
+                      <div>
+                        รายชื่อต่อไปนี้มีข้อมูลเวรวันที่ {formatThaiShortDate(otDate)} กะ <strong>{otShift}</strong> อยู่ในระบบแล้ว:{' '}
+                        <strong>{conflictingSelectedOtList.map((c) => `${c.name} (${c.existingClinic})`).join(', ')}</strong>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {otFormError && (
                   <p className="text-[11px] text-red-600 flex items-center gap-1">
                     <AlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -2980,11 +3083,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
                 <button
                   type="submit"
-                  disabled={totalOtSelectedCount === 0}
-                  className="w-full py-2.5 bg-teal-700 hover:bg-teal-600 active:bg-teal-800 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                  disabled={totalOtSelectedCount === 0 || conflictingSelectedOtList.length > 0}
+                  className="w-full py-2.5 bg-teal-700 hover:bg-teal-600 active:bg-teal-800 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <FileCheck2 className="w-4 h-4" />
-                  <span>บันทึกเวรปฏิบัติงาน ({totalOtSelectedCount} คน)</span>
+                  <span>
+                    {conflictingSelectedOtList.length > 0
+                      ? 'พบรายชื่อเวรซ้ำในกะนี้ (บันทึกซ้ำไม่ได้)'
+                      : `บันทึกเวรปฏิบัติงาน (${totalOtSelectedCount} คน)`}
+                  </span>
                 </button>
               </form>
             </div>
@@ -3025,16 +3132,33 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     })
                     .map((s) => {
                       const isSelected = selectedStaffIds.includes(s.staffId);
+                      const existingOt = findOtConflictForName(s.name, otDate, otShift, workClinic);
+                      const isBlockedDuplicate = Boolean(existingOt) && !isSelected;
+                      const existingOtClinic = existingOt
+                        ? parseOtWorkClinic(existingOt.workClinic).clinic || existingOt.workClinic
+                        : '';
                       const personHours = selectedOtHoursByStaffId[s.staffId] ?? otHours;
                       const staffCode = getStaffEmployeeCode(s);
                       return (
                         <div
                           key={s.staffId}
-                          onClick={() => toggleSelectStaff(s.staffId)}
-                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 cursor-pointer transition-all ${
-                            isSelected
-                              ? 'bg-teal-50 border-teal-300 text-teal-950 font-medium'
-                              : 'bg-slate-50/50 border-gray-100 hover:border-teal-200 text-gray-700'
+                          onClick={() => {
+                            if (isBlockedDuplicate) {
+                              setOtFormError(
+                                `ไม่สามารถเลือก ${s.name} ซ้ำได้ เนื่องจากมีบันทึกเวรที่ ${existingOtClinic} วันที่ ${formatThaiShortDate(otDate)} กะ "${otShift}" แล้ว`
+                              );
+                              return;
+                            }
+                            toggleSelectStaff(s.staffId);
+                          }}
+                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 transition-all ${
+                            isBlockedDuplicate
+                              ? 'bg-red-50/50 border-red-200 text-gray-400 cursor-not-allowed'
+                              : isSelected && existingOt
+                                ? 'bg-red-50 border-red-300 text-red-900 font-medium cursor-pointer'
+                                : isSelected
+                                  ? 'bg-teal-50 border-teal-300 text-teal-950 font-medium cursor-pointer'
+                                  : 'bg-slate-50/50 border-gray-100 hover:border-teal-200 text-gray-700 cursor-pointer'
                           }`}
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
@@ -3044,7 +3168,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               <Square className="w-4 h-4 text-gray-300 shrink-0" />
                             )}
                             <div className="min-w-0">
-                              <span className="text-xs font-bold block truncate">{s.name}</span>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-bold block truncate">{s.name}</span>
+                                {existingOt && (
+                                  <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-red-100 text-red-800 border border-red-200 shrink-0">
+                                    บันทึกเวรแล้ว ({existingOtClinic})
+                                  </span>
+                                )}
+                              </div>
                               <span className="text-[11px] text-gray-500 block truncate">
                                 {staffCode ? `รหัส: ${staffCode} • ` : ''}
                                 สังกัด: {s.homeClinic}
@@ -5277,7 +5408,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     editingLeave.leaveType,
                     editingLeave.startDate,
                     editingLeave.endDate,
-                    editingLeave.id
+                    editingLeave.id,
+                    Number(editingLeave.days) || 1,
+                    parseLeavePeriodFromNote(editingLeave.note)
                   );
                   if (conflict) {
                     setEditLeaveDuplicateError(
@@ -5643,10 +5776,20 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
             </div>
 
+            {editOtDuplicateError && (
+              <div className="p-2.5 rounded-xl bg-red-50 border border-red-300 text-xs text-red-900 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{editOtDuplicateError}</span>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2.5 border-t pt-3">
               <button
                 type="button"
-                onClick={() => setEditingOT(null)}
+                onClick={() => {
+                  setEditingOT(null);
+                  setEditOtDuplicateError('');
+                }}
                 className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl cursor-pointer"
               >
                 ยกเลิก
@@ -5658,6 +5801,21 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     setEditOtReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
                     return;
                   }
+                  const dupOt = findOtConflictForName(
+                    editingOT.staffName,
+                    editingOT.date,
+                    editingOT.shift,
+                    editingOT.workClinic,
+                    editingOT.id
+                  );
+                  if (dupOt) {
+                    const dupClinic = parseOtWorkClinic(dupOt.workClinic).clinic || dupOt.workClinic;
+                    setEditOtDuplicateError(
+                      `ไม่สามารถบันทึกซ้ำได้: ${editingOT.staffName} มีประวัติขึ้นเวร (${dupClinic}) วันที่ ${formatThaiShortDate(editingOT.date)} กะ "${editingOT.shift}" อยู่ในระบบแล้ว`
+                    );
+                    return;
+                  }
+                  setEditOtDuplicateError('');
                   onUpdateOT(editingOT, editOtReason.trim());
                   setEditingOT(null);
                   setEditOtReason('');

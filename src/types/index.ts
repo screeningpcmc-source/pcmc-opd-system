@@ -894,4 +894,20 @@ export interface WorkloadTrainingPayload {
   note: string;
 }
 
-
+export function isOtDuplicateConflict(
+  existing: Pick<OTAttendance, 'id' | 'date' | 'shift' | 'staffName' | 'workClinic'>,
+  candidate: Pick<OTAttendance, 'date' | 'shift' | 'staffName' | 'workClinic'>,
+  excludeId?: string
+): boolean {
+  if (excludeId && existing.id === excludeId) return false;
+  const exName = (existing.staffName || '').trim().replace(/\s+/g, ' ');
+  const caName = (candidate.staffName || '').trim().replace(/\s+/g, ' ');
+  if (!exName || !caName || exName !== caName) return false;
+  if ((existing.date || '').trim() !== (candidate.date || '').trim()) return false;
+  if ((existing.shift || '').trim() !== (candidate.shift || '').trim()) return false;
+  const exParsed = parseOtWorkClinic(existing.workClinic);
+  const caParsed = parseOtWorkClinic(candidate.workClinic);
+  if (exParsed.amount >= 1 || caParsed.amount >= 1) return true;
+  if (!exParsed.periodLabel || !caParsed.periodLabel) return true;
+  return exParsed.periodLabel === caParsed.periodLabel;
+}

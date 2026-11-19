@@ -29,7 +29,9 @@ import {
   isTrainingLeaveType,
   getStaffEmployeeCode,
   isLegacyGeneratedStaffId,
-  isValidEmployeeCodeValue
+  isValidEmployeeCodeValue,
+  isOtDuplicateConflict,
+  parseLeavePeriodFromNote
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -760,6 +762,25 @@ export default function App() {
     crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
     trainingData?: WorkloadTrainingPayload[] | null
   ) => {
+    const isDuplicateStandardWorkload =
+      entry.recordType !== 'PREMIUM_SUB' &&
+      entry.recordType !== 'PREMIUM_POOL' &&
+      dbRef.current.workloads.some(
+        w =>
+          w.date === entry.date &&
+          w.shift === entry.shift &&
+          (w.clinic || '').trim() === (entry.clinic || '').trim() &&
+          w.recordType !== 'PREMIUM_SUB' &&
+          w.recordType !== 'PREMIUM_POOL'
+      );
+    if (isDuplicateStandardWorkload) {
+      showToast(
+        `ไม่สามารถบันทึกซ้ำได้: แผนก ${entry.clinic} วันที่ ${formatThaiShortDate(entry.date)} กะเวลา "${entry.shift}" มีข้อมูลในระบบแล้ว`,
+        'error'
+      );
+      return;
+    }
+
     const newLeaveEntries: LeaveRecord[] = [];
     const newOtEntries: OTAttendance[] = [];
 
@@ -844,7 +865,7 @@ export default function App() {
         (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : entry.clinic));
       const resolvedShift =
         cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : entry.shift);
-      newOtEntries.push({
+      const candidateOt: OTAttendance = {
         id: `OT-CROSS-${Date.now()}-${idx}`,
         date: entry.date,
         shift: resolvedShift,
@@ -855,7 +876,13 @@ export default function App() {
         ...(cc.isExternal
           ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
           : {}),
-      });
+      };
+      const dupInDbOrBatch =
+        dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
+        newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
+      if (!dupInDbOrBatch) {
+        newOtEntries.push(candidateOt);
+      }
     });
 
     clearWorkloadTombstone(entry);
@@ -931,6 +958,22 @@ export default function App() {
     trainingData?: WorkloadTrainingPayload[] | null
   ) => {
     if (!entries || entries.length === 0) return;
+    const dupBatchEntry = entries.find(incoming =>
+      dbRef.current.workloads.some(
+        existing =>
+          existing.date === incoming.date &&
+          existing.shift === incoming.shift &&
+          (existing.clinic || '').trim() === (incoming.clinic || '').trim() &&
+          (existing.recordType || 'STANDARD') === (incoming.recordType || 'STANDARD')
+      )
+    );
+    if (dupBatchEntry) {
+      showToast(
+        `ไม่สามารถบันทึกซ้ำได้: แผนก ${dupBatchEntry.clinic} วันที่ ${formatThaiShortDate(dupBatchEntry.date)} กะเวลา "${dupBatchEntry.shift}" มีข้อมูลในระบบแล้ว`,
+        'error'
+      );
+      return;
+    }
     const primaryEntry = entries[0];
     const newLeaveEntries: LeaveRecord[] = [];
     const newOtEntries: OTAttendance[] = [];
@@ -1016,7 +1059,7 @@ export default function App() {
         (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP));
       const resolvedShift =
         cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : primaryEntry.shift);
-      newOtEntries.push({
+      const candidateOt: OTAttendance = {
         id: `OT-CROSS-${Date.now()}-${idx}`,
         date: primaryEntry.date,
         shift: resolvedShift,
@@ -1027,7 +1070,13 @@ export default function App() {
         ...(cc.isExternal
           ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
           : {}),
-      });
+      };
+      const dupInDbOrBatch =
+        dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
+        newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
+      if (!dupInDbOrBatch) {
+        newOtEntries.push(candidateOt);
+      }
     });
 
     entries.forEach(clearWorkloadTombstone);
@@ -1608,20 +1657,36 @@ export default function App() {
 
   // Handler: Save Leave (Data Entry: allowed via GAS or OAuth)
   const handleSaveLeave = async (leave: LeaveRecord) => {
-    const cleanName = (leave.staffName || '').trim();
+    const cleanName = (leave.staffName || '').trim().replace(/\s+/g, ' ');
     const lStart = (leave.startDate || '').trim();
     const lEnd = (leave.endDate || lStart).trim();
     const isTrain = isTrainingLeaveType(leave.leaveType);
+    const lDays = Number(leave.days) || 1;
+    const lPeriod = parseLeavePeriodFromNote(leave.note);
     const conflict = dbRef.current.leaves.find(existing => {
-      if ((existing.staffName || '').trim() !== cleanName) return false;
-      if (isTrain !== isTrainingLeaveType(existing.leaveType)) return false;
+      if ((existing.staffName || '').trim().replace(/\s+/g, ' ') !== cleanName) return false;
       const exStart = (existing.startDate || '').trim();
       const exEnd = (existing.endDate || exStart).trim();
-      return Boolean(exStart) && exStart <= lEnd && exEnd >= lStart;
+      if (!(Boolean(exStart) && exStart <= lEnd && exEnd >= lStart)) return false;
+      if (isTrain === isTrainingLeaveType(existing.leaveType)) return true;
+      const exDays = Number(existing.days) || 1;
+      const exPeriod = parseLeavePeriodFromNote(existing.note);
+      if (
+        exStart === exEnd &&
+        lStart === lEnd &&
+        exDays === 0.5 &&
+        lDays === 0.5 &&
+        exPeriod &&
+        lPeriod &&
+        exPeriod !== lPeriod
+      ) {
+        return false;
+      }
+      return true;
     });
     if (conflict) {
       showToast(
-        `ไม่สามารถบันทึกได้: ${cleanName} มีรายการ "${conflict.leaveType}" ในวันที่ซ้ำซ้อน (${conflict.startDate}) อยู่ในฐานข้อมูลแล้ว`,
+        `ไม่สามารถบันทึกซ้ำได้: ${cleanName} มีรายการ "${conflict.leaveType}" ในวันที่ซ้ำซ้อน (${conflict.startDate}) อยู่ในฐานข้อมูลแล้ว`,
         'error'
       );
       return;
@@ -1804,26 +1869,46 @@ export default function App() {
   // Handler: Save Batch OT (Data Entry: allowed via GAS or OAuth)
   const handleSaveBatchOT = async (records: OTAttendance[]) => {
     if (!records || records.length === 0) return;
-    records.forEach(clearOtTombstone);
-    enqueuePendingOutboxOt(records);
+    const validRecords: OTAttendance[] = [];
+    const duplicateNames: string[] = [];
+    records.forEach(rec => {
+      const dup =
+        dbRef.current.ot.some(existing => isOtDuplicateConflict(existing, rec)) ||
+        validRecords.some(existing => isOtDuplicateConflict(existing, rec));
+      if (dup) {
+        duplicateNames.push(rec.staffName);
+      } else {
+        validRecords.push(rec);
+      }
+    });
+    if (duplicateNames.length > 0) {
+      showToast(
+        `ไม่สามารถบันทึก OT ซ้ำในวันและกะเวลาเดียวกันได้ (${duplicateNames.join(', ')})`,
+        'error'
+      );
+    }
+    if (validRecords.length === 0) return;
+
+    validRecords.forEach(clearOtTombstone);
+    enqueuePendingOutboxOt(validRecords);
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
     const nextDb = {
       ...baseDb,
-      ot: [...records, ...baseDb.ot],
+      ot: [...validRecords, ...baseDb.ot],
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    showToast(`บันทึกเวรนอกเวลาจำนวน ${records.length} คน เรียบร้อยแล้ว!`, 'success');
+    showToast(`บันทึกเวรนอกเวลาจำนวน ${validRecords.length} คน เรียบร้อยแล้ว!`, 'success');
 
     if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
     if (targetGasUrl) {
-      const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', records);
+      const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', validRecords);
       if (ok) {
-        markOtOutboxSynced(records);
+        markOtOutboxSynced(validRecords);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
@@ -1833,7 +1918,7 @@ export default function App() {
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        for (const r of records) {
+        for (const r of validRecords) {
           if (await appendOTToSheet(token, targetSheetId, r)) {
             markOtOutboxSynced([r]);
           }
