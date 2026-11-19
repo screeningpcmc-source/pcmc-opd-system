@@ -726,6 +726,75 @@ export const clearAllPendingOutbox = (): void => {
   persistPendingOutbox();
 };
 
+// Short-lived optimistic protection cache (90s TTL):
+// Ensures newly saved items remain immediately visible across background syncs
+// even after outbox removal, preventing brief flicker/delay if remote read lags.
+const RECENT_SAVED_TTL_MS = 90 * 1000;
+let recentSavedWorkloads: Array<{ key: string; id: string; item: DailyWorkload; expiresAt: number }> = [];
+let recentSavedLeaves: Array<{ key: string; id: string; item: LeaveRecord; expiresAt: number }> = [];
+let recentSavedOt: Array<{ key: string; id: string; item: OTAttendance; expiresAt: number }> = [];
+
+function pruneExpiredRecentSaved(): void {
+  const now = Date.now();
+  recentSavedWorkloads = recentSavedWorkloads.filter((x) => x.expiresAt > now);
+  recentSavedLeaves = recentSavedLeaves.filter((x) => x.expiresAt > now);
+  recentSavedOt = recentSavedOt.filter((x) => x.expiresAt > now);
+}
+
+export const markWorkloadsRecentlySaved = (items: DailyWorkload[]): void => {
+  if (!items || items.length === 0) return;
+  pruneExpiredRecentSaved();
+  const expiresAt = Date.now() + RECENT_SAVED_TTL_MS;
+  items.forEach((item) => {
+    const key = workloadKey(item);
+    recentSavedWorkloads = recentSavedWorkloads.filter((x) => x.key !== key && x.id !== item.id);
+    recentSavedWorkloads.unshift({ key, id: item.id, item, expiresAt });
+  });
+};
+
+export const removeWorkloadRecentlySaved = (item: DailyWorkload): void => {
+  const key = workloadKey(item);
+  recentSavedWorkloads = recentSavedWorkloads.filter((x) => x.key !== key && x.id !== item.id);
+};
+
+export const markLeavesRecentlySaved = (items: LeaveRecord[]): void => {
+  if (!items || items.length === 0) return;
+  pruneExpiredRecentSaved();
+  const expiresAt = Date.now() + RECENT_SAVED_TTL_MS;
+  items.forEach((item) => {
+    const key = leaveKey(item);
+    recentSavedLeaves = recentSavedLeaves.filter((x) => x.key !== key && x.id !== item.id);
+    recentSavedLeaves.unshift({ key, id: item.id, item, expiresAt });
+  });
+};
+
+export const removeLeaveRecentlySaved = (item: LeaveRecord): void => {
+  const key = leaveKey(item);
+  recentSavedLeaves = recentSavedLeaves.filter((x) => x.key !== key && x.id !== item.id);
+};
+
+export const markOtRecentlySaved = (items: OTAttendance[]): void => {
+  if (!items || items.length === 0) return;
+  pruneExpiredRecentSaved();
+  const expiresAt = Date.now() + RECENT_SAVED_TTL_MS;
+  items.forEach((item) => {
+    const key = otKey(item);
+    recentSavedOt = recentSavedOt.filter((x) => x.key !== key && x.id !== item.id);
+    recentSavedOt.unshift({ key, id: item.id, item, expiresAt });
+  });
+};
+
+export const removeOtRecentlySaved = (item: OTAttendance): void => {
+  const key = otKey(item);
+  recentSavedOt = recentSavedOt.filter((x) => x.key !== key && x.id !== item.id);
+};
+
+export const clearAllRecentlySaved = (): void => {
+  recentSavedWorkloads = [];
+  recentSavedLeaves = [];
+  recentSavedOt = [];
+};
+
 function pruneOutboxSyncedAgainstRemote(params: {
   remoteWKeys?: Set<string>;
   remoteLKeys?: Set<string>;
@@ -2405,9 +2474,16 @@ function mergeRemoteDataRows(
     const sheetWKeys = new Set(sheetWorkloads.map(workloadKey));
     pruneOutboxSyncedAgainstRemote({ remoteWKeys: sheetWKeys });
 
+    pruneExpiredRecentSaved();
+    recentSavedWorkloads = recentSavedWorkloads.filter((x) => !sheetWKeys.has(x.key));
+
     const outboxAndJustPushedW: DailyWorkload[] = [];
     const seenPendingW = new Set<string>();
-    [...getPendingOutboxWorkloads(), ...(extra?.justPushedWorkloads || [])].forEach((w) => {
+    [
+      ...getPendingOutboxWorkloads(),
+      ...(extra?.justPushedWorkloads || []),
+      ...recentSavedWorkloads.map((x) => x.item),
+    ].forEach((w) => {
       const normalized = normalizeWorkloadRecord(
         { ...w, totalPt: getEffectiveTotalPt(w) },
         remotePremiumClinics
@@ -2468,9 +2544,16 @@ function mergeRemoteDataRows(
     const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
     pruneOutboxSyncedAgainstRemote({ remoteLKeys: sheetLKeys });
 
+    pruneExpiredRecentSaved();
+    recentSavedLeaves = recentSavedLeaves.filter((x) => !sheetLKeys.has(x.key));
+
     const outboxAndJustPushedL: LeaveRecord[] = [];
     const seenPendingL = new Set<string>();
-    [...getPendingOutboxLeaves(), ...(extra?.justPushedLeaves || [])].forEach((l) => {
+    [
+      ...getPendingOutboxLeaves(),
+      ...(extra?.justPushedLeaves || []),
+      ...recentSavedLeaves.map((x) => x.item),
+    ].forEach((l) => {
       const k = leaveKey(l);
       if (!deletedLKeys.has(k) && !sheetLKeys.has(k) && !seenPendingL.has(l.id || k)) {
         seenPendingL.add(l.id || k);
@@ -2520,9 +2603,16 @@ function mergeRemoteDataRows(
     const sheetOKeys = new Set(sheetOt.map(otKey));
     pruneOutboxSyncedAgainstRemote({ remoteOKeys: sheetOKeys });
 
+    pruneExpiredRecentSaved();
+    recentSavedOt = recentSavedOt.filter((x) => !sheetOKeys.has(x.key));
+
     const outboxAndJustPushedO: OTAttendance[] = [];
     const seenPendingO = new Set<string>();
-    [...getPendingOutboxOt(), ...(extra?.justPushedOt || [])].forEach((o) => {
+    [
+      ...getPendingOutboxOt(),
+      ...(extra?.justPushedOt || []),
+      ...recentSavedOt.map((x) => x.item),
+    ].forEach((o) => {
       const k = otKey(o);
       if (!deletedOKeys.has(k) && !sheetOKeys.has(k) && !seenPendingO.has(o.id || k)) {
         seenPendingO.add(o.id || k);

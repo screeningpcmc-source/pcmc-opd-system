@@ -45,6 +45,7 @@ import {
   formatThaiShortDate,
   formatThaiDateTime,
   THAI_SHORT_MONTHS,
+  getLocalTodayIso,
 } from '../utils/thaiDate';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
@@ -148,7 +149,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   isAdmin = false,
   onPromptAdminUnlock,
 }) => {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalTodayIso();
 
   const [date, setDate] = useState<string>(todayStr);
   const [shift, setShift] = useState<WorkShift>('ในเวลา 08:00-16:00');

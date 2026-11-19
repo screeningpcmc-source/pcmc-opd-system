@@ -31,7 +31,7 @@ import {
   getWorkloadRolePosition
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
-import { THAI_MONTHS, formatThaiShortDate } from '../utils/thaiDate';
+import { THAI_MONTHS, formatThaiShortDate, getLocalCurrentMonthIso } from '../utils/thaiDate';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { 
@@ -81,7 +81,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
 }) => {
   // Current month string YYYY-MM
-  const currentMonthStr = new Date().toISOString().slice(0, 7);
+  const currentMonthStr = getLocalCurrentMonthIso();
 
   const [selectedMonth, setSelectedMonth] = useState<string>(currentMonthStr);
   const [selectedShift, setSelectedShift] = useState<string>('ในเวลา 08:00-16:00');

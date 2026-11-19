@@ -26,7 +26,7 @@ import {
   isValidEmployeeCodeValue
 } from '../types';
 import { markReferralClinicRemovedByAdmin } from '../services/sheetsService';
-import { formatThaiShortDate } from '../utils/thaiDate';
+import { formatThaiShortDate, getLocalTodayIso } from '../utils/thaiDate';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
 import {
   verifyAdminPinWithOwner,
@@ -134,7 +134,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [clinicFilter, setClinicFilter] = useState<string>('ALL');
 
   // Add new staff form state (No visible internal Staff ID, with Employee Code)
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalTodayIso();
   const [showAddForm, setShowAddForm] = useState<boolean>(false);
   const [newEmployeeCode, setNewEmployeeCode] = useState<string>('');
   const [newName, setNewName] = useState<string>('');
@@ -365,7 +365,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setNewEmployeeCode('');
     setNewName('');
     setNewStatus('Active');
-    setNewStartDate(new Date().toISOString().split('T')[0]);
+    setNewStartDate(getLocalTodayIso());
     setShowAddForm(false);
   };
 

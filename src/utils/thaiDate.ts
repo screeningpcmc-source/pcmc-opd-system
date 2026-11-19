@@ -122,3 +122,21 @@ export function formatThaiDateTime(isoTimestamp: string): string {
   const mm = String(d.getMinutes()).padStart(2, '0');
   return `${day} ${month} ${beYear} เวลา ${hh}:${mm} น.`;
 }
+
+/**
+ * Returns local calendar date YYYY-MM-DD (avoids UTC day-shift before 07:00 ICT).
+ */
+export function getLocalTodayIso(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Returns local calendar month YYYY-MM.
+ */
+export function getLocalCurrentMonthIso(): string {
+  return getLocalTodayIso().slice(0, 7);
+}

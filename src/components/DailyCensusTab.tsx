@@ -16,7 +16,7 @@ import {
   isReferralWorkload,
   normalizeReferralData,
 } from '../types';
-import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS } from '../utils/thaiDate';
+import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
 import { exportElementAsJpeg } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
@@ -76,7 +76,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   onUpdateWorkload,
   onDeleteWorkload
 }) => {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalTodayIso();
 
   const [date, setDate] = useState<string>(todayStr);
   const [shiftFilter, setShiftFilter] = useState<string>('ALL');

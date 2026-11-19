@@ -77,6 +77,7 @@ import {
   splitThaiName,
   THAI_MONTHS,
   THAI_SHORT_MONTHS,
+  getLocalTodayIso,
 } from '../utils/thaiDate';
 import {
   calculateGovernmentLeaveStats,
@@ -235,7 +236,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   onUpdateOT,
   onDeleteOT,
 }) => {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalTodayIso();
 
   const [activeSubTab, setActiveSubTab] = useState<'leave' | 'ot' | 'fiscalSummary' | 'otPayReport'>('leave');
   const [summaryReportMode, setSummaryReportMode] = useState<'ALL' | 'WORK_OT' | 'LEAVE_REPORT'>('ALL');
@@ -293,6 +294,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [leaveSearchStaff, setLeaveSearchStaff] = useState<string>('');
   const [leaveFilterType, setLeaveFilterType] = useState<string>('ALL');
   const [showAllLeaveHistory, setShowAllLeaveHistory] = useState<boolean>(false);
+  const [recentSavedLeaveIds, setRecentSavedLeaveIds] = useState<string[]>([]);
   const [leaveCalView, setLeaveCalView] = useState<'month' | 'week' | 'day'>('month');
   const [leaveCalAnchor, setLeaveCalAnchor] = useState<string>(todayStr);
   const [leaveCalStaff, setLeaveCalStaff] = useState<string>('ALL');
@@ -401,7 +403,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     });
   }, [leaves, leaveSearchStaff, leaveFilterType]);
 
-  // Prioritize upcoming 5-7 nearest leaves by default; user can toggle to see full list
+  // Prioritize upcoming 5-7 nearest leaves by default; always keep newly saved records immediately visible
   const leaveHistoryDisplay = useMemo(() => {
     const upcoming = filteredLeaves
       .filter((lv) => (lv.endDate || lv.startDate || '') >= todayStr)
@@ -412,14 +414,22 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
     const hasUpcoming = upcoming.length > 0;
     const defaultSlice = hasUpcoming ? upcoming.slice(0, 7) : past.slice(0, 7);
-    const rows = showAllLeaveHistory ? filteredLeaves : defaultSlice;
+    const pinnedRecent = recentSavedLeaveIds
+      .map((id) => filteredLeaves.find((lv) => lv.id === id))
+      .filter((lv): lv is LeaveRecord => Boolean(lv));
+    const pinnedIds = new Set(pinnedRecent.map((lv) => lv.id));
+    const compactRows =
+      pinnedRecent.length > 0
+        ? [...pinnedRecent, ...defaultSlice.filter((lv) => !pinnedIds.has(lv.id))]
+        : defaultSlice;
+    const rows = showAllLeaveHistory ? filteredLeaves : compactRows;
     return {
       rows,
       upcomingCount: upcoming.length,
       showingUpcomingOnly: !showAllLeaveHistory && hasUpcoming,
-      isTruncated: !showAllLeaveHistory && filteredLeaves.length > defaultSlice.length,
+      isTruncated: !showAllLeaveHistory && filteredLeaves.length > compactRows.length,
     };
-  }, [filteredLeaves, todayStr, showAllLeaveHistory]);
+  }, [filteredLeaves, todayStr, showAllLeaveHistory, recentSavedLeaveIds]);
 
   // Business rule: "การไปอบรม/ประชุมไม่นับเป็นวันลา ให้ถือเป็นวันทำงานตามปกติ"
   const totalFilteredLeaveDays = useMemo(() => {
@@ -676,6 +686,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     };
 
     onSaveLeave(newLeave);
+    setRecentSavedLeaveIds((prev) => [newLeave.id, ...prev.filter((id) => id !== newLeave.id)]);
+    setLeaveCalAnchor(leaveStartDate);
     setLeaveNote('');
     setLeaveHalfPeriod('');
     setLeaveStaffId('');
@@ -822,6 +834,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }));
 
     onSaveBatchOT([...opdRecords, ...extRecords]);
+    setOtCalAnchor(otDate);
     setSelectedStaffIds([]);
     setSelectedOtHoursByStaffId({});
     setExternalOtStaff([]);

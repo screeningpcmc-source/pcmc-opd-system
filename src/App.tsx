@@ -89,9 +89,16 @@ import {
   appendViaAppsScript,
   syncPublicViaAppsScript,
   syncAdminViaAppsScript,
-  appendAuditViaAppsScript
+  appendAuditViaAppsScript,
+  markWorkloadsRecentlySaved,
+  removeWorkloadRecentlySaved,
+  markLeavesRecentlySaved,
+  removeLeaveRecentlySaved,
+  markOtRecentlySaved,
+  removeOtRecentlySaved,
+  clearAllRecentlySaved
 } from './services/sheetsService';
-import { formatThaiLeaveRange, formatThaiShortDate } from './utils/thaiDate';
+import { formatThaiLeaveRange, formatThaiShortDate, getLocalTodayIso } from './utils/thaiDate';
 import { 
   initAuth, 
   logout, 
@@ -142,6 +149,7 @@ export default function App() {
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   // Auto-save local database whenever db changes & notify other open tabs in same browser
   useEffect(() => {
@@ -259,6 +267,10 @@ export default function App() {
 
   // Show toast notification
   const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToastMessage({ text, type });
     if (type === 'success') {
       try {
@@ -272,7 +284,8 @@ export default function App() {
         // Safe fallback
       }
     }
-    setTimeout(() => {
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
       setToastMessage(null);
     }, 3500);
   };
@@ -402,12 +415,6 @@ export default function App() {
     isSyncInFlightRef.current = true;
     setIsSyncingSheet(true);
     try {
-      const token = await getPassiveGoogleToken();
-      if (mutationSeqRef.current !== startSeq) {
-        pendingSyncAfterFlightRef.current = true;
-        return;
-      }
-
       const applySyncedDb = (nextDb: typeof currentDb) => {
         if (mutationSeqRef.current !== startSeq) {
           pendingSyncAfterFlightRef.current = true;
@@ -446,20 +453,27 @@ export default function App() {
         }
       }
 
-      if (token && targetSheetId) {
-        const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-        applySyncedDb({
-          ...result.mergedDb,
-          settings: {
-            ...result.mergedDb.settings,
-            spreadsheetId: targetSheetId,
-            spreadsheetUrl:
-              result.mergedDb.settings.spreadsheetUrl ||
-              `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-            gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
-          },
-        });
-        return;
+      if (targetSheetId) {
+        const token = await getPassiveGoogleToken();
+        if (mutationSeqRef.current !== startSeq) {
+          pendingSyncAfterFlightRef.current = true;
+          return;
+        }
+        if (token) {
+          const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
+          applySyncedDb({
+            ...result.mergedDb,
+            settings: {
+              ...result.mergedDb.settings,
+              spreadsheetId: targetSheetId,
+              spreadsheetUrl:
+                result.mergedDb.settings.spreadsheetUrl ||
+                `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+              gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
+            },
+          });
+          return;
+        }
       }
 
       if (targetSheetId) {
@@ -886,9 +900,16 @@ export default function App() {
     });
 
     clearWorkloadTombstone(entry);
+    markWorkloadsRecentlySaved([entry]);
     enqueuePendingOutboxWorkloads([entry]);
-    if (newLeaveEntries.length > 0) enqueuePendingOutboxLeaves(newLeaveEntries);
-    if (newOtEntries.length > 0) enqueuePendingOutboxOt(newOtEntries);
+    if (newLeaveEntries.length > 0) {
+      markLeavesRecentlySaved(newLeaveEntries);
+      enqueuePendingOutboxLeaves(newLeaveEntries);
+    }
+    if (newOtEntries.length > 0) {
+      markOtRecentlySaved(newOtEntries);
+      enqueuePendingOutboxOt(newOtEntries);
+    }
 
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
@@ -903,25 +924,31 @@ export default function App() {
 
     showToast(`บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`, 'success');
 
-    // Auto-Sync on Save (append-only) to Google Sheets when Auto-Sync is enabled
+    // Auto-Sync on Save (append-only, batched & parallelized) to Google Sheets when Auto-Sync is enabled
     if (dbRef.current.settings.autoSync === false) return;
     const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
     if (targetGasUrl) {
-      let allOk = await appendViaAppsScript(targetGasUrl, 'appendWorkload', entry);
-      if (allOk) markWorkloadOutboxSynced([entry]);
-      for (const l of newLeaveEntries) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', l);
-        if (ok) markLeaveOutboxSynced([l]);
-        else allOk = false;
-      }
-      for (const o of newOtEntries) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', o);
-        if (ok) markOtOutboxSynced([o]);
-        else allOk = false;
-      }
-      if (allOk) {
+      const [wOk, lOk, oOk] = await Promise.all([
+        appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
+          if (ok) markWorkloadOutboxSynced([entry]);
+          return ok;
+        }),
+        newLeaveEntries.length > 0
+          ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+              if (ok) markLeaveOutboxSynced(newLeaveEntries);
+              return ok;
+            })
+          : Promise.resolve(true),
+        newOtEntries.length > 0
+          ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+              if (ok) markOtOutboxSynced(newOtEntries);
+              return ok;
+            })
+          : Promise.resolve(true),
+      ]);
+      if (wOk && lOk && oOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
@@ -931,18 +958,21 @@ export default function App() {
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        const wOk = await appendDailyWorkloadToSheet(token, targetSheetId, entry);
-        if (wOk) markWorkloadOutboxSynced([entry]);
-        for (const l of newLeaveEntries) {
-          if (await appendLeaveToSheet(token, targetSheetId, l)) {
-            markLeaveOutboxSynced([l]);
-          }
-        }
-        for (const o of newOtEntries) {
-          if (await appendOTToSheet(token, targetSheetId, o)) {
-            markOtOutboxSynced([o]);
-          }
-        }
+        await Promise.all([
+          appendDailyWorkloadToSheet(token, targetSheetId, entry).then((ok) => {
+            if (ok) markWorkloadOutboxSynced([entry]);
+          }),
+          ...newLeaveEntries.map((l) =>
+            appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+              if (ok) markLeaveOutboxSynced([l]);
+            })
+          ),
+          ...newOtEntries.map((o) =>
+            appendOTToSheet(token, targetSheetId, o).then((ok) => {
+              if (ok) markOtOutboxSynced([o]);
+            })
+          ),
+        ]);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
@@ -1080,9 +1110,16 @@ export default function App() {
     });
 
     entries.forEach(clearWorkloadTombstone);
+    markWorkloadsRecentlySaved(entries);
     enqueuePendingOutboxWorkloads(entries);
-    if (newLeaveEntries.length > 0) enqueuePendingOutboxLeaves(newLeaveEntries);
-    if (newOtEntries.length > 0) enqueuePendingOutboxOt(newOtEntries);
+    if (newLeaveEntries.length > 0) {
+      markLeavesRecentlySaved(newLeaveEntries);
+      enqueuePendingOutboxLeaves(newLeaveEntries);
+    }
+    if (newOtEntries.length > 0) {
+      markOtRecentlySaved(newOtEntries);
+      enqueuePendingOutboxOt(newOtEntries);
+    }
 
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
@@ -1108,19 +1145,25 @@ export default function App() {
     const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
     if (targetGasUrl) {
-      let allOk = await appendViaAppsScript(targetGasUrl, 'appendWorkload', entries);
-      if (allOk) markWorkloadOutboxSynced(entries);
-      for (const l of newLeaveEntries) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', l);
-        if (ok) markLeaveOutboxSynced([l]);
-        else allOk = false;
-      }
-      for (const o of newOtEntries) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', o);
-        if (ok) markOtOutboxSynced([o]);
-        else allOk = false;
-      }
-      if (allOk) {
+      const [wOk, lOk, oOk] = await Promise.all([
+        appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
+          if (ok) markWorkloadOutboxSynced(entries);
+          return ok;
+        }),
+        newLeaveEntries.length > 0
+          ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+              if (ok) markLeaveOutboxSynced(newLeaveEntries);
+              return ok;
+            })
+          : Promise.resolve(true),
+        newOtEntries.length > 0
+          ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+              if (ok) markOtOutboxSynced(newOtEntries);
+              return ok;
+            })
+          : Promise.resolve(true),
+      ]);
+      if (wOk && lOk && oOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
       } else {
@@ -1130,18 +1173,21 @@ export default function App() {
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        const wOk = await appendDailyWorkloadToSheet(token, targetSheetId, entries);
-        if (wOk) markWorkloadOutboxSynced(entries);
-        for (const l of newLeaveEntries) {
-          if (await appendLeaveToSheet(token, targetSheetId, l)) {
-            markLeaveOutboxSynced([l]);
-          }
-        }
-        for (const o of newOtEntries) {
-          if (await appendOTToSheet(token, targetSheetId, o)) {
-            markOtOutboxSynced([o]);
-          }
-        }
+        await Promise.all([
+          appendDailyWorkloadToSheet(token, targetSheetId, entries).then((ok) => {
+            if (ok) markWorkloadOutboxSynced(entries);
+          }),
+          ...newLeaveEntries.map((l) =>
+            appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+              if (ok) markLeaveOutboxSynced([l]);
+            })
+          ),
+          ...newOtEntries.map((o) =>
+            appendOTToSheet(token, targetSheetId, o).then((ok) => {
+              if (ok) markOtOutboxSynced([o]);
+            })
+          ),
+        ]);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
@@ -1563,6 +1609,7 @@ export default function App() {
         )
       : false;
     if (prevItem) {
+      removeWorkloadRecentlySaved(prevItem);
       if (prevWasInOutbox) {
         markWorkloadOutboxSynced([prevItem]);
       }
@@ -1573,6 +1620,7 @@ export default function App() {
       }
     }
     clearWorkloadTombstone(stamped);
+    markWorkloadsRecentlySaved([stamped]);
 
     mutationSeqRef.current += 1;
     const opSeq = mutationSeqRef.current;
@@ -1629,6 +1677,7 @@ export default function App() {
 
     const nextWorkloads = baseDb.workloads.filter(w => w.id !== id);
     if (target) {
+      removeWorkloadRecentlySaved(target);
       markWorkloadOutboxSynced([target]);
       const targetKey = getWorkloadKey(target);
       if (!nextWorkloads.some(w => getWorkloadKey(w) === targetKey)) {
@@ -1693,6 +1742,7 @@ export default function App() {
     }
 
     clearLeaveTombstone(leave);
+    markLeavesRecentlySaved([leave]);
     enqueuePendingOutboxLeaves([leave]);
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
@@ -1774,6 +1824,7 @@ export default function App() {
         )
       : false;
     if (prevItem) {
+      removeLeaveRecentlySaved(prevItem);
       if (prevWasInOutbox) {
         markLeaveOutboxSynced([prevItem]);
       }
@@ -1784,6 +1835,7 @@ export default function App() {
       }
     }
     clearLeaveTombstone(stamped);
+    markLeavesRecentlySaved([stamped]);
 
     mutationSeqRef.current += 1;
     const opSeq = mutationSeqRef.current;
@@ -1840,6 +1892,7 @@ export default function App() {
 
     const nextLeaves = baseDb.leaves.filter(l => l.id !== id);
     if (target) {
+      removeLeaveRecentlySaved(target);
       markLeaveOutboxSynced([target]);
       const targetKey = getLeaveKey(target);
       if (!nextLeaves.some(l => getLeaveKey(l) === targetKey)) {
@@ -1890,6 +1943,7 @@ export default function App() {
     if (validRecords.length === 0) return;
 
     validRecords.forEach(clearOtTombstone);
+    markOtRecentlySaved(validRecords);
     enqueuePendingOutboxOt(validRecords);
     mutationSeqRef.current += 1;
     const baseDb = dbRef.current;
@@ -1918,11 +1972,13 @@ export default function App() {
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
-        for (const r of validRecords) {
-          if (await appendOTToSheet(token, targetSheetId, r)) {
-            markOtOutboxSynced([r]);
-          }
-        }
+        await Promise.all(
+          validRecords.map((r) =>
+            appendOTToSheet(token, targetSheetId, r).then((ok) => {
+              if (ok) markOtOutboxSynced([r]);
+            })
+          )
+        );
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
@@ -1972,6 +2028,7 @@ export default function App() {
         )
       : false;
     if (prevItem) {
+      removeOtRecentlySaved(prevItem);
       if (prevWasInOutbox) {
         markOtOutboxSynced([prevItem]);
       }
@@ -1982,6 +2039,7 @@ export default function App() {
       }
     }
     clearOtTombstone(stamped);
+    markOtRecentlySaved([stamped]);
 
     mutationSeqRef.current += 1;
     const opSeq = mutationSeqRef.current;
@@ -2085,6 +2143,7 @@ export default function App() {
 
     const nextOt = baseDb.ot.filter(o => o.id !== id);
     if (target) {
+      removeOtRecentlySaved(target);
       markOtOutboxSynced([target]);
       const targetKey = getOtKey(target);
       if (!nextOt.some(o => getOtKey(o) === targetKey)) {
@@ -2276,7 +2335,7 @@ export default function App() {
       return;
     }
     const baseDb = dbRef.current;
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getLocalTodayIso();
     const prevTarget = baseDb.staff.find(s => s.staffId === staffId);
     let updatedTarget: StaffMember | undefined;
     const nextStaff = baseDb.staff.map(s => {
@@ -2377,6 +2436,7 @@ export default function App() {
     localStorage.removeItem('pcmc_opd_system_db_v1');
     clearAllTombstones();
     clearAllPendingOutbox();
+    clearAllRecentlySaved();
     clearWorkloadsDirty();
     clearLeavesDirty();
     clearOtDirty();
