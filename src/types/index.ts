@@ -26,7 +26,7 @@ export const DAILY_WAGE_POSITIONS: StaffPosition[] = [
   'Service Worker (Daily Wage)',
 ];
 
-export const isDailyWorkloadExcludedPosition = (pos?: string): boolean => {
+export const isDailyWagePosition = (pos?: string): boolean => {
   const compact = (pos || '').trim().replace(/\s+/g, ' ');
   if (!compact) return false;
   return (
@@ -118,7 +118,18 @@ export const normalizeStaffPosition = (pos?: string): StaffPosition => {
 
 export const isNaEquivalentPosition = (pos?: string): boolean => {
   const norm = normalizeStaffPosition(pos);
-  return norm === 'NA' || norm === 'PCA' || norm === 'Clerk (Referral)';
+  return norm === 'NA' || norm === 'PCA' || norm === 'Clerk (Referral)' || norm === 'NA (Daily Wage)';
+};
+
+/** Maps daily-wage and equivalent special positions to their core workload bucket while keeping Staff_Master/OT role distinct. */
+export const getWorkloadRolePosition = (pos?: string): StaffPosition => {
+  const norm = normalizeStaffPosition(pos);
+  if (norm === 'RN (Daily Wage)') return 'RN';
+  if (norm === 'PN (Daily Wage)') return 'PN';
+  if (norm === 'NA (Daily Wage)' || norm === 'PCA' || norm === 'Clerk (Referral)') return 'NA';
+  if (norm === 'Clerk (Daily Wage)') return 'Clerk';
+  if (norm === 'Service Worker (Daily Wage)') return 'Service Worker';
+  return norm;
 };
 
 export type StaffStatus = 'Active' | 'Resigned' | 'Retired';
@@ -654,7 +665,7 @@ export const formatPositionLabel = (pos: StaffPosition | string): string => {
   if (pos === 'NA (Daily Wage)') return 'ผู้ช่วยคนไข้(จ้างรายวัน)';
   if (pos === 'Clerk (Daily Wage)') return 'ผู้ปฏิบัติงานทั่วไป(จ้างรายวัน)';
   if (pos === 'Service Worker (Daily Wage)') return 'พนักงานบริการ(จ้างรายวัน)';
-  if (isDailyWorkloadExcludedPosition(pos)) return POSITION_LABELS[normalizeStaffPosition(pos)];
+  if (isDailyWagePosition(pos)) return POSITION_LABELS[normalizeStaffPosition(pos)];
   return pos;
 };
 

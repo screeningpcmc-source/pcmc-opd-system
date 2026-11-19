@@ -20,7 +20,7 @@ import {
   LEGACY_PREMIUM_CLINIC_GROUP,
   compareStaffByPositionAndStartDate,
   isTrainingLeaveType,
-  isDailyWorkloadExcludedPosition,
+  isDailyWagePosition,
   parseLeavePeriodFromNote,
   stripLeavePeriodFromNote,
   formatLeaveNoteWithPeriod,
@@ -926,7 +926,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           return false;
         }
         if (fiscalPositionFilter === 'DAILY_WAGE_ALL') {
-          if (!isDailyWorkloadExcludedPosition(item.staff.position)) return false;
+          if (!isDailyWagePosition(item.staff.position)) return false;
         } else if (fiscalPositionFilter !== 'ALL' && item.staff.position !== fiscalPositionFilter) {
           return false;
         }
@@ -1163,7 +1163,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       .filter((person) => {
         if (clinicFilter !== 'ALL' && person.clinic !== clinicFilter) return false;
         if (fiscalPositionFilter === 'DAILY_WAGE_ALL') {
-          if (!isDailyWorkloadExcludedPosition(person.position)) return false;
+          if (!isDailyWagePosition(person.position)) return false;
         } else if (fiscalPositionFilter !== 'ALL' && person.position !== fiscalPositionFilter) {
           return false;
         }
@@ -3088,7 +3088,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       ? 'bg-emerald-100 text-emerald-800'
                                       : s.position === 'Clerk (Referral)'
                                         ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                        : isDailyWorkloadExcludedPosition(s.position)
+                                        : isDailyWagePosition(s.position)
                                           ? 'bg-sky-100 text-sky-800'
                                           : 'bg-gray-100 text-gray-800'
                               }`}
@@ -4192,7 +4192,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                             ? 'bg-emerald-100 text-emerald-800'
                                             : staff.position === 'Clerk (Referral)'
                                               ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                              : isDailyWorkloadExcludedPosition(staff.position)
+                                              : isDailyWagePosition(staff.position)
                                                 ? 'bg-sky-100 text-sky-800'
                                                 : 'bg-gray-100 text-gray-800'
                                   }`}
@@ -4345,7 +4345,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                         ? 'bg-emerald-100 text-emerald-800'
                                         : staff.position === 'Clerk (Referral)'
                                           ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                          : isDailyWorkloadExcludedPosition(staff.position)
+                                          : isDailyWagePosition(staff.position)
                                             ? 'bg-sky-100 text-sky-800'
                                             : 'bg-gray-100 text-gray-800'
                               }`}

@@ -37,7 +37,8 @@ import {
   isReferralClinicName,
   isReferralWorkload,
   normalizeReferralData,
-  isDailyWorkloadExcludedPosition,
+  isDailyWagePosition,
+  getWorkloadRolePosition,
   normalizeStaffPosition,
 } from '../types';
 import {
@@ -399,12 +400,11 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       if (s.status !== 'Active') return;
       if (s.startDate && s.startDate > date) return;
       if (s.endDate && s.endDate < date) return;
-      if (isDailyWorkloadExcludedPosition(s.position)) return;
       if (normalizeUnit(s.homeClinic) !== targetUnit) return;
-      const pos = normalizeStaffPosition(s.position);
+      const pos = getWorkloadRolePosition(s.position);
       if (pos === 'RN') counts.rn += 1;
       else if (pos === 'PN') counts.pn += 1;
-      else if (pos === 'NA' || pos === 'PCA' || pos === 'Clerk (Referral)') counts.na += 1;
+      else if (pos === 'NA') counts.na += 1;
       else if (pos === 'Clerk') counts.clerk += 1;
       else if (pos === 'Service Worker') counts.serviceWorker += 1;
     });
@@ -480,14 +480,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setTotalPt(adultPt + v);
   };
 
-  // Filter & sort staff by position rank (1→6) and startDate (exclude Daily Wage / จ้างรายวัน from daily workload)
+  // Filter & sort staff by position rank (1→12) and startDate (includes Daily Wage staff counted in workload)
   const clinicStaff = useMemo(
     () =>
       staffList
         .filter(
           s =>
             s.status === 'Active' &&
-            !isDailyWorkloadExcludedPosition(s.position) &&
             (isPremiumClinic
               ? s.homeClinic === PREMIUM_CLINIC_GROUP || s.homeClinic === LEGACY_PREMIUM_CLINIC_GROUP
               : s.homeClinic === clinic)
@@ -500,7 +499,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       staffList.filter(
         s =>
           s.status === 'Active' &&
-          isDailyWorkloadExcludedPosition(s.position) &&
+          isDailyWagePosition(s.position) &&
           (isPremiumClinic
             ? s.homeClinic === PREMIUM_CLINIC_GROUP || s.homeClinic === LEGACY_PREMIUM_CLINIC_GROUP
             : s.homeClinic === clinic)
@@ -510,12 +509,12 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const activeStaffAll = useMemo(
     () =>
       staffList
-        .filter(s => s.status === 'Active' && !isDailyWorkloadExcludedPosition(s.position))
+        .filter(s => s.status === 'Active')
         .sort(compareStaffByPositionAndStartDate),
     [staffList]
   );
 
-  // Live 3-Point Verification across ALL 6 positions:
+  // Live 3-Point Verification across ALL 5 core workload buckets:
   // (1) Working staff entered == (3) Full department roster - (2) Leaves & Outgoing Cross-Cover (0.5 / 1.0) + Incoming Cross-Cover/Substitute
   // IMPORTANT BUSINESS RULE: "ไปอบรม/ประชุม" counts as normal workday (NOT leave / NOT subtracted)
   const dayStaffingCheck = useMemo(() => {
@@ -532,10 +531,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       }
       return trimmed;
     };
-    const normalizePos = (pos?: string): StaffPosition => {
-      const np = normalizeStaffPosition(pos);
-      return np === 'Clerk (Referral)' || np === 'PCA' ? 'NA' : np;
-    };
+    const normalizePos = (pos?: string): StaffPosition => getWorkloadRolePosition(pos);
     const isActiveOnDate = (s: StaffMember) => {
       if (s.status !== 'Active') return false;
       if (s.startDate && s.startDate > date) return false;
@@ -558,8 +554,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       s =>
         isActiveOnDate(s) &&
         normalizeUnit(s.homeClinic) === targetUnit &&
-        normalizePos(s.position) !== 'HN' &&
-        !isDailyWorkloadExcludedPosition(s.position)
+        normalizePos(s.position) !== 'HN'
     );
     const baseTotalAll = baselineStaff.length;
     const nursingPositions: StaffPosition[] = ['RN', 'PN', 'NA'];
@@ -587,7 +582,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         const name = (l.staffName || '').trim();
         if (!name) return;
         const resolvedPos = staffPosMap.get(name) || normalizePos(l.position);
-        if (isDailyWorkloadExcludedPosition(resolvedPos)) return;
         const sDate = (l.startDate || '').trim();
         const eDate = (l.endDate || l.startDate || '').trim();
         if (!sDate || date < sDate || date > eDate) return;
@@ -620,7 +614,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
         absents.push({
           name,
-          pos: normalizePos(l.position),
+          pos: resolvedPos,
           amount: amt,
           detail: `${name} (${desc})`,
         });
@@ -692,7 +686,6 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
         const cleanOtName = (o.staffName || '').trim();
         const pos = (cleanOtName && staffPosMap.get(cleanOtName)) || normalizePos(o.position);
-        if (isDailyWorkloadExcludedPosition(pos)) return;
         const parsedWork = parseOtWorkClinic(o.workClinic);
         const hUnit = normalizeUnit(o.homeClinic || staffUnitMap.get(cleanOtName) || '');
         const wUnit = normalizeUnit(parsedWork.clinic);
@@ -809,7 +802,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     };
 
     const trackedPositions = ALL_POSITIONS.filter(
-      pos => pos !== 'HN' && pos !== 'Clerk (Referral)' && !isDailyWorkloadExcludedPosition(pos)
+      pos => pos !== 'HN' && pos !== 'Clerk (Referral)' && !isDailyWagePosition(pos)
     );
 
     const positionRows = trackedPositions.map(pos => {
@@ -1779,7 +1772,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
               {dailyWageClinicStaffCount > 0 && (
                 <div className="rounded-lg bg-sky-50 border border-sky-200 px-3 py-1.5 text-[11px] text-sky-900 font-medium">
-                  หมายเหตุ: แผนกนี้มีเจ้าหน้าที่ตำแหน่ง <strong>"จ้างรายวัน"</strong> {dailyWageClinicStaffCount} คน ซึ่งจะไม่นับรวมในภาระงานประจำวัน (สามารถบันทึกวันลา/OT เพื่อคิด Unit Cost ประจำปีได้ที่เมนู 2)
+                  หมายเหตุ: แผนกนี้มีเจ้าหน้าที่ตำแหน่ง <strong>"จ้างรายวัน"</strong> {dailyWageClinicStaffCount} คน (นับรวมกำลังคนในภาระงานประจำวันตามกลุ่มตำแหน่งหลักแล้ว โดยยังคงตำแหน่งจ้างรายวันไว้สำหรับทะเบียน วันลา และ OT/Unit Cost)
                 </div>
               )}
 
@@ -2585,7 +2578,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                             onChange={(e) => setCrossExtPosition(e.target.value as StaffPosition)}
                             className="w-full rounded-lg border border-gray-300 py-1.5 px-2.5 text-xs bg-white"
                           >
-                            {ALL_POSITIONS.filter(p => !isDailyWorkloadExcludedPosition(p)).map(p => (
+                            {ALL_POSITIONS.filter(p => !isDailyWagePosition(p)).map(p => (
                               <option key={p} value={p}>{formatPositionLabel(p)}</option>
                             ))}
                           </select>

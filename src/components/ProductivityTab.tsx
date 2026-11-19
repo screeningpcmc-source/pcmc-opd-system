@@ -28,8 +28,7 @@ import {
   isReferralWorkload,
   formatReferralSummaryText,
   normalizeReferralData,
-  normalizeStaffPosition,
-  isDailyWorkloadExcludedPosition
+  getWorkloadRolePosition
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate } from '../utils/thaiDate';
@@ -322,8 +321,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   };
 
   const isNursingRole = (pos?: string): boolean => {
-    const norm = normalizeStaffPosition(pos);
-    return norm === 'RN' || norm === 'PN' || norm === 'NA' || norm === 'PCA' || norm === 'Clerk (Referral)';
+    const norm = getWorkloadRolePosition(pos);
+    return norm === 'RN' || norm === 'PN' || norm === 'NA';
   };
 
   const isStaffActiveOnDate = (s: StaffMember, dateStr: string): boolean => {
@@ -456,8 +455,6 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (includesInTime) {
         const seenLeaveKeys = new Set<string>();
         leaves.forEach((l) => {
-          const effPos = staffPositionByName.get((l.staffName || '').trim()) || l.position;
-          if (isDailyWorkloadExcludedPosition(effPos)) return;
           const start = (l.startDate || '').trim();
           const end = (l.endDate || l.startDate || '').trim();
           if (!start || dateStr < start || dateStr > end) return;
@@ -497,8 +494,6 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       // 2. Cross-Unit Coverage & Substitute OT
       const seenOtKeys = new Set<string>();
       otRecords.forEach((o) => {
-        const effPos = staffPositionByName.get((o.staffName || '').trim()) || o.position;
-        if (isDailyWorkloadExcludedPosition(effPos)) return;
         if ((o.date || '').trim() !== dateStr) return;
 
         // Match shift
@@ -645,11 +640,10 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           (o) => {
             const effPos = staffPositionByName.get((o.staffName || '').trim()) || o.position;
             return (
-              !isDailyWorkloadExcludedPosition(effPos) &&
               o.date === g.date &&
               o.shift === selectedShift &&
               normalizeClinicUnit(parseOtWorkClinic(o.workClinic).clinic) === g.unit &&
-              isNursingRole(o.position)
+              isNursingRole(effPos)
             );
           }
         );
@@ -742,12 +736,9 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           isStaffActiveOnDate(s, g.date) &&
           normalizeClinicUnit(s.homeClinic) === g.unit
       );
-      const baseRN = baseStaff.filter((s) => normalizeStaffPosition(s.position) === 'RN').length;
-      const basePN = baseStaff.filter((s) => normalizeStaffPosition(s.position) === 'PN').length;
-      const baseNA = baseStaff.filter((s) => {
-        const np = normalizeStaffPosition(s.position);
-        return np === 'NA' || np === 'PCA' || np === 'Clerk (Referral)';
-      }).length;
+      const baseRN = baseStaff.filter((s) => getWorkloadRolePosition(s.position) === 'RN').length;
+      const basePN = baseStaff.filter((s) => getWorkloadRolePosition(s.position) === 'PN').length;
+      const baseNA = baseStaff.filter((s) => getWorkloadRolePosition(s.position) === 'NA').length;
       const baselineCount = baseStaff.length;
       const baselineParts: string[] = [];
       if (baseRN > 0) baselineParts.push(`RN ${baseRN}`);
@@ -763,13 +754,12 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
 
       leaves.forEach((l) => {
         const effPos = staffPositionByName.get((l.staffName || '').trim()) || l.position;
-        if (isDailyWorkloadExcludedPosition(effPos)) return;
         const start = (l.startDate || '').trim();
         const end = (l.endDate || l.startDate || '').trim();
         if (!start || g.date < start || g.date > end) return;
         const unit = normalizeClinicUnit(l.clinic || staffClinicByName.get((l.staffName || '').trim()) || '');
         if (unit !== g.unit) return;
-        if (!isNursingRole(l.position)) return;
+        if (!isNursingRole(effPos)) return;
         const name = (l.staffName || '').trim();
         if (!name) return;
         const isTraining = isTrainingLeaveType(l.leaveType);
@@ -791,10 +781,9 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
 
       otRecords.forEach((o) => {
         const effPos = staffPositionByName.get((o.staffName || '').trim()) || o.position;
-        if (isDailyWorkloadExcludedPosition(effPos)) return;
         if ((o.date || '').trim() !== g.date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
-        if (!isNursingRole(o.position)) return;
+        if (!isNursingRole(effPos)) return;
         const parsedWork = parseOtWorkClinic(o.workClinic);
         const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
         const workUnit = normalizeClinicUnit(parsedWork.clinic);
@@ -818,10 +807,9 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       const incomingMap = new Map<string, { name: string; label: string; amount: number }>();
       otRecords.forEach((o) => {
         const effPos = staffPositionByName.get((o.staffName || '').trim()) || o.position;
-        if (isDailyWorkloadExcludedPosition(effPos)) return;
         if ((o.date || '').trim() !== g.date) return;
         if (o.shift !== 'ในเวลา 08:00-16:00' && o.shift !== 'OT ในเวลาราชการ 08:00-16:00') return;
-        if (!isNursingRole(o.position)) return;
+        if (!isNursingRole(effPos)) return;
         const parsedWork = parseOtWorkClinic(o.workClinic);
         const homeUnit = normalizeClinicUnit(o.homeClinic || staffClinicByName.get((o.staffName || '').trim()) || '');
         const workUnit = normalizeClinicUnit(parsedWork.clinic);
