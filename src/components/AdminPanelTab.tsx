@@ -289,7 +289,6 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   } | null>(null);
   const [showLinePreview, setShowLinePreview] = useState<boolean>(false);
   const [showLineSetupGuide, setShowLineSetupGuide] = useState<boolean>(false);
-  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState<boolean>(false);
 
   useEffect(() => {
     setNhppd(settings.nhppd);
@@ -2792,7 +2791,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono font-semibold text-gray-900 bg-white"
             />
             <span className="text-[10px] text-gray-500">
-              ค่าเริ่มต้นตั้งไว้ที่ <code className="bg-slate-100 px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> (หรือใช้ <code className="bg-slate-100 px-1 rounded">/groupid</code> ผ่าน Webhook)
+              ค่าเริ่มต้นตั้งไว้ที่ <code className="bg-slate-100 px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> (กลุ่ม &quot;หัวหน้าห้องตรวจ OPD&quot; — ใช้ Push API ได้เลยไม่ต้องเปิด Webhook)
             </span>
           </div>
 
@@ -2890,53 +2889,49 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         {showLineSetupGuide && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
             <div className="font-bold text-slate-900">
-              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 15:59 น. และวิธีแก้ Error (302 Found) ตอน Verify Webhook
+              วิธีแก้ปัญหา Webhook Verify (405 / 302) และขั้นตอนใช้งานส่งรายงานอัตโนมัติ 15:59 น. ให้เสถียร 100%
             </div>
-            <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-[11px] leading-relaxed">
-              <span className="font-bold">ส่งเข้ากลุ่มได้ทันทีโดยไม่ต้องกด Verify Webhook:</span>{' '}
-              เนื่องจากระบบมี Group ID ปลายทาง (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code>) และบอทอยู่ในกลุ่มแล้ว การกดปุ่ม <span className="font-semibold">ทดสอบส่งเข้า LINE กลุ่มทันที</span> และตารางส่ง <span className="font-semibold">15:59 น.</span> ใช้ Push API ซึ่งทำงานได้เลยโดย <span className="font-semibold">ไม่จำเป็นต้องเปิด Use webhook</span>
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-[11px] leading-relaxed space-y-1">
+              <div className="font-bold">
+                ไม่ต้องใช้ Webhook URL และไม่ต้องกด Verify (ให้ปิดสวิตช์ Use webhook เป็น OFF ได้เลย):
+              </div>
+              <div>
+                ระบบส่งรายงานเข้ากลุ่ม LINE ใช้ <span className="font-semibold">Push API (ส่งออกทางเดียว)</span>{' '}
+                โดยมี Group ID ปลายทาง (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code>)
+                และบอท <span className="font-semibold">&quot;บูบี้ ผู้ช่วย AI&quot;</span> อยู่ในกลุ่มแล้ว จึง{' '}
+                <span className="font-semibold">ไม่จำเป็นต้องเปิด Use webhook หรือใส่ Webhook URL ใน LINE Developers Console</span>{' '}
+                (การปิด <span className="font-semibold">Use webhook</span> และลบ URL ในช่อง Webhook ออก จะไม่กระทบการส่งรายงานใด ๆ ทั้งสิ้น และช่วยไม่ให้ LINE แจ้ง Error)
+              </div>
             </div>
-            <ol className="list-decimal list-inside space-y-2">
+            <ol className="list-decimal list-inside space-y-2 text-[11px] leading-relaxed">
               <li>
-                <span className="font-semibold text-red-800">สาเหตุที่ LINE Developers แจ้ง 302 Found:</span>{' '}
-                URL ของ Google Apps Script (<code className="bg-white border px-1 rounded font-mono">script.google.com/.../exec</code>) จะตอบกลับทุก POST ด้วย HTTP <code className="bg-white border px-1 rounded font-mono">302 Redirect</code> เสมอ ทำให้ปุ่ม Verify ของ LINE ปฏิเสธ (LINE บังคับต้องได้ <code className="bg-white border px-1 rounded font-mono">200 OK</code> โดยตรงเท่านั้น) จึง<span className="font-semibold">ห้ามนำ URL ของ Apps Script ไปใส่ใน Webhook URL</span>
+                <span className="font-semibold text-red-800">
+                  สาเหตุที่ขึ้น 405 Method Not Allowed (เช่น ลิงก์ <code className="bg-white border px-1 rounded font-mono">*.github.io/api/line/webhook</code>):
+                </span>{' '}
+                GitHub Pages เป็นโฮสต์สำหรับไฟล์หน้าเว็บสถิต (Static HTML/JS) เท่านั้น ไม่มีเซิร์ฟเวอร์ Node.js จึง{' '}
+                <span className="font-semibold">ปฏิเสธคำขอ HTTP POST ทุกชนิดด้วย Error 405</span> — ห้ามนำโดเมน GitHub Pages ไปใส่ในช่อง Webhook URL
               </li>
               <li>
-                หากต้องการเปิด Webhook (เพื่อใช้คำสั่ง <code className="bg-white border px-1 rounded font-mono">/groupid</code> และกด <span className="font-semibold">Verify</span> ให้ผ่าน <code className="bg-white border px-1 rounded font-mono">200 OK</code>) ให้ใช้ Endpoint <code className="bg-white border px-1 rounded font-mono">/api/line/webhook</code> บนโดเมนสาธารณะของแอป (หลังกด Share / Deploy แอป ไม่ใช่ลิงก์ Preview ที่ติดล็อกอิน Google):
-                {(() => {
-                  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-                  const publicOrigin = origin.includes('ais-dev-')
-                    ? origin.replace('ais-dev-', 'ais-pre-')
-                    : origin;
-                  const webhookUrl = publicOrigin ? `${publicOrigin}/api/line/webhook` : '/api/line/webhook';
-                  return (
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <input
-                        type="text"
-                        readOnly
-                        value={webhookUrl}
-                        className="flex-1 text-[11px] font-mono bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(webhookUrl);
-                          setCopiedWebhookUrl(true);
-                          setTimeout(() => setCopiedWebhookUrl(false), 2000);
-                        }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-[11px] font-semibold cursor-pointer"
-                      >
-                        {copiedWebhookUrl ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>{copiedWebhookUrl ? 'คัดลอกแล้ว' : 'คัดลอก Webhook URL'}</span>
-                      </button>
-                    </div>
-                  );
-                })()}
+                <span className="font-semibold text-red-800">
+                  สาเหตุที่ขึ้น 302 Found (เช่น ลิงก์ <code className="bg-white border px-1 rounded font-mono">script.google.com/.../exec</code>):
+                </span>{' '}
+                Google Apps Script ตอบกลับทุก POST ด้วย HTTP <code className="bg-white border px-1 rounded font-mono">302 Redirect</code> เสมอ ทำให้ปุ่ม Verify ของ LINE ปฏิเสธเช่นกัน (Webhook ของ LINE ใช้ได้เฉพาะกรณีนำไฟล์เซิร์ฟเวอร์ <code className="bg-white border px-1 rounded font-mono">server.ts</code> ไป Deploy บนโฮสต์ Node.js สาธารณะที่เปิดสิทธิ์สาธารณะโดยไม่ติด Login เท่านั้น)
               </li>
               <li>
-                สำหรับการส่งอัตโนมัติ <span className="font-semibold">15:59 น.</span> บน Google Cloud ให้นำโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุดไปอัปเดตและ{' '}
-                <span className="font-semibold">Deploy → New version</span> ใน Google Apps Script (สิทธิ์ Who has access: Anyone) แล้วกดปุ่ม{' '}
-                <span className="font-semibold text-emerald-800">บันทึกและตั้งเวลาอัตโนมัติ (15:59 น.)</span> ด้านบน
+                <span className="font-semibold text-emerald-900">วิธีใช้งานจริงให้เสถียร 100% (ทั้งปุ่มทดสอบส่งทันทีและส่งอัตโนมัติ 15:59 น.):</span>
+                <ul className="list-disc list-inside ml-4 mt-1 space-y-1 text-slate-700">
+                  <li>
+                    ในหน้า <span className="font-semibold">LINE Developers Console → Messaging API → Webhook settings</span>:{' '}
+                    กด <span className="font-semibold">Edit</span> เพื่อลบ URL ในช่อง Webhook ออก และปิดสวิตช์{' '}
+                    <span className="font-semibold">Use webhook</span> เป็น <span className="font-semibold">OFF</span>
+                  </li>
+                  <li>
+                    สำหรับการส่งอัตโนมัติ <span className="font-semibold">15:59 น.</span> ทุกวันผ่าน Google Cloud (แม้ปิดเบราว์เซอร์หรือเปิดจาก GitHub Pages):
+                    อัปเดตโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุด → กด{' '}
+                    <span className="font-semibold">Deploy → New version</span> (Who has access: Anyone) → นำ URL มาวางในตั้งค่าเชื่อมต่อ Google Sheets → แล้วตั้งค่าผ่านเมนูใน Google Sheets:{' '}
+                    <code className="bg-white border px-1 rounded font-mono">🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)</code>
+                  </li>
+                </ul>
               </li>
             </ol>
           </div>
