@@ -36,6 +36,7 @@ import {
   isLegacyGeneratedStaffId,
   isValidEmployeeCodeValue,
   DEFAULT_LINE_AUTO_TIME,
+  DEFAULT_LINE_GROUP_ID,
   LineAutoReportDayMode,
 } from '../types';
 import {
@@ -309,7 +310,7 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['Line_Auto_Time', (settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME).trim()],
     ['Line_Auto_Report_Day', settings.lineAutoReportDayMode || 'YESTERDAY'],
     ['Line_Auto_Shift', settings.lineAutoShift || 'ALL'],
-    ['Line_Target_Id', (settings.lineTargetId || '').trim()],
+    ['Line_Target_Id', (settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
   if (Object.keys(codeMap).length > 0) {
@@ -1816,10 +1817,10 @@ export const syncAllWithGoogleSheet = async (
       ? db.settings.lineAutoShift || 'ALL'
       : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
     lineTargetId: settingsDirty
-      ? db.settings.lineTargetId || ''
-      : settingsMap['Line_Target_Id'] !== undefined
+      ? db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID
+      : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
       ? settingsMap['Line_Target_Id']
-      : db.settings.lineTargetId || '',
+      : db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID,
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -2873,10 +2874,10 @@ function mergeRemoteDataRows(
       ? db.settings.lineAutoShift || 'ALL'
       : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
     lineTargetId: settingsDirty
-      ? db.settings.lineTargetId || ''
-      : settingsMap['Line_Target_Id'] !== undefined
+      ? db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID
+      : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
       ? settingsMap['Line_Target_Id']
-      : db.settings.lineTargetId || '',
+      : db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID,
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -4803,6 +4804,131 @@ export interface LineAutomationStatusInfo {
   lastStatus?: string;
 }
 
+export interface LineServerStatusInfo {
+  ok: boolean;
+  hasServerToken: boolean;
+  defaultGroupId: string;
+  targetId: string;
+  botName: string;
+  groupName: string;
+  groupVerified: boolean;
+  groupError: string;
+  serverAutoEnabled: boolean;
+  serverAutoTime: string;
+  serverNextRunAt: string;
+  lastSentAt: string;
+  lastStatus: string;
+}
+
+export const fetchServerLineStatus = async (
+  targetId?: string,
+  refresh = false
+): Promise<LineServerStatusInfo | null> => {
+  try {
+    const qs = new URLSearchParams();
+    if (targetId && targetId.trim()) qs.set('targetId', targetId.trim());
+    if (refresh) qs.set('refresh', '1');
+    const url = `/api/line/status${qs.toString() ? `?${qs.toString()}` : ''}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return null;
+    const data = await res.json();
+    if (!data || data.ok === false) return null;
+    return data as LineServerStatusInfo;
+  } catch {
+    return null;
+  }
+};
+
+export const sendLineMessageViaServerProxy = async (params: {
+  targetId?: string;
+  message: string;
+}): Promise<{
+  available: boolean;
+  ok: boolean;
+  statusText?: string;
+  sentAt?: string;
+  groupName?: string;
+  error?: string;
+}> => {
+  try {
+    const res = await fetch('/api/line/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetId: (params.targetId || DEFAULT_LINE_GROUP_ID).trim(),
+        message: params.message,
+      }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { available: false, ok: false };
+    }
+    const data = await res.json();
+    return {
+      available: true,
+      ok: Boolean(res.ok && data?.ok),
+      statusText: data?.statusText,
+      sentAt: data?.sentAt,
+      groupName: data?.groupName,
+      error: data?.error,
+    };
+  } catch {
+    return { available: false, ok: false };
+  }
+};
+
+export const configureLineViaServerProxy = async (params: {
+  enabled: boolean;
+  time: string;
+  reportDayMode: LineAutoReportDayMode;
+  shift: 'ALL' | WorkShift;
+  targetId: string;
+  gasUrl?: string;
+  adminPin?: string;
+}): Promise<{
+  available: boolean;
+  ok: boolean;
+  hasServerToken?: boolean;
+  botName?: string;
+  groupName?: string;
+  groupVerified?: boolean;
+  groupError?: string;
+  serverNextRunAt?: string;
+  gasSynced?: boolean;
+  gasError?: string;
+  gasData?: Record<string, unknown> | null;
+}> => {
+  try {
+    const res = await fetch('/api/line/configure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { available: false, ok: false };
+    }
+    const data = await res.json();
+    return {
+      available: true,
+      ok: Boolean(res.ok && data?.ok),
+      hasServerToken: Boolean(data?.hasServerToken),
+      botName: data?.botName,
+      groupName: data?.groupName,
+      groupVerified: data?.groupVerified,
+      groupError: data?.groupError,
+      serverNextRunAt: data?.serverNextRunAt,
+      gasSynced: Boolean(data?.gasSynced),
+      gasError: data?.gasError,
+      gasData: data?.gasData || null,
+    };
+  } catch {
+    return { available: false, ok: false };
+  }
+};
+
 export const configureLineAutomationViaAppsScript = async (params: {
   gasUrl: string;
   adminPin: string;
@@ -4812,8 +4938,6 @@ export const configureLineAutomationViaAppsScript = async (params: {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
-    channelAccessToken?: string;
-    clearToken?: boolean;
   };
   db: AppDatabase;
   expectedDirtyVersion?: number;
@@ -4891,7 +5015,6 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
   shift?: string;
   reportDayMode?: LineAutoReportDayMode;
   message?: string;
-  channelAccessToken?: string;
   db: AppDatabase;
 }): Promise<{
   ok: boolean;
@@ -4901,8 +5024,7 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
   targetDate?: string;
   syncedDb?: AppDatabase;
 }> => {
-  const { gasUrl, adminPin, targetId, date, shift, reportDayMode, message, channelAccessToken, db } =
-    params;
+  const { gasUrl, adminPin, targetId, date, shift, reportDayMode, message, db } = params;
   if (!gasUrl || !adminPin) {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
@@ -4914,12 +5036,11 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
         action: 'sendLineReportNow',
         adminPin,
         payload: {
-          ...(targetId !== undefined ? { targetId } : {}),
+          targetId: (targetId || DEFAULT_LINE_GROUP_ID).trim(),
           ...(date ? { date } : {}),
           ...(shift ? { shift } : {}),
           ...(reportDayMode ? { reportDayMode } : {}),
           ...(message ? { message } : {}),
-          ...(channelAccessToken ? { channelAccessToken } : {}),
         },
       }),
     });
@@ -5003,7 +5124,7 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
         triggerCount: Number(data.triggerCount) || 0,
         nextRunAt: String(data.nextRunAt || ''),
         hasToken: Boolean(data.hasToken),
-        targetId: String(data.targetId || ''),
+        targetId: String(data.targetId || DEFAULT_LINE_GROUP_ID),
         detectedGroupId: String(data.detectedGroupId || ''),
         detectedGroupName: String(data.detectedGroupName || ''),
         lastSentAt: String(data.lastSentAt || ''),
@@ -5015,4 +5136,5 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
     return { ok: false, error: String(err?.message || err || 'Network error') };
   }
 };
+
 

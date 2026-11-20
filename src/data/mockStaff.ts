@@ -6,7 +6,8 @@ import {
   SystemSettings,
   LEAVE_TYPES,
   DEFAULT_PREMIUM_SUB_CLINICS,
-  DEFAULT_LINE_AUTO_TIME
+  DEFAULT_LINE_AUTO_TIME,
+  DEFAULT_LINE_GROUP_ID
 } from '../types';
 import { DEFAULT_PRIMARY_ADMIN_OWNER, buildDefaultAdditionalAdminPins } from '../services/adminSecurity';
 
@@ -67,7 +68,7 @@ export const INITIAL_SETTINGS: SystemSettings = {
   lineAutoTime: DEFAULT_LINE_AUTO_TIME,
   lineAutoReportDayMode: 'YESTERDAY',
   lineAutoShift: 'ALL',
-  lineTargetId: '',
+  lineTargetId: DEFAULT_LINE_GROUP_ID,
   lineChannelTokenSet: false,
 };
 

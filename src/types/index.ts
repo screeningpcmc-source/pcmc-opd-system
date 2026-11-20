@@ -642,6 +642,7 @@ export interface SystemSettings {
 }
 
 export const DEFAULT_LINE_AUTO_TIME = '03:59';
+export const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
 export type LineAutoReportDayMode = 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
 
 export const DEFAULT_OT_COST_CENTER = '2012000000';

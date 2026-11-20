@@ -18,6 +18,7 @@
  */
 
 var DEFAULT_WEB_APP_CLIENT_URL = 'https://screeningpcmc-source.github.io/pcmc-opd-system/';
+var DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
 
 var SHEET_NAMES = {
   STAFF: 'Staff_Master',
@@ -131,7 +132,8 @@ function setupOpdDatabase() {
         ['Line_Auto_Enabled', 'false'],
         ['Line_Auto_Time', '03:59'],
         ['Line_Auto_Report_Day', 'YESTERDAY'],
-        ['Line_Auto_Shift', 'ALL']
+        ['Line_Auto_Shift', 'ALL'],
+        ['Line_Target_Id', DEFAULT_LINE_GROUP_ID]
       ]
     }
   ];
@@ -939,8 +941,8 @@ function writeSettingsToSheet_(settings) {
   var lineAutoReportDayVal = String(settings.lineAutoReportDayMode || existingMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim() || 'YESTERDAY';
   var lineAutoShiftVal = String(settings.lineAutoShift || existingMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
   var lineTargetIdVal = settings.lineTargetId !== undefined
-    ? String(settings.lineTargetId || '').trim()
-    : String(existingMap['Line_Target_Id'] || '').trim();
+    ? String(settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()
+    : String(existingMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
 
   var entries = [
     ['NHPPD', String(settings.nhppd || 0.4)],
@@ -2216,7 +2218,7 @@ function sendScheduledCensusReportGas_(sourceTag) {
   }
 
   var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
-  var targetId = String(settingsMap['Line_Target_Id'] || '').trim();
+  var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
   var reportDayMode = String(settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim();
   var shiftFilter = String(settingsMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
 
@@ -2325,7 +2327,7 @@ function configureLineAutomationFromApi_(payload) {
   var parsed = parseLineAutoTimeGas_(payload.time || '03:59');
   var reportDayMode = String(payload.reportDayMode || 'YESTERDAY').trim() || 'YESTERDAY';
   var shift = String(payload.shift || 'ALL').trim() || 'ALL';
-  var targetId = String(payload.targetId || '').trim();
+  var targetId = String(payload.targetId || DEFAULT_LINE_GROUP_ID).trim();
   var incomingToken = String(payload.channelAccessToken || '').trim();
 
   if (payload.clearToken) {
@@ -2363,7 +2365,7 @@ function sendDailyCensusToLineNowFromApi_(payload) {
   var settingsMap = readSettingsMapGas_();
   var token = String(payload.channelAccessToken || '').trim() ||
     String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
-  var targetId = String(payload.targetId || settingsMap['Line_Target_Id'] || '').trim();
+  var targetId = String(payload.targetId || settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
 
   if (payload.channelAccessToken) {
     PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', String(payload.channelAccessToken).trim());
@@ -2421,7 +2423,7 @@ function getLineAutomationStatusFromApi_() {
     triggerCount: triggers.length,
     nextRunAt: String(PropertiesService.getScriptProperties().getProperty('LINE_NEXT_RUN_AT') || ''),
     hasToken: hasToken,
-    targetId: String(settingsMap['Line_Target_Id'] || ''),
+    targetId: String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID),
     detectedGroupId: String(settingsMap['Line_Detected_Group_ID'] || ''),
     detectedGroupName: String(settingsMap['Line_Detected_Group_Name'] || ''),
     lastSentAt: String(settingsMap['Line_Last_Sent_At'] || ''),
@@ -2434,7 +2436,7 @@ function setupLineDailyTrigger0359Ui() {
   var ui = SpreadsheetApp.getUi();
   var settingsMap = readSettingsMapGas_();
   var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
-  var targetId = String(settingsMap['Line_Target_Id'] || '').trim();
+  var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
   if (!hasToken) {
     var tokPrompt = ui.prompt(
       'LINE Channel Access Token',

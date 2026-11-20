@@ -479,11 +479,9 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
               type="button"
               onClick={handleSendLineNowClick}
               disabled={isSendingLine}
-              title={
-                settings?.lineTargetId && settings?.lineChannelTokenSet
-                  ? `ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้า LINE กลุ่มทันที`
-                  : 'ตั้งค่า LINE Group ID และ Token ในเมนูที่ 5 ก่อนส่ง'
-              }
+              title={`ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้า LINE กลุ่ม (${
+                settings?.lineTargetId || 'กลุ่มหลัก OPD'
+              }) ทันที`}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
             >
               {isSendingLine ? (

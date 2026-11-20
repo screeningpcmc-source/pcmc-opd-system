@@ -34,6 +34,7 @@ import {
   parseLeavePeriodFromNote,
   WorkShift,
   DEFAULT_LINE_AUTO_TIME,
+  DEFAULT_LINE_GROUP_ID,
   LineAutoReportDayMode,
   isOffDutyWorkload,
   getWorkloadOffDutyReason,
@@ -106,9 +107,12 @@ import {
   configureLineAutomationViaAppsScript,
   sendLineDailyCensusNowViaAppsScript,
   fetchLineAutomationStatusViaAppsScript,
+  configureLineViaServerProxy,
+  sendLineMessageViaServerProxy,
   LineAutomationStatusInfo,
   AppDatabase
 } from './services/sheetsService';
+import { buildDailyCensusLineMessage, resolveLineAutoReportDate } from './utils/lineReport';
 import { formatThaiLeaveRange, formatThaiShortDate, getLocalTodayIso } from './utils/thaiDate';
 import { 
   initAuth, 
@@ -2457,15 +2461,13 @@ export default function App() {
     );
   };
 
-  // Handler: Configure LINE Group Daily Report Automation (Code.gs Trigger)
+  // Handler: Configure LINE Group Daily Report Automation (Server Proxy + Code.gs Trigger)
   const handleConfigureLineAutomation = async (config: {
     enabled: boolean;
     time: string;
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
-    channelAccessToken?: string;
-    clearToken?: boolean;
   }): Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }> => {
     if (!isAdmin) {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
@@ -2474,10 +2476,11 @@ export default function App() {
     const baseDb = dbRef.current;
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     const adminPin = unlockedAdminPinRef.current;
-    if (!gasUrl || !adminPin) {
-      showToast('กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน', 'error');
-      return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
-    }
+    const resolvedTargetId = (
+      config.targetId ||
+      baseDb.settings.lineTargetId ||
+      DEFAULT_LINE_GROUP_ID
+    ).trim();
 
     const dirtyVer = markSettingsDirty();
     const optimisticSettings: SystemSettings = {
@@ -2486,19 +2489,88 @@ export default function App() {
       lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
       lineAutoReportDayMode: config.reportDayMode,
       lineAutoShift: config.shift,
-      lineTargetId: config.targetId.trim(),
-      lineChannelTokenSet: config.clearToken
-        ? false
-        : Boolean(config.channelAccessToken?.trim() || baseDb.settings.lineChannelTokenSet),
+      lineTargetId: resolvedTargetId,
     };
     const optimisticDb: AppDatabase = { ...baseDb, settings: optimisticSettings };
     dbRef.current = optimisticDb;
     setDb(optimisticDb);
 
+    // 1. Prefer server-side proxy (/api/line/configure), which securely passes .env token to GAS server-to-server
+    const proxyRes = await configureLineViaServerProxy({
+      enabled: config.enabled,
+      time: config.time || DEFAULT_LINE_AUTO_TIME,
+      reportDayMode: config.reportDayMode,
+      shift: config.shift,
+      targetId: resolvedTargetId,
+      ...(gasUrl ? { gasUrl } : {}),
+      ...(adminPin ? { adminPin } : {}),
+    });
+
+    if (proxyRes.available && proxyRes.ok) {
+      let lineAutomation: LineAutomationStatusInfo | undefined;
+      if (proxyRes.gasSynced && proxyRes.gasData) {
+        clearSettingsDirty(dirtyVer);
+        const gasRawAuto = proxyRes.gasData.lineAutomation as Partial<LineAutomationStatusInfo> | undefined;
+        lineAutomation = {
+          enabled: config.enabled,
+          time: config.time || DEFAULT_LINE_AUTO_TIME,
+          triggerInstalled: Boolean(gasRawAuto?.triggerInstalled),
+          triggerCount: Number(gasRawAuto?.triggerCount) || 0,
+          nextRunAt: String(gasRawAuto?.nextRunAt || proxyRes.serverNextRunAt || ''),
+          hasToken: Boolean(gasRawAuto?.hasToken ?? proxyRes.hasServerToken),
+          targetId: resolvedTargetId,
+          detectedGroupName: proxyRes.groupName || undefined,
+        };
+      } else {
+        lineAutomation = {
+          enabled: config.enabled,
+          time: config.time || DEFAULT_LINE_AUTO_TIME,
+          triggerInstalled: false,
+          triggerCount: 0,
+          nextRunAt: String(proxyRes.serverNextRunAt || ''),
+          hasToken: Boolean(proxyRes.hasServerToken),
+          targetId: resolvedTargetId,
+          detectedGroupName: proxyRes.groupName || undefined,
+        };
+      }
+
+      const finalSettings: SystemSettings = {
+        ...dbRef.current.settings,
+        lineAutoEnabled: config.enabled,
+        lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+        lineAutoReportDayMode: config.reportDayMode,
+        lineAutoShift: config.shift,
+        lineTargetId: resolvedTargetId,
+        lineChannelTokenSet: Boolean(lineAutomation.hasToken || proxyRes.hasServerToken),
+        ...(proxyRes.groupName ? { lineDetectedGroupName: proxyRes.groupName } : {}),
+      };
+      const nextDb: AppDatabase = { ...dbRef.current, settings: finalSettings };
+      dbRef.current = nextDb;
+      setDb(nextDb);
+
+      showToast(
+        config.enabled
+          ? proxyRes.gasSynced
+            ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${resolvedTargetId}) เวลา ${config.time || '03:59'} น. สำเร็จ`
+            : `บันทึกตั้งค่า LINE บนเซิร์ฟเวอร์แล้ว${
+                proxyRes.gasError ? ` (Apps Script: ${proxyRes.gasError})` : ''
+              }`
+          : 'บันทึกการปิดส่งรายงาน LINE อัตโนมัติแล้ว',
+        'success'
+      );
+      return { ok: true, lineAutomation };
+    }
+
+    // 2. Static build fallback (direct GAS without Node backend)
+    if (!gasUrl || !adminPin) {
+      showToast('กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน', 'error');
+      return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
+    }
+
     const res = await configureLineAutomationViaAppsScript({
       gasUrl,
       adminPin,
-      config,
+      config: { ...config, targetId: resolvedTargetId },
       db: optimisticDb,
       expectedDirtyVersion: dirtyVer,
     });
@@ -2515,12 +2587,9 @@ export default function App() {
         lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
         lineAutoReportDayMode: config.reportDayMode,
         lineAutoShift: config.shift,
-        lineTargetId: config.targetId.trim(),
+        lineTargetId: resolvedTargetId,
         lineChannelTokenSet:
-          res.lineAutomation?.hasToken ??
-          (config.clearToken
-            ? false
-            : Boolean(config.channelAccessToken?.trim() || res.syncedDb.settings.lineChannelTokenSet)),
+          res.lineAutomation?.hasToken ?? Boolean(res.syncedDb.settings.lineChannelTokenSet),
       };
       const syncedFinal: AppDatabase = { ...res.syncedDb, settings: mergedSettings };
       dbRef.current = syncedFinal;
@@ -2536,20 +2605,76 @@ export default function App() {
     return { ok: true, lineAutomation: res.lineAutomation };
   };
 
-  // Handler: Immediate push to LINE Group via Code.gs
+  // Handler: Immediate push to LINE Group via Server Proxy (/api/line/send) with GAS fallback
   const handleSendLineReportNow = async (params: {
     targetId?: string;
     date?: string;
     shift?: string;
     reportDayMode?: LineAutoReportDayMode;
     message?: string;
-    channelAccessToken?: string;
   }): Promise<boolean> => {
     if (!isAdmin) {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return false;
     }
     const baseDb = dbRef.current;
+    const resolvedTargetId = (
+      params.targetId ||
+      baseDb.settings.lineTargetId ||
+      DEFAULT_LINE_GROUP_ID
+    ).trim();
+    const resolvedDate =
+      params.date ||
+      resolveLineAutoReportDate(
+        baseDb.workloads,
+        params.reportDayMode || baseDb.settings.lineAutoReportDayMode || 'YESTERDAY'
+      );
+    const resolvedShift = params.shift || baseDb.settings.lineAutoShift || 'ALL';
+    const messageToSend =
+      (params.message || '').trim() ||
+      buildDailyCensusLineMessage({
+        workloads: baseDb.workloads,
+        date: resolvedDate,
+        shiftFilter: resolvedShift,
+        premiumSubClinics: baseDb.settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS],
+        includeClinicBreakdown: true,
+      });
+
+    // 1. Try server-side LINE Messaging API proxy first (uses .env token securely)
+    const proxyRes = await sendLineMessageViaServerProxy({
+      targetId: resolvedTargetId,
+      message: messageToSend,
+    });
+
+    if (proxyRes.available) {
+      const latestDb = dbRef.current;
+      const updatedDb: AppDatabase = {
+        ...latestDb,
+        settings: {
+          ...latestDb.settings,
+          lineTargetId: resolvedTargetId,
+          lineChannelTokenSet: proxyRes.ok || latestDb.settings.lineChannelTokenSet,
+          lineLastSentAt: proxyRes.sentAt || latestDb.settings.lineLastSentAt,
+          lineLastSentReportDate: resolvedDate,
+          lineLastStatus: proxyRes.statusText || latestDb.settings.lineLastStatus,
+          ...(proxyRes.groupName ? { lineDetectedGroupName: proxyRes.groupName } : {}),
+        },
+      };
+      dbRef.current = updatedDb;
+      setDb(updatedDb);
+
+      if (proxyRes.ok) {
+        showToast(
+          `ส่งรายงานเข้ากลุ่ม LINE ${proxyRes.groupName ? `"${proxyRes.groupName}" ` : ''}เรียบร้อยแล้ว!`,
+          'success'
+        );
+        return true;
+      }
+      showToast(proxyRes.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ', 'error');
+      return false;
+    }
+
+    // 2. Fallback to Apps Script if running in static build mode without Node backend
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     const adminPin = unlockedAdminPinRef.current;
     if (!gasUrl || !adminPin) {
@@ -2560,7 +2685,11 @@ export default function App() {
     const res = await sendLineDailyCensusNowViaAppsScript({
       gasUrl,
       adminPin,
-      ...params,
+      targetId: resolvedTargetId,
+      date: resolvedDate,
+      shift: resolvedShift,
+      reportDayMode: params.reportDayMode,
+      message: messageToSend,
       db: baseDb,
     });
 

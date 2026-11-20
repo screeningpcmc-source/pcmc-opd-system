@@ -28,9 +28,15 @@ import {
   WorkShift,
   WORKLOAD_SHIFTS,
   DEFAULT_LINE_AUTO_TIME,
+  DEFAULT_LINE_GROUP_ID,
   LineAutoReportDayMode
 } from '../types';
-import { markReferralClinicRemovedByAdmin, LineAutomationStatusInfo } from '../services/sheetsService';
+import {
+  markReferralClinicRemovedByAdmin,
+  fetchServerLineStatus,
+  LineAutomationStatusInfo,
+  LineServerStatusInfo,
+} from '../services/sheetsService';
 import { formatThaiShortDate, getLocalTodayIso } from '../utils/thaiDate';
 import { buildDailyCensusLineMessage, resolveLineAutoReportDate } from '../utils/lineReport';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
@@ -116,8 +122,6 @@ interface AdminPanelTabProps {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
-    channelAccessToken?: string;
-    clearToken?: boolean;
   }) => Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }>;
   onSendLineReportNow?: (params: {
     targetId?: string;
@@ -125,7 +129,6 @@ interface AdminPanelTabProps {
     shift?: string;
     reportDayMode?: LineAutoReportDayMode;
     message?: string;
-    channelAccessToken?: string;
   }) => Promise<boolean>;
   onFetchLineStatus?: () => Promise<LineAutomationStatusInfo | null>;
 }
@@ -272,13 +275,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [lineAutoShift, setLineAutoShift] = useState<'ALL' | WorkShift>(
     settings.lineAutoShift || 'ALL'
   );
-  const [lineTargetId, setLineTargetId] = useState<string>(settings.lineTargetId || '');
-  const [lineTokenDraft, setLineTokenDraft] = useState<string>('');
-  const [showLineToken, setShowLineToken] = useState<boolean>(false);
+  const [lineTargetId, setLineTargetId] = useState<string>(
+    settings.lineTargetId || DEFAULT_LINE_GROUP_ID
+  );
   const [isSavingLineAuto, setIsSavingLineAuto] = useState<boolean>(false);
   const [isTestingLineSend, setIsTestingLineSend] = useState<boolean>(false);
   const [isCheckingLineStatus, setIsCheckingLineStatus] = useState<boolean>(false);
   const [lineStatusInfo, setLineStatusInfo] = useState<LineAutomationStatusInfo | null>(null);
+  const [serverLineStatus, setServerLineStatus] = useState<LineServerStatusInfo | null>(null);
   const [lineActionFeedback, setLineActionFeedback] = useState<{
     type: 'success' | 'error' | 'info';
     text: string;
@@ -315,21 +319,28 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setLineAutoTime(settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME);
     setLineAutoReportDayMode(settings.lineAutoReportDayMode || 'YESTERDAY');
     setLineAutoShift(settings.lineAutoShift || 'ALL');
-    setLineTargetId(settings.lineTargetId || '');
+    setLineTargetId(settings.lineTargetId || DEFAULT_LINE_GROUP_ID);
   }, [settings]);
 
   useEffect(() => {
-    if (!isAdminUnlocked || !onFetchLineStatus || !settings.gasUrl) return;
+    if (!isAdminUnlocked) return;
     let cancelled = false;
-    onFetchLineStatus().then((status) => {
-      if (!cancelled && status) {
-        setLineStatusInfo(status);
+    fetchServerLineStatus(settings.lineTargetId || DEFAULT_LINE_GROUP_ID).then((srv) => {
+      if (!cancelled && srv) {
+        setServerLineStatus(srv);
       }
     });
+    if (onFetchLineStatus && settings.gasUrl) {
+      onFetchLineStatus().then((status) => {
+        if (!cancelled && status) {
+          setLineStatusInfo(status);
+        }
+      });
+    }
     return () => {
       cancelled = true;
     };
-  }, [isAdminUnlocked, settings.gasUrl, onFetchLineStatus]);
+  }, [isAdminUnlocked, settings.gasUrl, settings.lineTargetId, onFetchLineStatus]);
 
   const resolvedLinePreviewDate = useMemo(
     () => resolveLineAutoReportDate(workloads, lineAutoReportDayMode),
@@ -350,12 +361,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleSaveLineAutomation = async () => {
     setLineActionFeedback(null);
-    const cleanTargetId = lineTargetId.trim();
-    const cleanToken = lineTokenDraft.trim();
+    const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
     const cleanTime = /^\d{2}:\d{2}$/.test(lineAutoTime.trim())
       ? lineAutoTime.trim()
       : DEFAULT_LINE_AUTO_TIME;
-    const tokenAvailable = Boolean(cleanToken || lineStatusInfo?.hasToken || settings.lineChannelTokenSet);
+    const tokenAvailable = Boolean(
+      serverLineStatus?.hasServerToken || lineStatusInfo?.hasToken || settings.lineChannelTokenSet
+    );
 
     if (lineAutoEnabled && !cleanTargetId) {
       setLineActionFeedback({
@@ -367,7 +379,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     if (lineAutoEnabled && !tokenAvailable) {
       setLineActionFeedback({
         type: 'error',
-        text: 'กรุณาระบุ LINE Channel Access Token ก่อนเปิดใช้งานส่งอัตโนมัติ',
+        text: 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์ (.env) หรือ Google Apps Script ScriptProperties',
       });
       return;
     }
@@ -381,15 +393,17 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         reportDayMode: lineAutoReportDayMode,
         shift: lineAutoShift,
         targetId: cleanTargetId,
-        ...(cleanToken ? { channelAccessToken: cleanToken } : {}),
       });
       if (res.ok) {
         if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
-        setLineTokenDraft('');
+        const srv = await fetchServerLineStatus(cleanTargetId, true);
+        if (srv) setServerLineStatus(srv);
         setLineActionFeedback({
           type: 'success',
           text: lineAutoEnabled
-            ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำเร็จ${
+            ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำหรับกลุ่ม ${
+                srv?.groupName ? `"${srv.groupName}"` : cleanTargetId
+              } สำเร็จ${
                 res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
               }`
             : 'บันทึกการตั้งค่าและปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
@@ -397,7 +411,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       } else {
         setLineActionFeedback({
           type: 'error',
-          text: res.error || 'ตั้งค่า Google Apps Script Trigger ไม่สำเร็จ',
+          text: res.error || 'ตั้งค่า LINE อัตโนมัติไม่สำเร็จ',
         });
       }
     } finally {
@@ -407,8 +421,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
   const handleTestSendLineNow = async () => {
     setLineActionFeedback(null);
-    const cleanTargetId = lineTargetId.trim();
-    const cleanToken = lineTokenDraft.trim();
+    const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
     if (!cleanTargetId) {
       setLineActionFeedback({
         type: 'error',
@@ -416,10 +429,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       });
       return;
     }
-    if (!cleanToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
+    if (!serverLineStatus?.hasServerToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
       setLineActionFeedback({
         type: 'error',
-        text: 'กรุณาระบุ LINE Channel Access Token ก่อนทดสอบส่ง',
+        text: 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์ (.env) หรือ Google Apps Script',
       });
       return;
     }
@@ -432,14 +445,16 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         shift: lineAutoShift,
         reportDayMode: lineAutoReportDayMode,
         message: linePreviewMessage,
-        ...(cleanToken ? { channelAccessToken: cleanToken } : {}),
       });
       if (ok) {
-        if (cleanToken) setLineTokenDraft('');
         setLineActionFeedback({
           type: 'success',
-          text: `ส่งรายงานวันที่ ${formatThaiShortDate(resolvedLinePreviewDate)} เข้ากลุ่ม LINE สำเร็จ!`,
+          text: `ส่งรายงานวันที่ ${formatThaiShortDate(resolvedLinePreviewDate)} เข้ากลุ่ม LINE ${
+            serverLineStatus?.groupName ? `"${serverLineStatus.groupName}" ` : ''
+          }สำเร็จ!`,
         });
+        const srv = await fetchServerLineStatus(cleanTargetId, true);
+        if (srv) setServerLineStatus(srv);
         if (onFetchLineStatus) {
           const fresh = await onFetchLineStatus();
           if (fresh) setLineStatusInfo(fresh);
@@ -447,7 +462,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       } else {
         setLineActionFeedback({
           type: 'error',
-          text: 'ส่งรายงานเข้ากลุ่ม LINE ไม่สำเร็จ กรุณาตรวจสอบ Token, Group ID และการ Deploy Code.gs',
+          text: 'ส่งรายงานเข้ากลุ่ม LINE ไม่สำเร็จ กรุณาตรวจสอบว่าบอทอยู่ในกลุ่ม LINE และ Group ID ถูกต้อง',
         });
       }
     } finally {
@@ -455,46 +470,27 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     }
   };
 
-  const handleClearLineToken = async () => {
-    if (!onConfigureLineAutomation) return;
-    setIsSavingLineAuto(true);
-    setLineActionFeedback(null);
-    try {
-      const res = await onConfigureLineAutomation({
-        enabled: false,
-        time: lineAutoTime || DEFAULT_LINE_AUTO_TIME,
-        reportDayMode: lineAutoReportDayMode,
-        shift: lineAutoShift,
-        targetId: lineTargetId.trim(),
-        clearToken: true,
-      });
-      if (res.ok) {
-        setLineAutoEnabled(false);
-        setLineTokenDraft('');
-        if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
-        setLineActionFeedback({
-          type: 'info',
-          text: 'ล้าง LINE Channel Access Token และปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
-        });
-      } else {
-        setLineActionFeedback({
-          type: 'error',
-          text: res.error || 'ไม่สามารถล้าง Token ได้',
-        });
-      }
-    } finally {
-      setIsSavingLineAuto(false);
-    }
-  };
-
   const handleRefreshLineStatus = async () => {
-    if (!onFetchLineStatus) return;
     setIsCheckingLineStatus(true);
     setLineActionFeedback(null);
     try {
-      const fresh = await onFetchLineStatus();
-      if (fresh) {
-        setLineStatusInfo(fresh);
+      const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
+      const srv = await fetchServerLineStatus(cleanTargetId, true);
+      if (srv) setServerLineStatus(srv);
+      const fresh = onFetchLineStatus ? await onFetchLineStatus() : null;
+      if (fresh) setLineStatusInfo(fresh);
+
+      if (srv?.hasServerToken) {
+        const groupDesc = srv.groupVerified
+          ? `กลุ่ม "${srv.groupName || cleanTargetId}" พร้อมส่งทันที`
+          : srv.groupError || `ยังไม่ได้ยืนยันกลุ่ม ${cleanTargetId}`;
+        setLineActionFeedback({
+          type: srv.groupVerified ? 'success' : 'info',
+          text: `Server Proxy พร้อมใช้งาน${srv.botName ? ` (Bot: ${srv.botName})` : ''} • ${groupDesc}${
+            fresh?.triggerInstalled ? ` • GAS Trigger ${fresh.time} น. ติดตั้งแล้ว` : ''
+          }`,
+        });
+      } else if (fresh) {
         setLineActionFeedback({
           type: 'info',
           text: fresh.triggerInstalled
@@ -504,7 +500,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       } else {
         setLineActionFeedback({
           type: 'error',
-          text: 'ยังไม่ได้Deploy ฟังก์ชัน LINE ล่าสุดใน Code.gs หรือ Web App URL ไม่ตอบสนอง',
+          text: 'ไม่สามารถตรวจสอบสถานะ Server Proxy หรือ Google Apps Script ได้',
         });
       }
     } finally {
@@ -2549,11 +2545,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <button
               type="button"
               onClick={handleRefreshLineStatus}
-              disabled={isCheckingLineStatus || !settings.gasUrl}
+              disabled={isCheckingLineStatus}
               className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3 h-3 ${isCheckingLineStatus ? 'animate-spin' : ''}`} />
-              <span>เช็คสถานะ Trigger</span>
+              <span>เช็คสถานะ LINE &amp; Trigger</span>
             </button>
           </div>
         </div>
@@ -2561,25 +2557,36 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         {/* Live Telemetry Summary Strip */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
           <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
-            <div className="text-[10px] font-semibold text-slate-500 uppercase">สถานะ Channel Token</div>
-            <div className="mt-1 font-bold flex items-center justify-between gap-2">
-              {lineStatusInfo?.hasToken || settings.lineChannelTokenSet ? (
+            <div className="text-[10px] font-semibold text-slate-500 uppercase">การเชื่อมต่อ Messaging API</div>
+            <div className="mt-1 font-bold flex flex-col gap-0.5">
+              {serverLineStatus?.hasServerToken ? (
                 <span className="text-emerald-700 flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5" /> บันทึก Token บน Apps Script แล้ว
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    พร้อมส่งผ่าน Server (.env)
+                    {serverLineStatus.botName ? ` • ${serverLineStatus.botName}` : ''}
+                  </span>
+                </span>
+              ) : lineStatusInfo?.hasToken || settings.lineChannelTokenSet ? (
+                <span className="text-emerald-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>บันทึก Token บน Apps Script แล้ว</span>
                 </span>
               ) : (
                 <span className="text-amber-700 flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5" /> ยังไม่ได้ระบุ Token
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>รอตั้งค่า LINE_CHANNEL_ACCESS_TOKEN</span>
                 </span>
               )}
-              {(lineStatusInfo?.hasToken || settings.lineChannelTokenSet) && (
-                <button
-                  type="button"
-                  onClick={handleClearLineToken}
-                  className="text-[10px] text-red-600 hover:underline font-semibold cursor-pointer"
-                >
-                  ล้าง Token
-                </button>
+              {serverLineStatus?.groupVerified && (
+                <span className="text-[10px] text-emerald-700/90 font-medium">
+                  กลุ่มปลายทาง: {serverLineStatus.groupName || lineTargetId}
+                </span>
+              )}
+              {serverLineStatus && !serverLineStatus.groupVerified && serverLineStatus.groupError && (
+                <span className="text-[10px] text-amber-700 font-medium">
+                  {serverLineStatus.groupError}
+                </span>
               )}
             </div>
           </div>
@@ -2589,6 +2596,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <div className="mt-1 font-bold text-gray-800 font-mono text-[11px]">
               {lineStatusInfo?.nextRunAt
                 ? `${lineStatusInfo.nextRunAt} น.`
+                : serverLineStatus?.serverNextRunAt
+                ? `${serverLineStatus.serverNextRunAt} น. (Server)`
                 : lineAutoEnabled
                 ? `ทุกวันเวลา ${lineAutoTime || DEFAULT_LINE_AUTO_TIME} น.`
                 : '- (ปิดอยู่)'}
@@ -2597,14 +2606,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
           <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
             <div className="text-[10px] font-semibold text-slate-500 uppercase">ผลส่งครั้งล่าสุด</div>
-            <div className="mt-1 font-semibold text-gray-800 text-[11px] truncate" title={settings.lineLastStatus || lineStatusInfo?.lastStatus || ''}>
-              {(lineStatusInfo?.lastStatus || settings.lineLastStatus)
-                ? `${lineStatusInfo?.lastStatus || settings.lineLastStatus}`
+            <div className="mt-1 font-semibold text-gray-800 text-[11px] truncate" title={serverLineStatus?.lastStatus || settings.lineLastStatus || lineStatusInfo?.lastStatus || ''}>
+              {(serverLineStatus?.lastStatus || lineStatusInfo?.lastStatus || settings.lineLastStatus)
+                ? `${serverLineStatus?.lastStatus || lineStatusInfo?.lastStatus || settings.lineLastStatus}`
                 : 'ยังไม่เคยส่งรายงานผ่าน LINE'}
             </div>
-            {(lineStatusInfo?.lastSentAt || settings.lineLastSentAt) && (
+            {(serverLineStatus?.lastSentAt || lineStatusInfo?.lastSentAt || settings.lineLastSentAt) && (
               <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                เมื่อ {lineStatusInfo?.lastSentAt || settings.lineLastSentAt}
+                เมื่อ {serverLineStatus?.lastSentAt || lineStatusInfo?.lastSentAt || settings.lineLastSentAt}
               </div>
             )}
           </div>
@@ -2745,48 +2754,37 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               type="text"
               value={lineTargetId}
               onChange={(e) => setLineTargetId(e.target.value)}
-              placeholder="เช่น C1234567890abcdef1234567890abcdef"
+              placeholder={DEFAULT_LINE_GROUP_ID}
               className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono font-semibold text-gray-900 bg-white"
             />
             <span className="text-[10px] text-gray-500">
-              ได้จากการพิมพ์ <code className="bg-slate-100 px-1 rounded">/groupid</code> ในกลุ่ม LINE ที่มีบอทอยู่ (Webhook)
+              ค่าเริ่มต้นตั้งไว้ที่ <code className="bg-slate-100 px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> (หรือใช้ <code className="bg-slate-100 px-1 rounded">/groupid</code> ผ่าน Webhook)
             </span>
           </div>
 
           <div className="md:col-span-6">
-            <div className="flex items-center justify-between mb-1">
-              <label className="block text-[11px] font-bold text-gray-700">
-                LINE Channel Access Token (Messaging API) *
-              </label>
-              <button
-                type="button"
-                onClick={() => setShowLineToken((prev) => !prev)}
-                className="text-[10px] text-emerald-700 hover:text-emerald-900 font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                {showLineToken ? (
-                  <>
-                    <EyeOff className="w-3 h-3" /> <span>ซ่อน</span>
-                  </>
-                ) : (
-                  <>
-                    <Eye className="w-3 h-3" /> <span>แสดง</span>
-                  </>
-                )}
-              </button>
+            <label className="block text-[11px] font-bold text-gray-700 mb-1">
+              LINE Messaging API Token Security
+            </label>
+            <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="font-semibold text-emerald-900 truncate">
+                  {serverLineStatus?.hasServerToken
+                    ? 'จัดการ Token ปลอดภัยผ่านเซิร์ฟเวอร์ (.env) แล้ว'
+                    : lineStatusInfo?.hasToken || settings.lineChannelTokenSet
+                    ? 'จัดเก็บ Token บน Apps ScriptProperties แล้ว'
+                    : 'ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ในไฟล์ .env'}
+                </span>
+              </div>
+              {lineStatusInfo?.hasToken && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold shrink-0">
+                  GAS Synced
+                </span>
+              )}
             </div>
-            <input
-              type={showLineToken ? 'text' : 'password'}
-              value={lineTokenDraft}
-              onChange={(e) => setLineTokenDraft(e.target.value)}
-              placeholder={
-                lineStatusInfo?.hasToken || settings.lineChannelTokenSet
-                  ? 'บันทึกบน Apps Script แล้ว (ใส่ใหม่เฉพาะเมื่อต้องการเปลี่ยน)'
-                  : 'วาง Long-lived Channel Access Token ที่นี่'
-              }
-              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono text-gray-900 bg-white"
-            />
             <span className="text-[10px] text-gray-500">
-              เก็บรักษาไว้เฉพาะใน ScriptProperties บน Google Apps Script (ไม่เปิดเผยในชีทสาธารณะ)
+              Token ถูกเก็บรักษาเฉพาะฝั่งเซิร์ฟเวอร์ (<code className="bg-slate-100 px-1 rounded">/api/line/*</code>) และ <code className="bg-slate-100 px-1 rounded">ScriptProperties</code> ไม่เปิดเผยในหน้าเว็บ
             </span>
           </div>
         </div>
@@ -2816,7 +2814,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <button
               type="button"
               onClick={handleTestSendLineNow}
-              disabled={isTestingLineSend || !settings.gasUrl}
+              disabled={isTestingLineSend}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
               {isTestingLineSend ? (
@@ -2830,7 +2828,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <button
               type="button"
               onClick={handleSaveLineAutomation}
-              disabled={isSavingLineAuto || !settings.gasUrl}
+              disabled={isSavingLineAuto}
               className="inline-flex items-center gap-1.5 px-5 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
               {isSavingLineAuto ? (
@@ -2856,13 +2854,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         {showLineSetupGuide && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
             <div className="font-bold text-slate-900">
-              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 03:59 น. (ใช้ LINE Messaging API แทน LINE Notify ที่ปิดบริการแล้ว)
+              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 03:59 น. (Server Proxy + Apps Script Trigger)
             </div>
             <ol className="list-decimal list-inside space-y-1.5">
               <li>
-                เข้า <span className="font-semibold">LINE Developers Console</span> → เลือก Messaging API Channel → เปิดใช้งาน{' '}
-                <span className="font-semibold">Allow bot to join group chats</span> และคัดลอก{' '}
-                <span className="font-semibold">Channel access token (long-lived)</span> มาใส่ในช่องด้านบน จากนั้นเชิญ LINE Bot เข้ากลุ่ม OPD
+                ระบบได้ตั้งค่า <span className="font-semibold">Channel access token</span> ไว้ฝั่งเซิร์ฟเวอร์ (<code className="bg-white border px-1 rounded font-mono">.env</code>) และกำหนดกลุ่มปลายทางเริ่มต้นเป็น{' '}
+                <code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> แล้ว (ต้องเชิญ LINE Bot เข้ากลุ่มนี้และเปิด <span className="font-semibold">Allow bot to join group chats</span>)
               </li>
               <li>
                 หากต้องการดึงรหัสกลุ่มอัตโนมัติ ให้นำ{' '}
