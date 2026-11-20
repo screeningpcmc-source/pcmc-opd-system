@@ -1,14 +1,18 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import fs from 'fs';
 import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+dotenv.config({ override: true });
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
-const DEFAULT_LINE_AUTO_TIME = '03:59';
+const DEFAULT_LINE_AUTO_TIME = '15:59';
+const DEFAULT_LINE_AUTO_SHIFT = 'ในเวลา 08:00-16:00';
 
 interface LineServerAutomationState {
   enabled: boolean;
@@ -17,6 +21,7 @@ interface LineServerAutomationState {
   shift: string;
   targetId: string;
   gasUrl: string;
+  gasAdminPin: string;
   lastSentAt: string;
   lastStatus: string;
   lastTriggeredBangkokDay: string;
@@ -27,6 +32,8 @@ interface LineServerAutomationState {
 interface LineMetadataCache {
   fetchedAt: number;
   targetId: string;
+  tokenVerified: boolean;
+  tokenError: string;
   botName: string;
   groupName: string;
   groupVerified: boolean;
@@ -36,10 +43,11 @@ interface LineMetadataCache {
 const serverLineState: LineServerAutomationState = {
   enabled: false,
   time: DEFAULT_LINE_AUTO_TIME,
-  reportDayMode: 'YESTERDAY',
-  shift: 'ALL',
+  reportDayMode: 'TODAY',
+  shift: DEFAULT_LINE_AUTO_SHIFT,
   targetId: (process.env.LINE_GROUP_ID || DEFAULT_LINE_GROUP_ID).trim(),
   gasUrl: '',
+  gasAdminPin: (process.env.ADMIN_PIN || '').trim(),
   lastSentAt: '',
   lastStatus: '',
   lastTriggeredBangkokDay: '',
@@ -49,12 +57,27 @@ const serverLineState: LineServerAutomationState = {
 
 let lineMetaCache: LineMetadataCache | null = null;
 
+function readEnvOverride(key: string): string {
+  try {
+    const envPath = path.join(process.cwd(), '.env');
+    if (fs.existsSync(envPath)) {
+      const parsed = dotenv.parse(fs.readFileSync(envPath, 'utf8'));
+      if (parsed[key] && parsed[key].trim()) {
+        return parsed[key].trim();
+      }
+    }
+  } catch {
+    // Fallback to process.env below
+  }
+  return (process.env[key] || '').trim();
+}
+
 function getLineAccessToken(): string {
-  return (process.env.LINE_CHANNEL_ACCESS_TOKEN || '').trim();
+  return readEnvOverride('LINE_CHANNEL_ACCESS_TOKEN');
 }
 
 function getDefaultGroupId(): string {
-  return (process.env.LINE_GROUP_ID || DEFAULT_LINE_GROUP_ID).trim();
+  return readEnvOverride('LINE_GROUP_ID') || DEFAULT_LINE_GROUP_ID;
 }
 
 function getBangkokDateParts(date = new Date()): {
@@ -85,7 +108,7 @@ function getBangkokDateParts(date = new Date()): {
 
 function computeNextRunAtLabel(timeStr: string): string {
   const m = (timeStr || DEFAULT_LINE_AUTO_TIME).trim().match(/^(\d{1,2}):(\d{1,2})$/);
-  const hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 3;
+  const hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 15;
   const mm = m ? Math.min(59, Math.max(0, Number(m[2]))) : 59;
   const formatted = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   const bkk = getBangkokDateParts();
@@ -107,6 +130,7 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
   if (
     !forceRefresh &&
     lineMetaCache &&
+    lineMetaCache.tokenVerified &&
     lineMetaCache.targetId === resolvedTarget &&
     Date.now() - lineMetaCache.fetchedAt < 60_000
   ) {
@@ -116,6 +140,8 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
   const result: LineMetadataCache = {
     fetchedAt: Date.now(),
     targetId: resolvedTarget,
+    tokenVerified: false,
+    tokenError: '',
     botName: '',
     groupName: '',
     groupVerified: false,
@@ -123,7 +149,8 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
   };
 
   if (!token) {
-    result.groupError = 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์';
+    result.tokenError = 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์ (.env)';
+    result.groupError = result.tokenError;
     lineMetaCache = result;
     return result;
   }
@@ -134,16 +161,23 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
     });
     if (botRes.ok) {
       const botData = (await botRes.json()) as { displayName?: string };
+      result.tokenVerified = true;
       result.botName = String(botData.displayName || '').trim();
     } else {
       const errTxt = await botRes.text();
-      result.groupError = `Bot Token ตรวจสอบไม่ผ่าน (HTTP ${botRes.status}): ${errTxt}`;
+      result.tokenVerified = false;
+      result.tokenError =
+        botRes.status === 401
+          ? 'LINE Channel Access Token ไม่ถูกต้อง หมดอายุ หรือถูกกด Reissue ใหม่ใน LINE Developers Console (HTTP 401)'
+          : `Bot Token ตรวจสอบไม่ผ่าน (HTTP ${botRes.status}): ${errTxt}`;
+      result.groupError = result.tokenError;
     }
   } catch (err) {
-    result.groupError = String(err instanceof Error ? err.message : err);
+    result.tokenError = String(err instanceof Error ? err.message : err);
+    result.groupError = result.tokenError;
   }
 
-  if (resolvedTarget && resolvedTarget.startsWith('C')) {
+  if (result.tokenVerified && resolvedTarget && resolvedTarget.startsWith('C')) {
     try {
       const grpRes = await fetch(
         `https://api.line.me/v2/bot/group/${encodeURIComponent(resolvedTarget)}/summary`,
@@ -220,7 +254,10 @@ async function pushLineTextMessage(
     }
 
     const errText = await res.text();
-    const errMsg = `LINE API HTTP ${res.status}: ${errText}`;
+    const errMsg =
+      res.status === 401
+        ? 'LINE API HTTP 401: Channel Access Token หมดอายุหรือถูกกด Reissue ใหม่ใน LINE Developers Console กรุณาอัปเดต Token ล่าสุดในเซิร์ฟเวอร์ (.env) และ Apps Script'
+        : `LINE API HTTP ${res.status}: ${errText}`;
     serverLineState.lastSentAt = sentAt;
     serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${errMsg}`;
     return { ok: false, statusText: serverLineState.lastStatus, sentAt, error: errMsg };
@@ -247,6 +284,8 @@ async function createAppServer(): Promise<void> {
     res.json({
       ok: true,
       hasServerToken: Boolean(getLineAccessToken()),
+      tokenVerified: meta.tokenVerified,
+      tokenError: meta.tokenError,
       defaultGroupId: getDefaultGroupId(),
       targetId: requestedTargetId,
       botName: meta.botName,
@@ -393,10 +432,10 @@ async function createAppServer(): Promise<void> {
       .match(/^(\d{2}):(\d{2})$/);
     const cleanTime = timeMatch ? `${timeMatch[1]}:${timeMatch[2]}` : DEFAULT_LINE_AUTO_TIME;
     const reportDayMode =
-      body.reportDayMode === 'TODAY' || body.reportDayMode === 'LATEST_WITH_DATA'
+      body.reportDayMode === 'YESTERDAY' || body.reportDayMode === 'LATEST_WITH_DATA'
         ? body.reportDayMode
-        : 'YESTERDAY';
-    const shift = String(body.shift || 'ALL').trim() || 'ALL';
+        : 'TODAY';
+    const shift = String(body.shift || DEFAULT_LINE_AUTO_SHIFT).trim() || DEFAULT_LINE_AUTO_SHIFT;
     const targetId = String(body.targetId || getDefaultGroupId()).trim();
     const gasUrl = String(body.gasUrl || '').trim();
     const adminPin = String(body.adminPin || '').trim();
@@ -407,6 +446,7 @@ async function createAppServer(): Promise<void> {
     serverLineState.shift = shift;
     serverLineState.targetId = targetId;
     if (gasUrl) serverLineState.gasUrl = gasUrl;
+    if (adminPin) serverLineState.gasAdminPin = adminPin;
 
     const token = getLineAccessToken();
     const meta = await fetchLineMetadata(targetId, true);
@@ -452,6 +492,8 @@ async function createAppServer(): Promise<void> {
     res.json({
       ok: true,
       hasServerToken: Boolean(token),
+      tokenVerified: meta.tokenVerified,
+      tokenError: meta.tokenError,
       targetId,
       botName: meta.botName,
       groupName: meta.groupName,
@@ -476,7 +518,7 @@ async function createAppServer(): Promise<void> {
     if (serverLineState.lastTriggeredBangkokDay === bkk.ymd) return;
     serverLineState.lastTriggeredBangkokDay = bkk.ymd;
 
-    const pin = (process.env.ADMIN_PIN || '').trim();
+    const pin = (serverLineState.gasAdminPin || process.env.ADMIN_PIN || '').trim();
     if (!pin) return;
     try {
       await fetch(serverLineState.gasUrl, {

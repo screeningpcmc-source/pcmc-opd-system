@@ -2551,7 +2551,7 @@ export default function App() {
       showToast(
         config.enabled
           ? proxyRes.gasSynced
-            ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${resolvedTargetId}) เวลา ${config.time || '03:59'} น. สำเร็จ`
+            ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${resolvedTargetId}) เวลา ${config.time || '15:59'} น. สำเร็จ`
             : `บันทึกตั้งค่า LINE บนเซิร์ฟเวอร์แล้ว${
                 proxyRes.gasError ? ` (Apps Script: ${proxyRes.gasError})` : ''
               }`
@@ -2598,7 +2598,7 @@ export default function App() {
 
     showToast(
       config.enabled
-        ? `ตั้งเวลาส่งรายงานเข้า LINE กลุ่มเวลา ${config.time || '03:59'} น. สำเร็จ`
+        ? `ตั้งเวลาส่งรายงานเข้า LINE กลุ่มเวลา ${config.time || '15:59'} น. สำเร็จ`
         : 'บันทึกการปิดส่งรายงาน LINE อัตโนมัติแล้ว',
       'success'
     );
@@ -2612,10 +2612,11 @@ export default function App() {
     shift?: string;
     reportDayMode?: LineAutoReportDayMode;
     message?: string;
-  }): Promise<boolean> => {
+  }): Promise<{ ok: boolean; error?: string }> => {
     if (!isAdmin) {
-      showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
-      return false;
+      const err = 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น';
+      showToast(err, 'error');
+      return { ok: false, error: err };
     }
     const baseDb = dbRef.current;
     const resolvedTargetId = (
@@ -2627,9 +2628,9 @@ export default function App() {
       params.date ||
       resolveLineAutoReportDate(
         baseDb.workloads,
-        params.reportDayMode || baseDb.settings.lineAutoReportDayMode || 'YESTERDAY'
+        params.reportDayMode || baseDb.settings.lineAutoReportDayMode || 'TODAY'
       );
-    const resolvedShift = params.shift || baseDb.settings.lineAutoShift || 'ALL';
+    const resolvedShift = params.shift || baseDb.settings.lineAutoShift || 'ในเวลา 08:00-16:00';
     const messageToSend =
       (params.message || '').trim() ||
       buildDailyCensusLineMessage({
@@ -2668,18 +2669,20 @@ export default function App() {
           `ส่งรายงานเข้ากลุ่ม LINE ${proxyRes.groupName ? `"${proxyRes.groupName}" ` : ''}เรียบร้อยแล้ว!`,
           'success'
         );
-        return true;
+        return { ok: true };
       }
-      showToast(proxyRes.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ', 'error');
-      return false;
+      const errMsg = proxyRes.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ';
+      showToast(errMsg, 'error');
+      return { ok: false, error: errMsg };
     }
 
     // 2. Fallback to Apps Script if running in static build mode without Node backend
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     const adminPin = unlockedAdminPinRef.current;
     if (!gasUrl || !adminPin) {
-      showToast('กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน', 'error');
-      return false;
+      const err = 'กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน';
+      showToast(err, 'error');
+      return { ok: false, error: err };
     }
 
     const res = await sendLineDailyCensusNowViaAppsScript({
@@ -2700,10 +2703,11 @@ export default function App() {
 
     if (res.ok) {
       showToast(res.statusText || 'ส่งรายงานเข้ากลุ่ม LINE เรียบร้อยแล้ว!', 'success');
-      return true;
+      return { ok: true };
     }
-    showToast(res.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ', 'error');
-    return false;
+    const gasErr = res.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ';
+    showToast(gasErr, 'error');
+    return { ok: false, error: gasErr };
   };
 
   const handleFetchLineStatus = useCallback(async (): Promise<LineAutomationStatusInfo | null> => {

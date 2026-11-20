@@ -62,7 +62,7 @@ interface DailyCensusTabProps {
   settings?: SystemSettings;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
   onDeleteWorkload?: (id: string, reason: string) => void;
-  onSendLineReportNow?: (params: { date: string; shift: string; message: string }) => Promise<boolean>;
+  onSendLineReportNow?: (params: { date: string; shift: string; message: string }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 interface PremiumCensusGroup {

@@ -37,10 +37,10 @@ export function addDaysToIsoDate(isoDate: string, deltaDays: number): string {
 
 export function resolveLineAutoReportDate(
   workloads: DailyWorkload[],
-  mode: LineAutoReportDayMode = 'YESTERDAY',
+  mode: LineAutoReportDayMode = 'TODAY',
   referenceTodayIso: string = getLocalTodayIso()
 ): string {
-  if (mode === 'TODAY') return referenceTodayIso;
+  if (mode === 'YESTERDAY') return addDaysToIsoDate(referenceTodayIso, -1);
   if (mode === 'LATEST_WITH_DATA') {
     const dates = Array.from(
       new Set(
@@ -49,15 +49,15 @@ export function resolveLineAutoReportDate(
           .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
       )
     ).sort();
-    return dates.length > 0 ? dates[dates.length - 1] : addDaysToIsoDate(referenceTodayIso, -1);
+    return dates.length > 0 ? dates[dates.length - 1] : referenceTodayIso;
   }
-  return addDaysToIsoDate(referenceTodayIso, -1);
+  return referenceTodayIso;
 }
 
 export function buildDailyCensusLineMessage({
   workloads,
   date,
-  shiftFilter = 'ALL',
+  shiftFilter = 'ในเวลา 08:00-16:00',
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   includeClinicBreakdown = true,
 }: BuildDailyCensusLineOptions): string {
@@ -69,6 +69,7 @@ export function buildDailyCensusLineMessage({
 
   const formattedThaiDate = formatThaiFullDate(date);
   const shiftLabel = shiftFilter === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftFilter;
+  const includeRowShiftTag = shiftFilter === 'ALL';
 
   const regularWorkloads: DailyWorkload[] = [];
   const groupMap = new Map<
@@ -186,8 +187,9 @@ export function buildDailyCensusLineMessage({
   let premiumSection = '';
   if (premiumGroups.length > 0) {
     const premiumLines = premiumGroups.map((grp) => {
+      const rowShiftSuffix = includeRowShiftTag ? ` (${grp.shift})` : '';
       if (grp.isGroupOffDuty) {
-        return `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ⏸️ Off เวร${
+        return `🌟 ${PREMIUM_CLINIC_GROUP}${rowShiftSuffix}: ⏸️ Off เวร${
           grp.groupOffDutyReason ? ` (${grp.groupOffDutyReason})` : ''
         }`;
       }
@@ -196,7 +198,7 @@ export function buildDailyCensusLineMessage({
         grp.groupOffDutyStaff.length > 0
           ? ` | Off เวรรายวัน: ${formatOffDutyStaffSummaryText(grp.groupOffDutyStaff)}`
           : '';
-      const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง${groupOffText}`;
+      const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP}${rowShiftSuffix}: ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง${groupOffText}`;
       const subLines = grp.subRows.map(
         (sub) =>
           `  ↳ ${sub.clinic}: ${getEffectiveTotalPt(sub).toLocaleString()} ราย${
@@ -238,9 +240,10 @@ export function buildDailyCensusLineMessage({
   let regularBreakdown = '';
   if (includeClinicBreakdown && regularWorkloads.length > 0) {
     const lines = regularWorkloads.map((w) => {
+      const rowShiftSuffix = includeRowShiftTag ? ` (${w.shift})` : '';
       if (isOffDutyWorkload(w)) {
         const offReason = getWorkloadOffDutyReason(w);
-        return `• ${w.clinic} (${w.shift}): ⏸️ Off เวร${offReason ? ` (${offReason})` : ''}`;
+        return `• ${w.clinic}${rowShiftSuffix}: ⏸️ Off เวร${offReason ? ` (${offReason})` : ''}`;
       }
       const pt =
         isReferralWorkload(w) && w.referralData
@@ -250,7 +253,7 @@ export function buildDailyCensusLineMessage({
       const offStaff = getWorkloadOffDutyStaff(w);
       const offStaffText =
         offStaff.length > 0 ? ` | Off เวรรายวัน: ${formatOffDutyStaffSummaryText(offStaff)}` : '';
-      return `• ${w.clinic} (${w.shift}): ${pt.toLocaleString()} ราย${
+      return `• ${w.clinic}${rowShiftSuffix}: ${pt.toLocaleString()} ราย${
         w.admit > 0 ? ` | Admit ${w.admit}` : ''
       } | พยาบาล ${nursing.toFixed(1)}${offStaffText}`;
     });

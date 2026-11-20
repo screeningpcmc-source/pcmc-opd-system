@@ -66,7 +66,7 @@ function onOpen() {
       .addItem('🔗 สร้างลิงก์เชื่อมต่ออัตโนมัติ (แชร์ทีม OPD)', 'showShareLinkDialog')
       .addItem('⚙️ บันทึก Web App URL (/exec) ลงในชีท', 'promptAndSaveGasUrl')
       .addSeparator()
-      .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (03:59 น.)', 'setupLineDailyTrigger0359Ui')
+      .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)', 'setupLineDailyTrigger0359Ui')
       .addItem('📨 ทดสอบส่งรายงานผู้ป่วยประจำวันเข้า LINE ทันที', 'manualSendDailyCensusToLineUi')
       .addSeparator()
       .addItem('📋 ตรวจสอบ/สร้างหัวตารางทั้ง 6 ชีท', 'setupOpdDatabase')
@@ -130,9 +130,9 @@ function setupOpdDatabase() {
         ['Custom_Holidays', '[]'],
         ['Gas_Web_App_URL', getSavedGasUrl_()],
         ['Line_Auto_Enabled', 'false'],
-        ['Line_Auto_Time', '03:59'],
-        ['Line_Auto_Report_Day', 'YESTERDAY'],
-        ['Line_Auto_Shift', 'ALL'],
+        ['Line_Auto_Time', '15:59'],
+        ['Line_Auto_Report_Day', 'TODAY'],
+        ['Line_Auto_Shift', 'ในเวลา 08:00-16:00'],
         ['Line_Target_Id', DEFAULT_LINE_GROUP_ID]
       ]
     }
@@ -937,9 +937,9 @@ function writeSettingsToSheet_(settings) {
   var lineAutoEnabledVal = settings.lineAutoEnabled !== undefined
     ? (settings.lineAutoEnabled ? 'true' : 'false')
     : (existingMap['Line_Auto_Enabled'] || 'false');
-  var lineAutoTimeVal = String(settings.lineAutoTime || existingMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
-  var lineAutoReportDayVal = String(settings.lineAutoReportDayMode || existingMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim() || 'YESTERDAY';
-  var lineAutoShiftVal = String(settings.lineAutoShift || existingMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+  var lineAutoTimeVal = String(settings.lineAutoTime || existingMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
+  var lineAutoReportDayVal = String(settings.lineAutoReportDayMode || existingMap['Line_Auto_Report_Day'] || 'TODAY').trim() || 'TODAY';
+  var lineAutoShiftVal = String(settings.lineAutoShift || existingMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
   var lineTargetIdVal = settings.lineTargetId !== undefined
     ? String(settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()
     : String(existingMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
@@ -1767,8 +1767,8 @@ function upsertSettingsEntriesGas_(pairs) {
 }
 
 function parseLineAutoTimeGas_(timeStr) {
-  var m = String(timeStr || '03:59').trim().match(/^(\d{1,2}):(\d{1,2})$/);
-  var hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 3;
+  var m = String(timeStr || '15:59').trim().match(/^(\d{1,2}):(\d{1,2})$/);
+  var hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 15;
   var mm = m ? Math.min(59, Math.max(0, Number(m[2]))) : 59;
   return {
     hour: hh,
@@ -1949,6 +1949,7 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
 
   var formattedThaiDate = formatThaiFullDateGas_(targetDate);
   var shiftLabel = shiftTarget === 'ALL' ? 'สรุปภาพรวมทุกกะ' : shiftTarget;
+  var includeRowShiftTag = (shiftTarget === 'ALL');
 
   if (parsedRows.length === 0) {
     return {
@@ -2002,9 +2003,10 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
   };
 
   regularRows.forEach(function(w) {
+    var rowShiftSuffix = includeRowShiftTag ? (' (' + w.shift + ')') : '';
     if (w.isOffDuty) {
       offDutyCount += 1;
-      regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ⏸️ Off เวร' + (w.offDutyReason ? ' (' + w.offDutyReason + ')' : ''));
+      regularLines.push('• ' + w.clinic + rowShiftSuffix + ': ⏸️ Off เวร' + (w.offDutyReason ? ' (' + w.offDutyReason + ')' : ''));
       return;
     }
     var effPt = w.totalPt;
@@ -2025,19 +2027,20 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
     totals.na += w.na;
     var nursing = w.rn + w.pn + w.na;
     var offStaffStr = formatOffStaffListGas_(w.offDutyStaffList);
-    regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ' + effPt + ' ราย' + (w.admit > 0 ? ' | Admit ' + w.admit : '') + ' | พยาบาล ' + nursing.toFixed(1) + offStaffStr);
+    regularLines.push('• ' + w.clinic + rowShiftSuffix + ': ' + effPt + ' ราย' + (w.admit > 0 ? ' | Admit ' + w.admit : '') + ' | พยาบาล ' + nursing.toFixed(1) + offStaffStr);
   });
 
   var premiumBlocks = [];
   var premKeys = Object.keys(premiumGroupsMap);
   premKeys.forEach(function(pk) {
     var grp = premiumGroupsMap[pk];
+    var grpShiftSuffix = includeRowShiftTag ? (' (' + grp.shift + ')') : '';
     var allPoolOff = grp.subRows.length === 0 && grp.poolRows.length > 0 && grp.poolRows.every(function(pr) { return pr.isOffDuty; });
     if (allPoolOff) {
       offDutyCount += 1;
       var gOffReason = '';
       grp.poolRows.forEach(function(pr) { if (!gOffReason && pr.offDutyReason) gOffReason = pr.offDutyReason; });
-      premiumBlocks.push('🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ⏸️ Off เวร' + (gOffReason ? ' (' + gOffReason + ')' : ''));
+      premiumBlocks.push('🌟 ศูนย์ปัญญาภิรมย์' + grpShiftSuffix + ': ⏸️ Off เวร' + (gOffReason ? ' (' + gOffReason + ')' : ''));
       return;
     }
     var staffSrc = grp.poolRows.length > 0 ? grp.poolRows : grp.subRows;
@@ -2057,7 +2060,7 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
     totals.rn += pRn; totals.pn += pPn; totals.na += pNa;
     var pNursing = pRn + pPn + pNa;
     var pOffStaffStr = formatOffStaffListGas_(pOffStaffList);
-    var lines = ['🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ' + pTotal + ' ราย (Admit ' + pAdmit + ') | พยาบาล ' + pNursing.toFixed(1) + ' แรง' + pOffStaffStr];
+    var lines = ['🌟 ศูนย์ปัญญาภิรมย์' + grpShiftSuffix + ': ' + pTotal + ' ราย (Admit ' + pAdmit + ') | พยาบาล ' + pNursing.toFixed(1) + ' แรง' + pOffStaffStr];
     grp.subRows.forEach(function(sr) {
       lines.push('  ↳ ' + sr.clinic + ': ' + sr.totalPt + ' ราย' + (sr.admit > 0 ? ' (Admit ' + sr.admit + ')' : ''));
     });
@@ -2194,7 +2197,7 @@ function handleLineWebhookEvents_(events) {
 }
 
 function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
-  if (mode === 'TODAY') return bkkTodayYmd;
+  if (mode === 'YESTERDAY') return addDaysIsoGas_(bkkTodayYmd, -1);
   if (mode === 'LATEST_WITH_DATA') {
     var workloadData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
     var hasId = workloadData.headers[0] === 'Record_ID';
@@ -2205,9 +2208,9 @@ function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(d) && dates.indexOf(d) === -1) dates.push(d);
     });
     dates.sort();
-    return dates.length > 0 ? dates[dates.length - 1] : addDaysIsoGas_(bkkTodayYmd, -1);
+    return dates.length > 0 ? dates[dates.length - 1] : bkkTodayYmd;
   }
-  return addDaysIsoGas_(bkkTodayYmd, -1);
+  return bkkTodayYmd;
 }
 
 function sendScheduledCensusReportGas_(sourceTag) {
@@ -2219,8 +2222,8 @@ function sendScheduledCensusReportGas_(sourceTag) {
 
   var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
   var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
-  var reportDayMode = String(settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY').trim();
-  var shiftFilter = String(settingsMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+  var reportDayMode = String(settingsMap['Line_Auto_Report_Day'] || 'TODAY').trim();
+  var shiftFilter = String(settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
 
   var bkk = getBangkokDatePartsGas_(new Date());
   var targetDate = resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
@@ -2265,7 +2268,7 @@ function runLineDailyCensusTrigger_() {
   } finally {
     var settingsMap = readSettingsMapGas_();
     var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
-    var timeStr = String(settingsMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
+    var timeStr = String(settingsMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
     if (enabled) {
       var parsed = parseLineAutoTimeGas_(timeStr);
       // Schedule specifically for tomorrow so it triggers once per day at HH:mm
@@ -2297,7 +2300,7 @@ function runLineDailyBackupTrigger_() {
       removeLineTriggersGas_();
       return;
     }
-    var timeStr = String(settingsMap['Line_Auto_Time'] || '03:59').trim() || '03:59';
+    var timeStr = String(settingsMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
     var parsed = parseLineAutoTimeGas_(timeStr);
     var bkk = getBangkokDatePartsGas_(new Date());
     var lastSentDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY') || '').trim();
@@ -2324,9 +2327,9 @@ function runLineDailyBackupTrigger_() {
 
 function configureLineAutomationFromApi_(payload) {
   var enabled = Boolean(payload.enabled);
-  var parsed = parseLineAutoTimeGas_(payload.time || '03:59');
-  var reportDayMode = String(payload.reportDayMode || 'YESTERDAY').trim() || 'YESTERDAY';
-  var shift = String(payload.shift || 'ALL').trim() || 'ALL';
+  var parsed = parseLineAutoTimeGas_(payload.time || '15:59');
+  var reportDayMode = String(payload.reportDayMode || 'TODAY').trim() || 'TODAY';
+  var shift = String(payload.shift || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
   var targetId = String(payload.targetId || DEFAULT_LINE_GROUP_ID).trim();
   var incomingToken = String(payload.channelAccessToken || '').trim();
 
@@ -2373,8 +2376,8 @@ function sendDailyCensusToLineNowFromApi_(payload) {
 
   var bkk = getBangkokDatePartsGas_(new Date());
   var targetDate = String(payload.date || '').trim() ||
-    resolveAutoReportTargetDateGas_(String(payload.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY'), bkk.ymd);
-  var shiftFilter = String(payload.shift || settingsMap['Line_Auto_Shift'] || 'ALL').trim() || 'ALL';
+    resolveAutoReportTargetDateGas_(String(payload.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'TODAY'), bkk.ymd);
+  var shiftFilter = String(payload.shift || settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
 
   var textToSend = String(payload.message || '').trim();
   var metaClinicCount = 0;
@@ -2418,7 +2421,7 @@ function getLineAutomationStatusFromApi_() {
   return {
     success: true,
     enabled: String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true',
-    time: String(settingsMap['Line_Auto_Time'] || '03:59'),
+    time: String(settingsMap['Line_Auto_Time'] || '15:59'),
     triggerInstalled: triggers.length > 0,
     triggerCount: triggers.length,
     nextRunAt: String(PropertiesService.getScriptProperties().getProperty('LINE_NEXT_RUN_AT') || ''),
@@ -2451,23 +2454,23 @@ function setupLineDailyTrigger0359Ui() {
   if (!targetId) {
     var grpPrompt = ui.prompt(
       'LINE Group ID (รหัสกลุ่ม)',
-      'วาง LINE Group ID (ขึ้นต้นด้วย C...) ที่ต้องการให้ส่งรายงานเวลา 03:59 น.:',
+      'วาง LINE Group ID (ขึ้นต้นด้วย C...) ที่ต้องการให้ส่งรายงานเวลา 15:59 น.:',
       ui.ButtonSet.OK_CANCEL
     );
     if (grpPrompt.getSelectedButton() !== ui.Button.OK) return;
     targetId = String(grpPrompt.getResponseText() || '').trim();
     if (!targetId) return;
   }
-  var triggerInfo = syncLineAutomationTriggers_(true, '03:59');
+  var triggerInfo = syncLineAutomationTriggers_(true, '15:59');
   upsertSettingsEntriesGas_([
     ['Line_Auto_Enabled', 'true'],
-    ['Line_Auto_Time', '03:59'],
-    ['Line_Auto_Report_Day', settingsMap['Line_Auto_Report_Day'] || 'YESTERDAY'],
-    ['Line_Auto_Shift', settingsMap['Line_Auto_Shift'] || 'ALL'],
+    ['Line_Auto_Time', '15:59'],
+    ['Line_Auto_Report_Day', settingsMap['Line_Auto_Report_Day'] || 'TODAY'],
+    ['Line_Auto_Shift', settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00'],
     ['Line_Target_Id', targetId],
     ['Line_Channel_Token_Set', 'true']
   ]);
-  ui.alert('ตั้งเวลาส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มเวลา 03:59 น. (Asia/Bangkok) สำเร็จ!\nรอบถัดไป: ' + triggerInfo.nextRunAt);
+  ui.alert('ตั้งเวลาส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มเวลา 15:59 น. (Asia/Bangkok) สำเร็จ!\nรอบถัดไป: ' + triggerInfo.nextRunAt);
 }
 
 function manualSendDailyCensusToLineUi() {

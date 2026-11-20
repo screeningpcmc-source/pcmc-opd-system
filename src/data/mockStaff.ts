@@ -66,8 +66,8 @@ export const INITIAL_SETTINGS: SystemSettings = {
   autoSync: true,
   lineAutoEnabled: false,
   lineAutoTime: DEFAULT_LINE_AUTO_TIME,
-  lineAutoReportDayMode: 'YESTERDAY',
-  lineAutoShift: 'ALL',
+  lineAutoReportDayMode: 'TODAY',
+  lineAutoShift: 'ในเวลา 08:00-16:00',
   lineTargetId: DEFAULT_LINE_GROUP_ID,
   lineChannelTokenSet: false,
 };

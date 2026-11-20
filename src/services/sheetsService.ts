@@ -308,8 +308,8 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['OT_Controller_Name', (settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME).trim()],
     ['Line_Auto_Enabled', settings.lineAutoEnabled ? 'true' : 'false'],
     ['Line_Auto_Time', (settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME).trim()],
-    ['Line_Auto_Report_Day', settings.lineAutoReportDayMode || 'YESTERDAY'],
-    ['Line_Auto_Shift', settings.lineAutoShift || 'ALL'],
+    ['Line_Auto_Report_Day', settings.lineAutoReportDayMode || 'TODAY'],
+    ['Line_Auto_Shift', settings.lineAutoShift || 'ในเวลา 08:00-16:00'],
     ['Line_Target_Id', (settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
@@ -1811,11 +1811,13 @@ export const syncAllWithGoogleSheet = async (
       const raw = settingsDirty
         ? db.settings.lineAutoReportDayMode
         : settingsMap['Line_Auto_Report_Day'] || db.settings.lineAutoReportDayMode;
-      return raw === 'TODAY' || raw === 'LATEST_WITH_DATA' ? raw : 'YESTERDAY';
+      return raw === 'YESTERDAY' || raw === 'LATEST_WITH_DATA' ? raw : 'TODAY';
     })(),
     lineAutoShift: settingsDirty
-      ? db.settings.lineAutoShift || 'ALL'
-      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
+      ? db.settings.lineAutoShift || 'ในเวลา 08:00-16:00'
+      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) ||
+          db.settings.lineAutoShift ||
+          'ในเวลา 08:00-16:00'),
     lineTargetId: settingsDirty
       ? db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID
       : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
@@ -2868,11 +2870,13 @@ function mergeRemoteDataRows(
       const raw = settingsDirty
         ? db.settings.lineAutoReportDayMode
         : settingsMap['Line_Auto_Report_Day'] || db.settings.lineAutoReportDayMode;
-      return raw === 'TODAY' || raw === 'LATEST_WITH_DATA' ? raw : 'YESTERDAY';
+      return raw === 'YESTERDAY' || raw === 'LATEST_WITH_DATA' ? raw : 'TODAY';
     })(),
     lineAutoShift: settingsDirty
-      ? db.settings.lineAutoShift || 'ALL'
-      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) || db.settings.lineAutoShift || 'ALL'),
+      ? db.settings.lineAutoShift || 'ในเวลา 08:00-16:00'
+      : ((settingsMap['Line_Auto_Shift'] as 'ALL' | WorkShift) ||
+          db.settings.lineAutoShift ||
+          'ในเวลา 08:00-16:00'),
     lineTargetId: settingsDirty
       ? db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID
       : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
@@ -4807,6 +4811,8 @@ export interface LineAutomationStatusInfo {
 export interface LineServerStatusInfo {
   ok: boolean;
   hasServerToken: boolean;
+  tokenVerified?: boolean;
+  tokenError?: string;
   defaultGroupId: string;
   targetId: string;
   botName: string;
