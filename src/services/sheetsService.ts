@@ -4818,6 +4818,8 @@ export interface LineServerStatusInfo {
   serverNextRunAt: string;
   lastSentAt: string;
   lastStatus: string;
+  detectedGroupId?: string;
+  detectedGroupName?: string;
 }
 
 export const fetchServerLineStatus = async (

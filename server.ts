@@ -20,6 +20,8 @@ interface LineServerAutomationState {
   lastSentAt: string;
   lastStatus: string;
   lastTriggeredBangkokDay: string;
+  detectedGroupId: string;
+  detectedGroupName: string;
 }
 
 interface LineMetadataCache {
@@ -41,6 +43,8 @@ const serverLineState: LineServerAutomationState = {
   lastSentAt: '',
   lastStatus: '',
   lastTriggeredBangkokDay: '',
+  detectedGroupId: '',
+  detectedGroupName: '',
 };
 
 let lineMetaCache: LineMetadataCache | null = null;
@@ -254,7 +258,106 @@ async function createAppServer(): Promise<void> {
       serverNextRunAt: serverLineState.enabled ? computeNextRunAtLabel(serverLineState.time) : '',
       lastSentAt: serverLineState.lastSentAt,
       lastStatus: serverLineState.lastStatus,
+      detectedGroupId: serverLineState.detectedGroupId,
+      detectedGroupName: serverLineState.detectedGroupName,
     });
+  });
+
+  app.get('/api/line/webhook', (_req: Request, res: Response) => {
+    res.status(200).json({ status: 'ok', message: 'LINE Messaging API webhook endpoint ready' });
+  });
+
+  app.post('/api/line/webhook', (req: Request, res: Response) => {
+    // Always return HTTP 200 OK immediately with zero 302 redirects for LINE Platform verification
+    res.status(200).json({ status: 'ok' });
+
+    const body = (req.body || {}) as {
+      events?: Array<{
+        type?: string;
+        replyToken?: string;
+        source?: { groupId?: string; roomId?: string; userId?: string };
+        message?: { type?: string; text?: string };
+      }>;
+    };
+    const events = Array.isArray(body.events) ? body.events : [];
+    if (events.length === 0) return;
+
+    void (async () => {
+      const token = getLineAccessToken();
+      for (const ev of events) {
+        const src = ev?.source;
+        if (!src) continue;
+        const detectedId = String(src.groupId || src.roomId || src.userId || '').trim();
+        if (!detectedId) continue;
+
+        let groupName = '';
+        if (src.groupId && token) {
+          try {
+            const grpRes = await fetch(
+              `https://api.line.me/v2/bot/group/${encodeURIComponent(detectedId)}/summary`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (grpRes.ok) {
+              const grpData = (await grpRes.json()) as { groupName?: string };
+              groupName = String(grpData.groupName || '').trim();
+            }
+          } catch {
+            // ignore group summary lookup errors during webhook event handling
+          }
+        }
+
+        serverLineState.detectedGroupId = detectedId;
+        if (groupName) {
+          serverLineState.detectedGroupName = groupName;
+        }
+
+        const txt =
+          ev.type === 'message' && ev.message?.type === 'text'
+            ? String(ev.message.text || '').trim().toLowerCase()
+            : '';
+
+        if (
+          token &&
+          ev.replyToken &&
+          (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id')
+        ) {
+          try {
+            await fetch('https://api.line.me/v2/bot/message/reply', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                replyToken: ev.replyToken,
+                messages: [
+                  {
+                    type: 'text',
+                    text:
+                      `รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n${detectedId}` +
+                      (groupName ? `\nกลุ่ม: ${groupName}` : ''),
+                  },
+                ],
+              }),
+            });
+          } catch {
+            // ignore reply failures (e.g. dummy reply tokens)
+          }
+        }
+      }
+
+      if (serverLineState.gasUrl) {
+        try {
+          await fetch(serverLineState.gasUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body),
+          });
+        } catch {
+          // best-effort forward to Apps Script Settings
+        }
+      }
+    })();
   });
 
   app.post('/api/line/send', async (req: Request, res: Response) => {

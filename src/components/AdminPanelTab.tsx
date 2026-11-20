@@ -323,14 +323,13 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   }, [settings]);
 
   useEffect(() => {
-    if (!isAdminUnlocked) return;
     let cancelled = false;
     fetchServerLineStatus(settings.lineTargetId || DEFAULT_LINE_GROUP_ID).then((srv) => {
       if (!cancelled && srv) {
         setServerLineStatus(srv);
       }
     });
-    if (onFetchLineStatus && settings.gasUrl) {
+    if (isAdminUnlocked && onFetchLineStatus && settings.gasUrl) {
       onFetchLineStatus().then((status) => {
         if (!cancelled && status) {
           setLineStatusInfo(status);
@@ -365,9 +364,6 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     const cleanTime = /^\d{2}:\d{2}$/.test(lineAutoTime.trim())
       ? lineAutoTime.trim()
       : DEFAULT_LINE_AUTO_TIME;
-    const tokenAvailable = Boolean(
-      serverLineStatus?.hasServerToken || lineStatusInfo?.hasToken || settings.lineChannelTokenSet
-    );
 
     if (lineAutoEnabled && !cleanTargetId) {
       setLineActionFeedback({
@@ -376,10 +372,20 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       });
       return;
     }
+
+    let latestSrv = serverLineStatus;
+    if (!latestSrv) {
+      latestSrv = await fetchServerLineStatus(cleanTargetId, true);
+      if (latestSrv) setServerLineStatus(latestSrv);
+    }
+
+    const tokenAvailable = Boolean(
+      latestSrv?.hasServerToken || lineStatusInfo?.hasToken || settings.lineChannelTokenSet
+    );
     if (lineAutoEnabled && !tokenAvailable) {
       setLineActionFeedback({
         type: 'error',
-        text: 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์ (.env) หรือ Google Apps Script ScriptProperties',
+        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (03:59 น.)"',
       });
       return;
     }
@@ -429,10 +435,17 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       });
       return;
     }
-    if (!serverLineStatus?.hasServerToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
+
+    let latestSrv = serverLineStatus;
+    if (!latestSrv) {
+      latestSrv = await fetchServerLineStatus(cleanTargetId, true);
+      if (latestSrv) setServerLineStatus(latestSrv);
+    }
+
+    if (!latestSrv?.hasServerToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
       setLineActionFeedback({
         type: 'error',
-        text: 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN บนเซิร์ฟเวอร์ (.env) หรือ Google Apps Script',
+        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (03:59 น.)"',
       });
       return;
     }
@@ -2854,42 +2867,51 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         {showLineSetupGuide && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
             <div className="font-bold text-slate-900">
-              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 03:59 น. (Server Proxy + Apps Script Trigger)
+              ขั้นตอนตั้งค่า LINE Official Account ส่งรายงานอัตโนมัติ 03:59 น. และวิธีแก้ Error (302 Found) ตอน Verify Webhook
             </div>
-            <ol className="list-decimal list-inside space-y-1.5">
+            <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-[11px] leading-relaxed">
+              <span className="font-bold">ส่งเข้ากลุ่มได้ทันทีโดยไม่ต้องกด Verify Webhook:</span>{' '}
+              เนื่องจากระบบมี Group ID ปลายทาง (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code>) และบอทอยู่ในกลุ่มแล้ว การกดปุ่ม <span className="font-semibold">ทดสอบส่งเข้า LINE กลุ่มทันที</span> และตารางส่ง <span className="font-semibold">03:59 น.</span> ใช้ Push API ซึ่งทำงานได้เลยโดย <span className="font-semibold">ไม่จำเป็นต้องเปิด Use webhook</span>
+            </div>
+            <ol className="list-decimal list-inside space-y-2">
               <li>
-                ระบบได้ตั้งค่า <span className="font-semibold">Channel access token</span> ไว้ฝั่งเซิร์ฟเวอร์ (<code className="bg-white border px-1 rounded font-mono">.env</code>) และกำหนดกลุ่มปลายทางเริ่มต้นเป็น{' '}
-                <code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> แล้ว (ต้องเชิญ LINE Bot เข้ากลุ่มนี้และเปิด <span className="font-semibold">Allow bot to join group chats</span>)
+                <span className="font-semibold text-red-800">สาเหตุที่ LINE Developers แจ้ง 302 Found:</span>{' '}
+                URL ของ Google Apps Script (<code className="bg-white border px-1 rounded font-mono">script.google.com/.../exec</code>) จะตอบกลับทุก POST ด้วย HTTP <code className="bg-white border px-1 rounded font-mono">302 Redirect</code> เสมอ ทำให้ปุ่ม Verify ของ LINE ปฏิเสธ (LINE บังคับต้องได้ <code className="bg-white border px-1 rounded font-mono">200 OK</code> โดยตรงเท่านั้น) จึง<span className="font-semibold">ห้ามนำ URL ของ Apps Script ไปใส่ใน Webhook URL</span>
               </li>
               <li>
-                หากต้องการดึงรหัสกลุ่มอัตโนมัติ ให้นำ{' '}
-                <span className="font-semibold">Webhook URL</span> ด้านล่างไปวางใน LINE Developers แล้วเปิด Use webhook จากนั้นพิมพ์{' '}
-                <code className="bg-white border px-1.5 py-0.5 rounded font-mono">/groupid</code> ในกลุ่ม LINE:
-                {settings.gasUrl && (
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <input
-                      type="text"
-                      readOnly
-                      value={settings.gasUrl}
-                      className="flex-1 text-[11px] font-mono bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(settings.gasUrl || '');
-                        setCopiedWebhookUrl(true);
-                        setTimeout(() => setCopiedWebhookUrl(false), 2000);
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-[11px] font-semibold cursor-pointer"
-                    >
-                      {copiedWebhookUrl ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedWebhookUrl ? 'คัดลอกแล้ว' : 'คัดลอก URL'}</span>
-                    </button>
-                  </div>
-                )}
+                หากต้องการเปิด Webhook (เพื่อใช้คำสั่ง <code className="bg-white border px-1 rounded font-mono">/groupid</code> และกด <span className="font-semibold">Verify</span> ให้ผ่าน <code className="bg-white border px-1 rounded font-mono">200 OK</code>) ให้ใช้ Endpoint <code className="bg-white border px-1 rounded font-mono">/api/line/webhook</code> บนโดเมนสาธารณะของแอป (หลังกด Share / Deploy แอป ไม่ใช่ลิงก์ Preview ที่ติดล็อกอิน Google):
+                {(() => {
+                  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+                  const publicOrigin = origin.includes('ais-dev-')
+                    ? origin.replace('ais-dev-', 'ais-pre-')
+                    : origin;
+                  const webhookUrl = publicOrigin ? `${publicOrigin}/api/line/webhook` : '/api/line/webhook';
+                  return (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={webhookUrl}
+                        className="flex-1 text-[11px] font-mono bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(webhookUrl);
+                          setCopiedWebhookUrl(true);
+                          setTimeout(() => setCopiedWebhookUrl(false), 2000);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-[11px] font-semibold cursor-pointer"
+                      >
+                        {copiedWebhookUrl ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedWebhookUrl ? 'คัดลอกแล้ว' : 'คัดลอก Webhook URL'}</span>
+                      </button>
+                    </div>
+                  );
+                })()}
               </li>
               <li>
-                นำโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุดไปอัปเดตและ{' '}
+                สำหรับการส่งอัตโนมัติ <span className="font-semibold">03:59 น.</span> บน Google Cloud ให้นำโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุดไปอัปเดตและ{' '}
                 <span className="font-semibold">Deploy → New version</span> ใน Google Apps Script (สิทธิ์ Who has access: Anyone) แล้วกดปุ่ม{' '}
                 <span className="font-semibold text-emerald-800">บันทึกและตั้งเวลาอัตโนมัติ (03:59 น.)</span> ด้านบน
               </li>
