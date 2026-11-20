@@ -2468,7 +2468,13 @@ export default function App() {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
-  }): Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }> => {
+  }): Promise<{
+    ok: boolean;
+    error?: string;
+    lineAutomation?: LineAutomationStatusInfo;
+    gasSynced?: boolean;
+    gasError?: string;
+  }> => {
     if (!isAdmin) {
       showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
       return { ok: false, error: 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น' };
@@ -2552,13 +2558,18 @@ export default function App() {
         config.enabled
           ? proxyRes.gasSynced
             ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${resolvedTargetId}) เวลา ${config.time || '15:59'} น. สำเร็จ`
-            : `บันทึกตั้งค่า LINE บนเซิร์ฟเวอร์แล้ว${
-                proxyRes.gasError ? ` (Apps Script: ${proxyRes.gasError})` : ''
+            : `บันทึกบนเซิร์ฟเวอร์แล้ว แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
+                proxyRes.gasError ? ` (${proxyRes.gasError})` : ''
               }`
           : 'บันทึกการปิดส่งรายงาน LINE อัตโนมัติแล้ว',
-        'success'
+        config.enabled && gasUrl && !proxyRes.gasSynced ? 'info' : 'success'
       );
-      return { ok: true, lineAutomation };
+      return {
+        ok: true,
+        lineAutomation,
+        gasSynced: Boolean(proxyRes.gasSynced),
+        gasError: proxyRes.gasError,
+      };
     }
 
     // 2. Static build fallback (direct GAS without Node backend)

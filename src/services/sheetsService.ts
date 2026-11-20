@@ -4800,6 +4800,11 @@ export interface LineAutomationStatusInfo {
   triggerCount: number;
   nextRunAt: string;
   hasToken: boolean;
+  tokenVerified?: boolean;
+  tokenError?: string;
+  botName?: string;
+  groupVerified?: boolean;
+  groupName?: string;
   targetId?: string;
   detectedGroupId?: string;
   detectedGroupName?: string;
@@ -5132,6 +5137,11 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
         triggerCount: Number(data.triggerCount) || 0,
         nextRunAt: String(data.nextRunAt || ''),
         hasToken: Boolean(data.hasToken),
+        tokenVerified: typeof data.tokenVerified === 'boolean' ? data.tokenVerified : undefined,
+        tokenError: String(data.tokenError || ''),
+        botName: String(data.botName || ''),
+        groupVerified: typeof data.groupVerified === 'boolean' ? data.groupVerified : undefined,
+        groupName: String(data.groupName || ''),
         targetId: String(data.targetId || DEFAULT_LINE_GROUP_ID),
         detectedGroupId: String(data.detectedGroupId || ''),
         detectedGroupName: String(data.detectedGroupName || ''),

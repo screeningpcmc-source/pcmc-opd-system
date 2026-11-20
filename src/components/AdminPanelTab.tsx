@@ -122,7 +122,13 @@ interface AdminPanelTabProps {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
-  }) => Promise<{ ok: boolean; error?: string; lineAutomation?: LineAutomationStatusInfo }>;
+  }) => Promise<{
+    ok: boolean;
+    error?: string;
+    lineAutomation?: LineAutomationStatusInfo;
+    gasSynced?: boolean;
+    gasError?: string;
+  }>;
   onSendLineReportNow?: (params: {
     targetId?: string;
     date?: string;
@@ -403,16 +409,25 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
         const srv = await fetchServerLineStatus(cleanTargetId, true);
         if (srv) setServerLineStatus(srv);
-        setLineActionFeedback({
-          type: 'success',
-          text: lineAutoEnabled
-            ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำหรับกลุ่ม ${
-                srv?.groupName ? `"${srv.groupName}"` : cleanTargetId
-              } สำเร็จ${
-                res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
-              }`
-            : 'บันทึกการตั้งค่าและปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
-        });
+        if (lineAutoEnabled && res.gasSynced === false) {
+          setLineActionFeedback({
+            type: 'info',
+            text: `บันทึกตั้งค่าบนเซิร์ฟเวอร์นี้แล้ว (${cleanTime} น.) แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
+              res.gasError ? `: ${res.gasError}` : ''
+            } — หากเปิดใช้งานจาก GitHub Pages หรือรอตั้งเวลาอัตโนมัติบน Google Cloud กรุณาอัปเดตและ Deploy Code.gs ล่าสุดแล้วใช้เมนู "🔑 อัปเดต LINE Token ใหม่" ใน Google Sheets`,
+          });
+        } else {
+          setLineActionFeedback({
+            type: 'success',
+            text: lineAutoEnabled
+              ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำหรับกลุ่ม ${
+                  srv?.groupName ? `"${srv.groupName}"` : cleanTargetId
+                } สำเร็จ${
+                  res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
+                }`
+              : 'บันทึกการตั้งค่าและปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
+          });
+        }
       } else {
         setLineActionFeedback({
           type: 'error',
@@ -479,11 +494,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           if (fresh) setLineStatusInfo(fresh);
         }
       } else {
+        const rawErr = sendRes.error || '';
+        const is401 = rawErr.includes('401') || rawErr.toLowerCase().includes('authentication failed');
         setLineActionFeedback({
           type: 'error',
-          text:
-            sendRes.error ||
-            'ส่งรายงานเข้ากลุ่ม LINE ไม่สำเร็จ กรุณาตรวจสอบว่าบอทอยู่ในกลุ่ม LINE และ Group ID ถูกต้อง',
+          text: is401 && !latestSrv
+            ? 'LINE API HTTP 401 (ส่งผ่าน Google Apps Script): Token ที่บันทึกอยู่ใน Google Apps Script (ScriptProperties) ยังเป็นตัวเก่าหรือหมดอายุแล้ว — กรุณาอัปเดต Code.gs ล่าสุด แล้วไปที่ Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → 🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)" เพื่อใส่ Token ตัวใหม่'
+            : rawErr ||
+              'ส่งรายงานเข้ากลุ่ม LINE ไม่สำเร็จ กรุณาตรวจสอบว่าบอทอยู่ในกลุ่ม LINE และ Group ID ถูกต้อง',
         });
       }
     } finally {
@@ -519,12 +537,29 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           });
         }
       } else if (fresh) {
-        setLineActionFeedback({
-          type: 'info',
-          text: fresh.triggerInstalled
-            ? `เชื่อมต่อ Google Apps Script ปกติ • ติดตั้งทริกเกอร์แล้ว ${fresh.triggerCount} ตัว (รอบถัดไป: ${fresh.nextRunAt || '-'})`
-            : 'เชื่อมต่อ Google Apps Script ปกติ • ยังไม่ได้ติดตั้งทริกเกอร์ส่งอัตโนมัติ',
-        });
+        if (fresh.hasToken && fresh.tokenVerified === false) {
+          setLineActionFeedback({
+            type: 'error',
+            text: `Token ใน Google Apps Script ไม่ผ่านการยืนยัน: ${
+              fresh.tokenError || 'HTTP 401'
+            } — กรุณาอัปเดตผ่านเมนู Google Sheets "🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)"`,
+          });
+        } else {
+          setLineActionFeedback({
+            type: fresh.tokenVerified ? 'success' : 'info',
+            text: `${
+              fresh.tokenVerified
+                ? `Apps Script Token พร้อมส่ง${fresh.botName ? ` (Bot: ${fresh.botName})` : ''}${
+                    fresh.groupName ? ` • กลุ่ม "${fresh.groupName}"` : ''
+                  }`
+                : 'เชื่อมต่อ Google Apps Script ปกติ'
+            } • ${
+              fresh.triggerInstalled
+                ? `ติดตั้งทริกเกอร์แล้ว ${fresh.triggerCount} ตัว (รอบถัดไป: ${fresh.nextRunAt || '-'})`
+                : 'ยังไม่ได้ติดตั้งทริกเกอร์ส่งอัตโนมัติ'
+            }`,
+          });
+        }
       } else {
         setLineActionFeedback({
           type: 'error',
@@ -2598,12 +2633,21 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               ) : serverLineStatus?.hasServerToken && serverLineStatus.tokenVerified === false ? (
                 <span className="text-red-700 flex items-center gap-1">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>Token ไม่ถูกต้อง/หมดอายุ (HTTP 401)</span>
+                  <span>Token บนเซิร์ฟเวอร์ไม่ถูกต้อง/หมดอายุ (HTTP 401)</span>
+                </span>
+              ) : lineStatusInfo?.hasToken && lineStatusInfo.tokenVerified === false ? (
+                <span className="text-red-700 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Token บน Apps Script ไม่ถูกต้อง/หมดอายุ (HTTP 401)</span>
                 </span>
               ) : lineStatusInfo?.hasToken || settings.lineChannelTokenSet ? (
                 <span className="text-emerald-700 flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>บันทึก Token บน Apps Script แล้ว</span>
+                  <span>
+                    {lineStatusInfo?.tokenVerified
+                      ? `พร้อมส่งผ่าน Apps Script${lineStatusInfo.botName ? ` • ${lineStatusInfo.botName}` : ''}`
+                      : 'บันทึก Token บน Apps Script แล้ว'}
+                  </span>
                 </span>
               ) : (
                 <span className="text-amber-700 flex items-center gap-1">
@@ -2611,14 +2655,19 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   <span>รอตั้งค่า LINE_CHANNEL_ACCESS_TOKEN</span>
                 </span>
               )}
-              {serverLineStatus?.groupVerified && (
+              {(serverLineStatus?.groupVerified || lineStatusInfo?.groupVerified) && (
                 <span className="text-[10px] text-emerald-700/90 font-medium">
-                  กลุ่มปลายทาง: {serverLineStatus.groupName || lineTargetId}
+                  กลุ่มปลายทาง: {serverLineStatus?.groupName || lineStatusInfo?.groupName || lineTargetId}
                 </span>
               )}
               {serverLineStatus && !serverLineStatus.groupVerified && serverLineStatus.groupError && (
                 <span className="text-[10px] text-red-700 font-medium">
                   {serverLineStatus.groupError}
+                </span>
+              )}
+              {!serverLineStatus && lineStatusInfo?.hasToken && lineStatusInfo.tokenVerified === false && lineStatusInfo.tokenError && (
+                <span className="text-[10px] text-red-700 font-medium">
+                  {lineStatusInfo.tokenError}
                 </span>
               )}
             </div>

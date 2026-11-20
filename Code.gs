@@ -67,6 +67,7 @@ function onOpen() {
       .addItem('⚙️ บันทึก Web App URL (/exec) ลงในชีท', 'promptAndSaveGasUrl')
       .addSeparator()
       .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)', 'setupLineDailyTrigger0359Ui')
+      .addItem('🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)', 'updateLineTokenUi')
       .addItem('📨 ทดสอบส่งรายงานผู้ป่วยประจำวันเข้า LINE ทันที', 'manualSendDailyCensusToLineUi')
       .addSeparator()
       .addItem('📋 ตรวจสอบ/สร้างหัวตารางทั้ง 6 ชีท', 'setupOpdDatabase')
@@ -2130,7 +2131,67 @@ function pushLineMessageGas_(channelAccessToken, targetId, text) {
   if (code >= 200 && code < 300) {
     return { ok: true };
   }
-  return { ok: false, error: 'LINE API HTTP ' + code + ': ' + res.getContentText() };
+  var rawBody = res.getContentText();
+  if (code === 401) {
+    return {
+      ok: false,
+      error: 'LINE API HTTP 401: Channel Access Token ใน Google Apps Script (ScriptProperties) ไม่ถูกต้องหรือหมดอายุ/ถูก Reissue ใหม่แล้ว กรุณาอัปเดตผ่านเมนู Google Sheets "🏥 ระบบ OPD รพ.ชลประทาน → 🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)"'
+    };
+  }
+  return { ok: false, error: 'LINE API HTTP ' + code + ': ' + rawBody };
+}
+
+function verifyLineTokenGas_(channelAccessToken, targetId) {
+  var token = String(channelAccessToken || '').trim();
+  if (!token) {
+    return { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token' };
+  }
+  try {
+    var botRes = UrlFetchApp.fetch('https://api.line.me/v2/bot/info', {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true
+    });
+    var botCode = botRes.getResponseCode();
+    if (botCode !== 200) {
+      return {
+        ok: false,
+        code: botCode,
+        error: botCode === 401
+          ? 'Token ไม่ถูกต้อง หมดอายุ หรือถูกกด Reissue ใหม่แล้ว (HTTP 401)'
+          : ('LINE API HTTP ' + botCode + ': ' + botRes.getContentText())
+      };
+    }
+    var botData = JSON.parse(botRes.getContentText() || '{}');
+    var botName = String(botData.displayName || '').trim();
+    var cleanTarget = String(targetId || '').trim();
+    var groupName = '';
+    var groupVerified = false;
+    var groupError = '';
+    if (cleanTarget && cleanTarget.indexOf('C') === 0) {
+      var grpRes = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(cleanTarget) + '/summary', {
+        method: 'get',
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      if (grpRes.getResponseCode() === 200) {
+        var grpData = JSON.parse(grpRes.getContentText() || '{}');
+        groupName = String(grpData.groupName || '').trim();
+        groupVerified = true;
+      } else {
+        groupError = 'ไม่พบข้อมูลกลุ่ม (HTTP ' + grpRes.getResponseCode() + ') กรุณาตรวจว่าบอทอยู่ในกลุ่มแล้ว';
+      }
+    }
+    return {
+      ok: true,
+      botName: botName,
+      groupVerified: groupVerified,
+      groupName: groupName,
+      groupError: groupError
+    };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
 }
 
 function replyLineMessageGas_(channelAccessToken, replyToken, text) {
@@ -2417,7 +2478,10 @@ function getLineAutomationStatusFromApi_() {
     var fn = t.getHandlerFunction();
     return fn === 'runLineDailyCensusTrigger_' || fn === 'runLineDailyBackupTrigger_';
   });
-  var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
+  var hasToken = Boolean(token);
+  var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
+  var tokenCheck = hasToken ? verifyLineTokenGas_(token, targetId) : { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ใน ScriptProperties' };
   return {
     success: true,
     enabled: String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true',
@@ -2426,7 +2490,12 @@ function getLineAutomationStatusFromApi_() {
     triggerCount: triggers.length,
     nextRunAt: String(PropertiesService.getScriptProperties().getProperty('LINE_NEXT_RUN_AT') || ''),
     hasToken: hasToken,
-    targetId: String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID),
+    tokenVerified: Boolean(tokenCheck.ok),
+    tokenError: tokenCheck.ok ? '' : String(tokenCheck.error || ''),
+    botName: String(tokenCheck.botName || ''),
+    groupVerified: Boolean(tokenCheck.groupVerified),
+    groupName: String(tokenCheck.groupName || ''),
+    targetId: targetId,
     detectedGroupId: String(settingsMap['Line_Detected_Group_ID'] || ''),
     detectedGroupName: String(settingsMap['Line_Detected_Group_Name'] || ''),
     lastSentAt: String(settingsMap['Line_Last_Sent_At'] || ''),
@@ -2435,22 +2504,79 @@ function getLineAutomationStatusFromApi_() {
   };
 }
 
+function updateLineTokenUi() {
+  var ui = SpreadsheetApp.getUi();
+  var settingsMap = readSettingsMapGas_();
+  var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
+  var tokPrompt = ui.prompt(
+    '🔑 อัปเดต LINE Channel Access Token ใหม่',
+    'วาง Channel Access Token (Long-lived) ตัวล่าสุดจาก LINE Developers Console (ระบบจะตรวจสอบกับ LINE ทันทีก่อนบันทึก):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (tokPrompt.getSelectedButton() !== ui.Button.OK) return;
+  var tokVal = String(tokPrompt.getResponseText() || '').trim();
+  if (!tokVal) {
+    ui.alert('ยกเลิก: ไม่ได้กรอก Token');
+    return;
+  }
+  var check = verifyLineTokenGas_(tokVal, targetId);
+  if (!check.ok) {
+    ui.alert('❌ Token ไม่ผ่านการตรวจสอบกับ LINE API:\n' + check.error + '\n\nกรุณาคัดลอก Token ล่าสุดจาก LINE Developers Console (ห้ามกด Reissue ซ้ำหลังคัดลอก)');
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', tokVal);
+  upsertSettingsEntriesGas_([
+    ['Line_Channel_Token_Set', 'true'],
+    ['Line_Target_Id', targetId]
+  ]);
+  ui.alert(
+    '✅ บันทึกและยืนยัน LINE Token สำเร็จ!\n' +
+    'บอท: ' + (check.botName || '-') + '\n' +
+    'กลุ่ม: ' + (check.groupName || targetId)
+  );
+}
+
 function setupLineDailyTrigger0359Ui() {
   var ui = SpreadsheetApp.getUi();
   var settingsMap = readSettingsMapGas_();
-  var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
+  var storedToken = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
   var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
-  if (!hasToken) {
+
+  var needPromptToken = !storedToken;
+  if (storedToken) {
+    var existingCheck = verifyLineTokenGas_(storedToken, targetId);
+    if (!existingCheck.ok) {
+      needPromptToken = true;
+    } else {
+      var keepChoice = ui.alert(
+        'พบ LINE Token ที่ใช้งานได้อยู่แล้ว',
+        'บอทปัจจุบัน: ' + (existingCheck.botName || '-') + '\nต้องการใช้ Token เดิมนี้ต่อไปหรือไม่?\n(กด YES = ใช้เดิมต่อ | กด NO = วาง Token ใหม่)',
+        ui.ButtonSet.YES_NO_CANCEL
+      );
+      if (keepChoice === ui.Button.CANCEL) return;
+      if (keepChoice === ui.Button.NO) needPromptToken = true;
+    }
+  }
+
+  if (needPromptToken) {
     var tokPrompt = ui.prompt(
       'LINE Channel Access Token',
-      'วาง Channel Access Token (Long-lived) จาก LINE Official Account / LINE Developers:',
+      storedToken
+        ? 'Token เดิมในระบบหมดอายุ/ไม่ถูกต้อง (HTTP 401)\nกรุณาวาง Channel Access Token (Long-lived) ตัวล่าสุดจาก LINE Developers:'
+        : 'วาง Channel Access Token (Long-lived) จาก LINE Official Account / LINE Developers:',
       ui.ButtonSet.OK_CANCEL
     );
     if (tokPrompt.getSelectedButton() !== ui.Button.OK) return;
     var tokVal = String(tokPrompt.getResponseText() || '').trim();
     if (!tokVal) return;
+    var newCheck = verifyLineTokenGas_(tokVal, targetId);
+    if (!newCheck.ok) {
+      ui.alert('❌ Token ที่วางไม่ผ่านการตรวจสอบ:\n' + newCheck.error);
+      return;
+    }
     PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', tokVal);
   }
+
   if (!targetId) {
     var grpPrompt = ui.prompt(
       'LINE Group ID (รหัสกลุ่ม)',
@@ -2461,12 +2587,13 @@ function setupLineDailyTrigger0359Ui() {
     targetId = String(grpPrompt.getResponseText() || '').trim();
     if (!targetId) return;
   }
+
   var triggerInfo = syncLineAutomationTriggers_(true, '15:59');
   upsertSettingsEntriesGas_([
     ['Line_Auto_Enabled', 'true'],
     ['Line_Auto_Time', '15:59'],
-    ['Line_Auto_Report_Day', settingsMap['Line_Auto_Report_Day'] || 'TODAY'],
-    ['Line_Auto_Shift', settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00'],
+    ['Line_Auto_Report_Day', 'TODAY'],
+    ['Line_Auto_Shift', 'ในเวลา 08:00-16:00'],
     ['Line_Target_Id', targetId],
     ['Line_Channel_Token_Set', 'true']
   ]);
