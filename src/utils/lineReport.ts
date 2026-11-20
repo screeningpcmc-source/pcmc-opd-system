@@ -11,6 +11,10 @@ import {
   REFERRAL_ITEM_DEFINITIONS,
   getReferralTotalCount,
   LineAutoReportDayMode,
+  isOffDutyWorkload,
+  getWorkloadOffDutyReason,
+  getWorkloadOffDutyStaff,
+  formatOffDutyStaffSummaryText,
 } from '../types';
 import { formatThaiFullDate, getLocalTodayIso } from './thaiDate';
 
@@ -109,6 +113,12 @@ export function buildDailyCensusLineMessage({
     const rn = staffSource.reduce((s, r) => s + (r.rn || 0), 0);
     const pn = staffSource.reduce((s, r) => s + (r.pn || 0), 0);
     const na = staffSource.reduce((s, r) => s + (r.na !== undefined ? r.na : r.pca || 0), 0);
+    const isGroupOffDuty =
+      grp.subRows.length === 0 &&
+      grp.poolRows.length > 0 &&
+      grp.poolRows.every((r) => isOffDutyWorkload(r));
+    const groupOffDutyReason = grp.poolRows.map((r) => getWorkloadOffDutyReason(r)).find(Boolean) || '';
+    const groupOffDutyStaff = grp.poolRows.flatMap((r) => getWorkloadOffDutyStaff(r));
     return {
       shift: grp.shift,
       subRows: sortedSubs,
@@ -119,6 +129,9 @@ export function buildDailyCensusLineMessage({
       rn,
       pn,
       na,
+      isGroupOffDuty,
+      groupOffDutyReason,
+      groupOffDutyStaff,
     };
   });
 
@@ -166,12 +179,24 @@ export function buildDailyCensusLineMessage({
   };
   const totalNursing = totals.rn + totals.pn + totals.na;
   const clinicCount = regularWorkloads.length + premiumGroups.length;
+  const offDutyCount =
+    regularWorkloads.filter((w) => isOffDutyWorkload(w)).length +
+    premiumGroups.filter((g) => g.isGroupOffDuty).length;
 
   let premiumSection = '';
   if (premiumGroups.length > 0) {
     const premiumLines = premiumGroups.map((grp) => {
+      if (grp.isGroupOffDuty) {
+        return `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ⏸️ Off เวร${
+          grp.groupOffDutyReason ? ` (${grp.groupOffDutyReason})` : ''
+        }`;
+      }
       const nursing = grp.rn + grp.pn + grp.na;
-      const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง`;
+      const groupOffText =
+        grp.groupOffDutyStaff.length > 0
+          ? ` | Off เวรรายวัน: ${formatOffDutyStaffSummaryText(grp.groupOffDutyStaff)}`
+          : '';
+      const headerLine = `🌟 ${PREMIUM_CLINIC_GROUP} (${grp.shift}): ${grp.totalPt.toLocaleString()} ราย (Admit ${grp.admit}) | พยาบาล ${nursing.toFixed(1)} แรง${groupOffText}`;
       const subLines = grp.subRows.map(
         (sub) =>
           `  ↳ ${sub.clinic}: ${getEffectiveTotalPt(sub).toLocaleString()} ราย${
@@ -213,14 +238,21 @@ export function buildDailyCensusLineMessage({
   let regularBreakdown = '';
   if (includeClinicBreakdown && regularWorkloads.length > 0) {
     const lines = regularWorkloads.map((w) => {
+      if (isOffDutyWorkload(w)) {
+        const offReason = getWorkloadOffDutyReason(w);
+        return `• ${w.clinic} (${w.shift}): ⏸️ Off เวร${offReason ? ` (${offReason})` : ''}`;
+      }
       const pt =
         isReferralWorkload(w) && w.referralData
           ? getReferralTotalCount(normalizeReferralData(w.referralData))
           : getEffectiveTotalPt(w);
       const nursing = (w.rn || 0) + (w.pn || 0) + (w.na !== undefined ? w.na : w.pca || 0);
+      const offStaff = getWorkloadOffDutyStaff(w);
+      const offStaffText =
+        offStaff.length > 0 ? ` | Off เวรรายวัน: ${formatOffDutyStaffSummaryText(offStaff)}` : '';
       return `• ${w.clinic} (${w.shift}): ${pt.toLocaleString()} ราย${
         w.admit > 0 ? ` | Admit ${w.admit}` : ''
-      } | พยาบาล ${nursing.toFixed(1)}`;
+      } | พยาบาล ${nursing.toFixed(1)}${offStaffText}`;
     });
     regularBreakdown = `\n──────────────────\n📋 รายละเอียดแยกห้องตรวจ:\n${lines.join('\n')}`;
   }
@@ -242,7 +274,9 @@ export function buildDailyCensusLineMessage({
 👩‍⚕️ กำลังคนพยาบาลปฏิบัติงาน (RN+PN+NA): ${totalNursing.toFixed(1)} แรง
 (RN: ${totals.rn.toFixed(1)} | PN: ${totals.pn.toFixed(1)} | NA: ${totals.na.toFixed(1)})${regularBreakdown}${premiumSection}${referralSection}
 ──────────────────
-บันทึกทั้งหมด ${clinicCount} คลินิกหลัก`;
+บันทึกทั้งหมด ${clinicCount} คลินิกหลัก${
+    offDutyCount > 0 ? ` (เปิดบริการ ${clinicCount - offDutyCount} | Off เวร ${offDutyCount})` : ''
+  }`;
 
   // LINE Messaging API single text message limit is 5000 chars
   return message.length > 4950 ? `${message.slice(0, 4900)}\n...(ข้อความถูกย่อตามขีดจำกัด LINE)` : message;

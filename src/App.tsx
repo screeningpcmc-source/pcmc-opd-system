@@ -34,7 +34,10 @@ import {
   parseLeavePeriodFromNote,
   WorkShift,
   DEFAULT_LINE_AUTO_TIME,
-  LineAutoReportDayMode
+  LineAutoReportDayMode,
+  isOffDutyWorkload,
+  getWorkloadOffDutyReason,
+  getWorkloadOffDutyStaff
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -930,7 +933,15 @@ export default function App() {
     dbRef.current = nextDb;
     setDb(nextDb);
 
-    showToast(`บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`, 'success');
+    const offStaffSavedCount = getWorkloadOffDutyStaff(entry).length;
+    showToast(
+      isOffDutyWorkload(entry)
+        ? `บันทึกสถานะ Off เวรห้องตรวจ ${entry.clinic} สำเร็จ!`
+        : offStaffSavedCount > 0
+        ? `บันทึกภาระงานห้องตรวจ ${entry.clinic} (Off เวรรายวัน ${offStaffSavedCount} คน) สำเร็จ!`
+        : `บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`,
+      'success'
+    );
 
     // Auto-Sync on Save (append-only, batched & parallelized) to Google Sheets when Auto-Sync is enabled
     if (dbRef.current.settings.autoSync === false) return;
@@ -1141,10 +1152,14 @@ export default function App() {
     setDb(nextDb);
 
     const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
+    const batchOffStaffCount = entries.reduce((sum, e) => sum + getWorkloadOffDutyStaff(e).length, 0);
+    const offSuffix = batchOffStaffCount > 0 ? ` (Off เวรรายวัน ${batchOffStaffCount} คน)` : '';
     showToast(
-      subCount > 0
-        ? `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} (${subCount} แผนกย่อย) สำเร็จ!`
-        : `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} สำเร็จ!`,
+      isOffDutyWorkload(primaryEntry)
+        ? `บันทึกสถานะ Off เวร ${PREMIUM_CLINIC_GROUP} สำเร็จ!`
+        : subCount > 0
+        ? `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} (${subCount} แผนกย่อย)${offSuffix} สำเร็จ!`
+        : `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP}${offSuffix} สำเร็จ!`,
       'success'
     );
 
@@ -1595,8 +1610,16 @@ export default function App() {
       lastEditedBy: editedBy,
     };
 
+    const stampedOffCount = getWorkloadOffDutyStaff(stamped).length;
+    const stampedLabel = isOffDutyWorkload(stamped)
+      ? `Off เวร (${getWorkloadOffDutyReason(stamped) || 'งดออกตรวจ'})`
+      : `ผู้ป่วย ${getEffectiveTotalPt(stamped)} คน${
+          stampedOffCount > 0 ? ` • Off เวรรายวัน ${stampedOffCount} คน` : ''
+        }`;
     const summary = prevItem
-      ? `${prevItem.clinic} (${formatThaiShortDate(prevItem.date)} • ${prevItem.shift}) ผู้ป่วย ${getEffectiveTotalPt(prevItem)} → ${getEffectiveTotalPt(stamped)} คน`
+      ? `${prevItem.clinic} (${formatThaiShortDate(prevItem.date)} • ${prevItem.shift}) ${
+          isOffDutyWorkload(prevItem) ? 'Off เวร' : `ผู้ป่วย ${getEffectiveTotalPt(prevItem)}`
+        } → ${stampedLabel}`
       : `${stamped.clinic} (${formatThaiShortDate(stamped.date)})`;
 
     const auditEntry: AuditLogEntry = {
@@ -2752,6 +2775,7 @@ export default function App() {
         {activeTab === 'census' && (
           <DailyCensusTab
             workloads={db.workloads}
+            staffList={db.staff}
             premiumSubClinics={premiumSubClinics}
             settings={db.settings}
             isAdmin={isAdmin}

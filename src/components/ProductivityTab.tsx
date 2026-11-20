@@ -28,7 +28,12 @@ import {
   isReferralWorkload,
   formatReferralSummaryText,
   normalizeReferralData,
-  getWorkloadRolePosition
+  getWorkloadRolePosition,
+  OffDutyStaffEntry,
+  isOffDutyWorkload,
+  getWorkloadOffDutyReason,
+  getWorkloadOffDutyStaff,
+  formatOffDutyStaffSummaryText,
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate, getLocalCurrentMonthIso } from '../utils/thaiDate';
@@ -56,7 +61,8 @@ import {
   CalendarOff,
   GraduationCap,
   ArrowRightLeft,
-  Users
+  Users,
+  PauseCircle
 } from 'lucide-react';
 
 interface ProductivityTabProps {
@@ -119,10 +125,12 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     });
   }, [workloads, selectedMonth, selectedShift, selectedClinic, excludeLasik, excludeReferral, premiumSubClinics]);
 
-  // Working days count: unique dates in the filtered records
+  // Working days count: unique active dates (exclude pure Off เวร dates when open dates exist)
   const workingDays = useMemo(() => {
-    const dates = new Set(filteredWorkloads.map(w => w.date));
-    return dates.size > 0 ? dates.size : 1;
+    const activeDates = new Set(filteredWorkloads.filter(w => !isOffDutyWorkload(w)).map(w => w.date));
+    if (activeDates.size > 0) return activeDates.size;
+    const allDates = new Set(filteredWorkloads.map(w => w.date));
+    return allDates.size > 0 ? allDates.size : 1;
   }, [filteredWorkloads]);
 
   // Totals calculation (uses 0.1 NHPPD for หน่วยคัดกรอง and 0.4 for all other clinics)
@@ -240,6 +248,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         pn: number;
         na: number;
         days: Set<string>;
+        activeDays: Set<string>;
         isPremiumGroup: boolean;
         subClinicTotals: Record<string, number>;
       }
@@ -261,6 +270,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           pn: 0,
           na: 0,
           days: new Set(),
+          activeDays: new Set(),
           isPremiumGroup: isPremium,
           subClinicTotals: {},
         });
@@ -272,6 +282,9 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       item.pn += w.pn || 0;
       item.na += (w.na !== undefined ? w.na : (w.pca || 0));
       item.days.add(w.date);
+      if (!isOffDutyWorkload(w)) {
+        item.activeDays.add(w.date);
+      }
 
       if (isPremium && w.recordType === 'PREMIUM_SUB' && pt > 0) {
         item.subClinicTotals[w.clinic] = (item.subClinicTotals[w.clinic] || 0) + pt;
@@ -279,7 +292,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     });
 
     const list = Array.from(map.entries()).map(([clinicName, val]) => {
-      const d = val.days.size || 1;
+      const d = (val.activeDays.size || val.days.size || 1);
       const avgPt = val.totalPt / d;
       const clinicNhppd = getClinicNhppd(clinicName, settings);
       const ftc = (avgPt * clinicNhppd) / settings.stdHr;
@@ -387,6 +400,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         pt: number;
         notes: string[];
         hasInTimeShift: boolean;
+        hasActiveService: boolean;
       }
     >();
 
@@ -405,9 +419,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           pt: 0,
           notes: [],
           hasInTimeShift: false,
+          hasActiveService: false,
         });
       }
       const row = byDate.get(dateStr)!;
+      const itemIsOffDuty = isOffDutyWorkload(w);
       row.hn += w.hn || 0;
       row.rn += w.rn || 0;
       row.pn += w.pn || 0;
@@ -416,13 +432,34 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (w.shift === 'ในเวลา 08:00-16:00') {
         row.hasInTimeShift = true;
       }
-      if (isReferralWorkload(w) && w.referralData) {
-        const refSummary = formatReferralSummaryText(normalizeReferralData(w.referralData));
-        if (refSummary) {
-          const taggedSummary =
-            selectedClinic === 'ALL' ? `[${REFERRAL_CLINIC_NAME}] ${refSummary}` : refSummary;
-          if (!row.notes.includes(taggedSummary)) {
-            row.notes.push(taggedSummary);
+      if (!itemIsOffDuty) {
+        row.hasActiveService = true;
+      }
+
+      if (itemIsOffDuty) {
+        const offReason = getWorkloadOffDutyReason(w);
+        const prefix = selectedClinic === 'ALL' ? `[${w.clinic}] ` : '';
+        const offText = `${prefix}Off เวร${offReason ? ` (${offReason})` : ''}`;
+        if (!row.notes.includes(offText)) {
+          row.notes.push(offText);
+        }
+      } else {
+        if (isReferralWorkload(w) && w.referralData) {
+          const refSummary = formatReferralSummaryText(normalizeReferralData(w.referralData));
+          if (refSummary) {
+            const taggedSummary =
+              selectedClinic === 'ALL' ? `[${REFERRAL_CLINIC_NAME}] ${refSummary}` : refSummary;
+            if (!row.notes.includes(taggedSummary)) {
+              row.notes.push(taggedSummary);
+            }
+          }
+        }
+        const offStaff = getWorkloadOffDutyStaff(w);
+        if (offStaff.length > 0) {
+          const prefix = selectedClinic === 'ALL' ? `[${w.clinic}] ` : '';
+          const offStaffText = `${prefix}Off เวรรายวัน: ${formatOffDutyStaffSummaryText(offStaff)}`;
+          if (!row.notes.includes(offStaffText)) {
+            row.notes.push(offStaffText);
           }
         }
       }
@@ -602,7 +639,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       mode: 'IN_TIME' | 'OUT_TIME';
       baselineCount: number;
       baselineSummary: string;
-      absentList: { name: string; label: string; kind: 'leave' | 'training' | 'outgoing'; amount: number }[];
+      absentList: { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' | 'off_duty'; amount: number }[];
       incomingList: { name: string; label: string; amount: number }[];
       expectedCount: number;
       recordedNursing: number;
@@ -620,18 +657,57 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       // Group filteredWorkloads by date + unit and compare against OTAttendance for that shift
       const groupMap = new Map<
         string,
-        { date: string; unit: string; rn: number; pn: number; na: number }
+        {
+          date: string;
+          unit: string;
+          rn: number;
+          pn: number;
+          na: number;
+          hasActive: boolean;
+          hasOffDuty: boolean;
+          offReasons: string[];
+          offDutyStaffList: OffDutyStaffEntry[];
+        }
       >();
       filteredWorkloads.forEach((w) => {
         const unit = normalizeClinicUnit(w.clinic);
         const key = `${w.date}||${unit}`;
         if (!groupMap.has(key)) {
-          groupMap.set(key, { date: w.date, unit, rn: 0, pn: 0, na: 0 });
+          groupMap.set(key, {
+            date: w.date,
+            unit,
+            rn: 0,
+            pn: 0,
+            na: 0,
+            hasActive: false,
+            hasOffDuty: false,
+            offReasons: [],
+            offDutyStaffList: [],
+          });
         }
         const g = groupMap.get(key)!;
         g.rn += w.rn || 0;
         g.pn += w.pn || 0;
         g.na += w.na !== undefined ? w.na : (w.pca || 0);
+        if (isOffDutyWorkload(w)) {
+          g.hasOffDuty = true;
+          const r = getWorkloadOffDutyReason(w);
+          if (r && !g.offReasons.includes(r)) g.offReasons.push(r);
+        } else {
+          g.hasActive = true;
+          const staffOff = getWorkloadOffDutyStaff(w);
+          if (staffOff.length > 0) {
+            staffOff.forEach((it) => {
+              if (
+                !g.offDutyStaffList.some(
+                  (x) => x.staffName === it.staffName && (x.periodLabel || '') === (it.periodLabel || '')
+                )
+              ) {
+                g.offDutyStaffList.push(it);
+              }
+            });
+          }
+        }
       });
 
       groupMap.forEach((g, key) => {
@@ -665,25 +741,75 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             })
           ).values()
         );
-        const expected = Number(incomingList.reduce((s, x) => s + x.amount, 0).toFixed(1));
-        const diff = Number((recorded - expected).toFixed(1));
-        const status: VerificationItem['status'] =
-          expected === 0 && recorded > 0
-            ? 'no_baseline'
-            : Math.abs(diff) < 0.01
-            ? 'match'
-            : diff > 0
-            ? 'mismatch_over'
-            : 'mismatch_under';
+        const incomingExpected = Number(incomingList.reduce((s, x) => s + x.amount, 0).toFixed(1));
+        const incomingByName = new Map<string, number>();
+        incomingList.forEach((inc) => {
+          const clean = (inc.name || '').trim();
+          incomingByName.set(clean, Number(((incomingByName.get(clean) || 0) + inc.amount).toFixed(1)));
+        });
 
-        const message =
-          status === 'match'
-            ? 'ตรงกันกับรายชื่อเวร OT ที่บันทึกในเมนู 2'
-            : status === 'no_baseline'
-            ? `บันทึก ${recorded} แรง (ยังไม่มีรายชื่อลงเวร OT กะนี้ในเมนู 2)`
-            : diff > 0
-            ? `บันทึกมากกว่ายอดรายชื่อ OT +${diff} แรง`
-            : `บันทึกน้อยกว่ายอดรายชื่อ OT ${diff} แรง`;
+        const outAbsentList: VerificationItem['absentList'] = [];
+        let matchedOtDeduct = 0;
+        g.offDutyStaffList.forEach((offItem) => {
+          const name = (offItem.staffName || '').trim();
+          if (!name) return;
+          const staff = staffList.find((s) => (s.name || '').trim() === name);
+          const effPos = offItem.position || staff?.position || staffPositionByName.get(name) || '';
+          if (effPos && !isNursingRole(effPos)) return;
+          const amt = offItem.amount === 0.5 ? 0.5 : 1;
+          const pLabel = amt === 0.5 ? (offItem.periodLabel || 'ครึ่งเวร') : '';
+          outAbsentList.push({
+            name,
+            label: `${name} [รายวัน] (Off เวร${amt === 0.5 ? ` 0.5 ${pLabel}` : ''}${
+              offItem.reason ? `: ${offItem.reason}` : ''
+            })`,
+            kind: 'off_duty',
+            amount: amt,
+          });
+          const otAvail = incomingByName.get(name) || 0;
+          if (otAvail > 0) {
+            const deduct = Math.min(otAvail, amt);
+            matchedOtDeduct = Number((matchedOtDeduct + deduct).toFixed(1));
+            incomingByName.set(name, Number((otAvail - deduct).toFixed(1)));
+          }
+        });
+
+        const expected = Math.max(0, Number((incomingExpected - matchedOtDeduct).toFixed(1)));
+        const isPureOffDuty = !g.hasActive && g.hasOffDuty;
+        const diff = Number((recorded - expected).toFixed(1));
+        let status: VerificationItem['status'];
+        let message: string;
+        if (isPureOffDuty) {
+          if (expected === 0 && recorded === 0) {
+            status = 'match';
+            message = `Off เวร / ปิดบริการกะนี้ (${g.offReasons.join(', ') || 'งดออกตรวจ'})`;
+          } else {
+            status = expected > recorded ? 'mismatch_under' : 'mismatch_over';
+            message = `แจ้ง Off เวร แต่พบรายชื่อขึ้นเวร OT ${expected} แรงในเมนู 2`;
+          }
+        } else {
+          status =
+            incomingExpected === 0 && recorded > 0
+              ? 'no_baseline'
+              : Math.abs(diff) < 0.01
+              ? 'match'
+              : diff > 0
+              ? 'mismatch_over'
+              : 'mismatch_under';
+
+          message =
+            status === 'match'
+              ? outAbsentList.length > 0
+                ? matchedOtDeduct > 0
+                  ? `ตรงกันกับรายชื่อเวร OT (หัก Off เวรรายวัน ${matchedOtDeduct} แรงแล้ว)`
+                  : `ตรงกันกับรายชื่อเวร OT (มี Off เวรรายวัน ${outAbsentList.length} คน)`
+                : 'ตรงกันกับรายชื่อเวร OT ที่บันทึกในเมนู 2'
+              : status === 'no_baseline'
+              ? `บันทึก ${recorded} แรง (ยังไม่มีรายชื่อลงเวร OT กะนี้ในเมนู 2)`
+              : diff > 0
+              ? `บันทึกมากกว่ายอดรายชื่อ OT +${diff} แรง`
+              : `บันทึกน้อยกว่ายอดรายชื่อ OT ${diff} แรง`;
+        }
 
         items.push({
           key,
@@ -692,8 +818,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           unit: g.unit,
           mode: 'OUT_TIME',
           baselineCount: 0,
-          baselineSummary: 'เวรนอกเวลา (เทียบจากรายชื่อ OT)',
-          absentList: [],
+          baselineSummary: isPureOffDuty ? 'Off เวร (ปิดบริการกะนี้)' : 'เวรนอกเวลา (เทียบจากรายชื่อ OT)',
+          absentList: outAbsentList,
           incomingList,
           expectedCount: expected,
           recordedNursing: recorded,
@@ -713,19 +839,58 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     const inTimeWorkloads = filteredWorkloads.filter((w) => w.shift === 'ในเวลา 08:00-16:00');
     const inTimeMap = new Map<
       string,
-      { date: string; unit: string; rn: number; pn: number; na: number }
+      {
+        date: string;
+        unit: string;
+        rn: number;
+        pn: number;
+        na: number;
+        hasActive: boolean;
+        hasOffDuty: boolean;
+        offReasons: string[];
+        offDutyStaffList: OffDutyStaffEntry[];
+      }
     >();
 
     inTimeWorkloads.forEach((w) => {
       const unit = normalizeClinicUnit(w.clinic);
       const key = `${w.date}||${unit}`;
       if (!inTimeMap.has(key)) {
-        inTimeMap.set(key, { date: w.date, unit, rn: 0, pn: 0, na: 0 });
+        inTimeMap.set(key, {
+          date: w.date,
+          unit,
+          rn: 0,
+          pn: 0,
+          na: 0,
+          hasActive: false,
+          hasOffDuty: false,
+          offReasons: [],
+          offDutyStaffList: [],
+        });
       }
       const g = inTimeMap.get(key)!;
       g.rn += w.rn || 0;
       g.pn += w.pn || 0;
       g.na += w.na !== undefined ? w.na : (w.pca || 0);
+      if (isOffDutyWorkload(w)) {
+        g.hasOffDuty = true;
+        const r = getWorkloadOffDutyReason(w);
+        if (r && !g.offReasons.includes(r)) g.offReasons.push(r);
+      } else {
+        g.hasActive = true;
+        const staffOff = getWorkloadOffDutyStaff(w);
+        if (staffOff.length > 0) {
+          staffOff.forEach((it) => {
+            if (
+              !g.offDutyStaffList.some(
+                (x) => x.staffName === it.staffName && (x.periodLabel || '') === (it.periodLabel || '')
+              )
+            ) {
+              g.offDutyStaffList.push(it);
+            }
+          });
+        }
+      }
     });
 
     inTimeMap.forEach((g, key) => {
@@ -746,10 +911,46 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       if (baseNA > 0) baselineParts.push(`NA ${baseNA}`);
       const baselineSummary = baselineParts.length > 0 ? baselineParts.join(', ') : 'ไม่มีรายชื่อในเมนู 5';
 
-      // Absent from unit on date: Leaves + Outgoing Cross-Cover (Training is normal work -> amount: 0)
+      const isPureOffDuty = !g.hasActive && g.hasOffDuty;
+      if (isPureOffDuty) {
+        const expectedCount = 0;
+        const diff = Number((recorded - expectedCount).toFixed(1));
+        items.push({
+          key,
+          date: g.date,
+          day: Number(g.date.split('-')[2]) || 0,
+          unit: g.unit,
+          mode: 'IN_TIME',
+          baselineCount,
+          baselineSummary,
+          absentList: [
+            {
+              name: g.unit,
+              label: `Off เวรทั้งกะ (${g.offReasons.join(', ') || 'งดออกตรวจ'})`,
+              kind: 'off_duty',
+              amount: baselineCount,
+            },
+          ],
+          incomingList: [],
+          expectedCount,
+          recordedNursing: recorded,
+          recordedRN: g.rn,
+          recordedPN: g.pn,
+          recordedNA: g.na,
+          diff,
+          status: Math.abs(diff) < 0.01 ? 'match' : 'mismatch_over',
+          message:
+            Math.abs(diff) < 0.01
+              ? `Off เวร / ปิดบริการกะนี้ (${g.offReasons.join(', ') || 'งดออกตรวจ'})`
+              : `แจ้ง Off เวรทั้งกะ แต่มีการบันทึกกำลังคน ${recorded} แรง`,
+        });
+        return;
+      }
+
+      // Absent from unit on date: Leaves + Training + Staff Off เวร + Outgoing Cross-Cover
       const absentMap = new Map<
         string,
-        { name: string; label: string; kind: 'leave' | 'training' | 'outgoing'; amount: number }
+        { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' | 'off_duty'; amount: number }
       >();
 
       leaves.forEach((l) => {
@@ -775,6 +976,24 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             ? `${name} (ไปอบรม/ประชุม${isHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''} - ไม่นับภาระงานหน่วย${extra ? `: ${extra}` : ''})`
             : `${name} (${l.leaveType}${isHalf ? ` 0.5 ${pLabel || 'ครึ่งวัน'}` : ''}${extra ? `: ${extra}` : ''})`,
           kind: isTraining ? 'training' : 'leave',
+          amount: amt,
+        });
+      });
+
+      g.offDutyStaffList.forEach((offItem) => {
+        const name = (offItem.staffName || '').trim();
+        if (!name) return;
+        const staff = staffList.find((s) => (s.name || '').trim() === name);
+        const effPos = offItem.position || staff?.position || staffPositionByName.get(name) || '';
+        if (effPos && !isNursingRole(effPos)) return;
+        const amt = offItem.amount === 0.5 ? 0.5 : 1;
+        const pLabel = amt === 0.5 ? (offItem.periodLabel || 'ครึ่งวัน') : '';
+        const keyId = `OFF|${name}|${pLabel || 'FULL'}`;
+        if (absentMap.has(keyId)) return;
+        absentMap.set(keyId, {
+          name,
+          label: `${name} [รายวัน] (Off เวร${amt === 0.5 ? ` 0.5 ${pLabel}` : ''}${offItem.reason ? `: ${offItem.reason}` : ''})`,
+          kind: 'off_duty',
           amount: amt,
         });
       });
@@ -844,13 +1063,13 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         status = 'no_baseline';
         message =
           absentAmount > 0 || incomingAmount > 0
-            ? 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5 (พบข้อมูลลา/ช่วยงานตามรายการ)'
+            ? 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5 (พบข้อมูลลา/Off เวร/ช่วยงานตามรายการ)'
             : 'ยังไม่มีรายชื่อบุคลากรประจำหน่วยงานในเมนู 5';
       } else if (Math.abs(diff) < 0.01) {
         status = 'match';
         message =
           absentAmount > 0 || incomingAmount > 0
-            ? 'ตรงกัน (หักยอดลา/ช่วยงานแล้วสอดคล้องกับยอดปฏิบัติงาน)'
+            ? 'ตรงกัน (หักยอดลา/Off เวร/ช่วยงานแล้วสอดคล้องกับยอดปฏิบัติงาน)'
             : 'ตรงกันตามอัตรากำลังประจำ';
       } else if (diff > 0) {
         status = 'mismatch_over';
@@ -858,7 +1077,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           message =
             'ต่าง +0.5 แรง (คาดว่ามีผู้มาขึ้นแทน/ช่วยครึ่งวัน 0.5 แรง — สามารถบันทึกในเมนู 1 หรือ 2)';
         } else if (absentAmount > 0) {
-          message = `บันทึกสูงกว่าคาดการณ์ +${diff} แรง (หักลา/ไปช่วย ${absentAmount} แรง กรุณาตรวจสอบยอดคนหรือผู้มาช่วย)`;
+          message = `บันทึกสูงกว่าคาดการณ์ +${diff} แรง (หักลา/Off เวร/ไปช่วย ${absentAmount} แรง กรุณาตรวจสอบยอดคนหรือผู้มาช่วย)`;
         } else {
           message = `บันทึกสูงกว่ากำลังคนประจำ +${diff} แรง (ตรวจสอบว่ามีผู้มาช่วยงาน 0.5/1 แรงหรือไม่)`;
         }
@@ -866,8 +1085,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         status = 'mismatch_under';
         message =
           absentAmount === 0
-            ? `บันทึกต่ำกว่ากำลังคนประจำ ${diff} แรง (ยังไม่มีรายชื่อลา / ไปช่วยห้องอื่นในวันนี้)`
-            : `บันทึกต่ำกว่าคาดการณ์ ${diff} แรง (กรุณาตรวจสอบรายชื่อลา/ช่วยงานซ้ำ)`;
+            ? `บันทึกต่ำกว่ากำลังคนประจำ ${diff} แรง (ยังไม่มีรายชื่อลา / Off เวร / ไปช่วยห้องอื่นในวันนี้)`
+            : `บันทึกต่ำกว่าคาดการณ์ ${diff} แรง (กรุณาตรวจสอบรายชื่อลา/Off เวร/ช่วยงานซ้ำ)`;
       }
 
       items.push({
@@ -929,7 +1148,10 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     };
   }, [staffingVerification, showAllVerificationDays]);
 
-  const actualWorkingDays = dailyReportRows.length;
+  const actualWorkingDays = useMemo(() => {
+    const activeCount = dailyReportRows.filter((r) => r.hasActiveService).length;
+    return activeCount > 0 ? activeCount : dailyReportRows.length;
+  }, [dailyReportRows]);
 
   const officialReportMeta = useMemo(() => {
     const [yrStr, moStr] = selectedMonth.split('-');
@@ -991,7 +1213,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   // Monthly aggregation for Referral Center (ศูนย์รับ - ส่งต่อผู้ป่วย)
   const referralMonthlySummary = useMemo(() => {
     const records = filteredWorkloads
-      .filter((w) => isReferralWorkload(w))
+      .filter((w) => isReferralWorkload(w) && !isOffDutyWorkload(w))
       .sort((a, b) => a.date.localeCompare(b.date) || a.shift.localeCompare(b.shift, 'th'));
 
     if (records.length === 0) return null;
@@ -1719,6 +1941,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                                     ? 'bg-cyan-50 text-cyan-900 border border-cyan-200'
                                     : ab.kind === 'outgoing'
                                     ? 'bg-purple-50 text-purple-900 border border-purple-200'
+                                    : ab.kind === 'off_duty'
+                                    ? 'bg-violet-100/90 text-violet-950 border border-violet-300'
                                     : 'bg-amber-100/80 text-amber-950 border border-amber-200'
                                 }`}
                               >
@@ -1726,6 +1950,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                                   <GraduationCap className="w-3 h-3 shrink-0" />
                                 ) : ab.kind === 'outgoing' ? (
                                   <ArrowRightLeft className="w-3 h-3 shrink-0" />
+                                ) : ab.kind === 'off_duty' ? (
+                                  <PauseCircle className="w-3 h-3 shrink-0" />
                                 ) : (
                                   <CalendarOff className="w-3 h-3 shrink-0" />
                                 )}
@@ -1941,8 +2167,14 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                 {/* Daily Rows */}
                 {dailyReportRows.map((row) => {
                   const rowNursing = row.rn + row.pn + row.na;
+                  const isPureOffRow = !row.hasActiveService;
                   return (
-                    <tr key={row.date} className="text-center min-h-[22px] print:min-h-[18px]">
+                    <tr
+                      key={row.date}
+                      className={`text-center min-h-[22px] print:min-h-[18px] ${
+                        isPureOffRow ? 'bg-violet-50/40 print:bg-white' : ''
+                      }`}
+                    >
                       <td className="border border-black py-0.5 px-1 align-middle">{row.day}</td>
                       <td className="border border-black py-0.5 px-1.5 text-left text-[10.5px] print:text-[9px] leading-snug whitespace-normal break-words align-middle">
                         {row.notes.join(', ')}
@@ -1963,7 +2195,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
                         {officialReportMeta.fmtStaff(rowNursing)}
                       </td>
                       <td className="border border-black py-0.5 px-1 bg-[#ccfbf1]">
-                        {row.pt}
+                        {isPureOffRow ? 'Off' : row.pt}
                       </td>
                     </tr>
                   );

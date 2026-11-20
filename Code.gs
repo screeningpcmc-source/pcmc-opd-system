@@ -1903,6 +1903,30 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
       }
     }
 
+    var isOffDuty = false;
+    var offDutyReason = '';
+    var offDutyMatch = rawNote.match(/\[\[OFF_DUTY_JSON:([\s\S]*?)\]\]/);
+    if (offDutyMatch) {
+      isOffDuty = true;
+      try {
+        var parsedOff = JSON.parse(offDutyMatch[1]);
+        offDutyReason = String((parsedOff && (parsedOff.r || parsedOff.reason)) || '').trim();
+      } catch (e2) {
+        offDutyReason = '';
+      }
+    }
+
+    var offDutyStaffList = [];
+    var offStaffMatch = rawNote.match(/\[\[OFF_STAFF_JSON:([\s\S]*?)\]\]/);
+    if (offStaffMatch) {
+      try {
+        var parsedOffStaff = JSON.parse(offStaffMatch[1]);
+        if (Array.isArray(parsedOffStaff)) offDutyStaffList = parsedOffStaff;
+      } catch (e3) {
+        offDutyStaffList = [];
+      }
+    }
+
     var isPremium = recordType === 'PREMIUM_POOL' || recordType === 'PREMIUM_SUB' ||
       clinicGroup === 'ศูนย์ปัญญาภิรมย์' || clinicGroup === 'คลินิกพิเศษ PREMIUM' ||
       cl.indexOf('ศูนย์ปัญญาภิรมย์') === 0 || /-Premium$/i.test(cl) || premiumSubs.indexOf(cl) !== -1;
@@ -1914,7 +1938,10 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
       reporter: reporter,
       recordType: isPremium ? (recordType === 'PREMIUM_POOL' || cl.indexOf('กำลังคนรวม') !== -1 ? 'PREMIUM_POOL' : 'PREMIUM_SUB') : 'STANDARD',
       isPremium: isPremium,
-      referralData: referralData
+      referralData: referralData,
+      isOffDuty: isOffDuty,
+      offDutyReason: offDutyReason,
+      offDutyStaffList: offDutyStaffList
     });
   });
 
@@ -1956,8 +1983,28 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
   var totals = { totalPt: 0, adultPt: 0, childPt: 0, admit: 0, rn: 0, pn: 0, na: 0 };
   var regularLines = [];
   var referralRows = [];
+  var offDutyCount = 0;
+
+  var formatOffStaffListGas_ = function(list) {
+    if (!Array.isArray(list) || list.length === 0) return '';
+    var labels = list.map(function(os) {
+      var nm = String(os.n || os.staffName || '').trim();
+      if (!nm) return '';
+      var amtVal = Number(os.a !== undefined ? os.a : os.amount);
+      var lbl = String(os.l || os.periodLabel || '').trim();
+      var rsn = String(os.r || os.reason || '').trim();
+      var amtStr = amtVal === 0.5 ? (' 0.5' + (lbl ? ' ' + lbl : '')) : '';
+      return nm + ' [รายวัน] (Off เวร' + amtStr + (rsn ? ' - ' + rsn : '') + ')';
+    }).filter(Boolean);
+    return labels.length > 0 ? (' | Off เวรรายวัน: ' + labels.join(', ')) : '';
+  };
 
   regularRows.forEach(function(w) {
+    if (w.isOffDuty) {
+      offDutyCount += 1;
+      regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ⏸️ Off เวร' + (w.offDutyReason ? ' (' + w.offDutyReason + ')' : ''));
+      return;
+    }
     var effPt = w.totalPt;
     if ((w.clinic === 'ศูนย์รับ - ส่งต่อผู้ป่วย' || w.referralData) && w.referralData) {
       referralRows.push(w);
@@ -1975,26 +2022,40 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
     totals.pn += w.pn;
     totals.na += w.na;
     var nursing = w.rn + w.pn + w.na;
-    regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ' + effPt + ' ราย' + (w.admit > 0 ? ' | Admit ' + w.admit : '') + ' | พยาบาล ' + nursing.toFixed(1));
+    var offStaffStr = formatOffStaffListGas_(w.offDutyStaffList);
+    regularLines.push('• ' + w.clinic + ' (' + w.shift + '): ' + effPt + ' ราย' + (w.admit > 0 ? ' | Admit ' + w.admit : '') + ' | พยาบาล ' + nursing.toFixed(1) + offStaffStr);
   });
 
   var premiumBlocks = [];
   var premKeys = Object.keys(premiumGroupsMap);
   premKeys.forEach(function(pk) {
     var grp = premiumGroupsMap[pk];
+    var allPoolOff = grp.subRows.length === 0 && grp.poolRows.length > 0 && grp.poolRows.every(function(pr) { return pr.isOffDuty; });
+    if (allPoolOff) {
+      offDutyCount += 1;
+      var gOffReason = '';
+      grp.poolRows.forEach(function(pr) { if (!gOffReason && pr.offDutyReason) gOffReason = pr.offDutyReason; });
+      premiumBlocks.push('🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ⏸️ Off เวร' + (gOffReason ? ' (' + gOffReason + ')' : ''));
+      return;
+    }
     var staffSrc = grp.poolRows.length > 0 ? grp.poolRows : grp.subRows;
     var pAdult = 0, pChild = 0, pTotal = 0, pAdmit = 0, pRn = 0, pPn = 0, pNa = 0;
+    var pOffStaffList = [];
     grp.subRows.forEach(function(sr) {
       pAdult += sr.adultPt; pChild += sr.childPt; pTotal += sr.totalPt; pAdmit += sr.admit;
     });
     staffSrc.forEach(function(sr) {
       pRn += sr.rn; pPn += sr.pn; pNa += sr.na;
+      if (Array.isArray(sr.offDutyStaffList) && sr.offDutyStaffList.length > 0) {
+        pOffStaffList = pOffStaffList.concat(sr.offDutyStaffList);
+      }
     });
     pTotal = Math.max(pTotal, pAdult + pChild);
     totals.totalPt += pTotal; totals.adultPt += pAdult; totals.childPt += pChild; totals.admit += pAdmit;
     totals.rn += pRn; totals.pn += pPn; totals.na += pNa;
     var pNursing = pRn + pPn + pNa;
-    var lines = ['🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ' + pTotal + ' ราย (Admit ' + pAdmit + ') | พยาบาล ' + pNursing.toFixed(1) + ' แรง'];
+    var pOffStaffStr = formatOffStaffListGas_(pOffStaffList);
+    var lines = ['🌟 ศูนย์ปัญญาภิรมย์ (' + grp.shift + '): ' + pTotal + ' ราย (Admit ' + pAdmit + ') | พยาบาล ' + pNursing.toFixed(1) + ' แรง' + pOffStaffStr];
     grp.subRows.forEach(function(sr) {
       lines.push('  ↳ ' + sr.clinic + ': ' + sr.totalPt + ' ราย' + (sr.admit > 0 ? ' (Admit ' + sr.admit + ')' : ''));
     });
@@ -2035,7 +2096,8 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
     (regularLines.length > 0 ? '\n──────────────────\n📋 รายละเอียดแยกห้องตรวจ:\n' + regularLines.join('\n') : '') +
     (premiumBlocks.length > 0 ? '\n──────────────────\n' + premiumBlocks.join('\n') : '') +
     referralSection +
-    '\n──────────────────\nบันทึกทั้งหมด ' + clinicCount + ' คลินิกหลัก';
+    '\n──────────────────\nบันทึกทั้งหมด ' + clinicCount + ' คลินิกหลัก' +
+    (offDutyCount > 0 ? ' (เปิดบริการ ' + (clinicCount - offDutyCount) + ' | Off เวร ' + offDutyCount + ')' : '');
 
   if (msg.length > 4950) {
     msg = msg.slice(0, 4900) + '\n...(ข้อความถูกย่อตามขีดจำกัด LINE)';

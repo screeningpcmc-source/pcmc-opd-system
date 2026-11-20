@@ -266,6 +266,28 @@ export function isReferralClinicName(clinic?: string): boolean {
   return (clinic || '').trim() === REFERRAL_CLINIC_NAME;
 }
 
+export type OffDutyPeriodLabel = HalfDayPeriod | 'ครึ่งเวร';
+
+export interface OffDutyStaffEntry {
+  staffName: string;
+  position: StaffPosition;
+  amount: 1 | 0.5;
+  periodLabel?: OffDutyPeriodLabel;
+  reason?: string;
+}
+
+export const OFF_DUTY_REASON_PRESETS = [
+  'ยอดผู้ป่วยน้อยลง (Off เวรรายวัน)',
+  'ยอดผู้ป่วยน้อยลง (Off ครึ่งเวร)',
+  'ปรับลดอัตรากำลังรายวันตามปริมาณผู้ป่วย',
+] as const;
+
+export const OFF_DUTY_STAFF_REASON_PRESETS = [
+  'ยอดผู้ป่วยน้อยลง (Off เวรรายวัน)',
+  'ยอดผู้ป่วยน้อยลง (Off ครึ่งเวร)',
+  'ปรับลดอัตรากำลังรายวันตามปริมาณผู้ป่วย',
+] as const;
+
 export interface DailyWorkload {
   id: string;
   date: string; // YYYY-MM-DD
@@ -288,6 +310,9 @@ export interface DailyWorkload {
   poolId?: string;
   recordType?: WorkloadRecordType;
   referralData?: ReferralCenterData;
+  isOffDuty?: boolean;
+  offDutyReason?: string;
+  offDutyStaff?: OffDutyStaffEntry[];
   timestamp?: string;
   lastEditedAt?: string;
   lastEditReason?: string;
@@ -301,47 +326,210 @@ export function isReferralWorkload(
 }
 
 const REFERRAL_TAG_REGEX = /\[\[REFERRAL_JSON:([\s\S]*?)\]\]/;
+const OFF_DUTY_TAG_REGEX = /\[\[OFF_DUTY_JSON:([\s\S]*?)\]\]/;
+const OFF_STAFF_TAG_REGEX = /\[\[OFF_STAFF_JSON:([\s\S]*?)\]\]/;
 
 export function stripReferralTagFromNote(note?: string): string {
-  return (note || '').replace(REFERRAL_TAG_REGEX, '').trim();
+  return (note || '')
+    .replace(REFERRAL_TAG_REGEX, '')
+    .replace(OFF_DUTY_TAG_REGEX, '')
+    .replace(OFF_STAFF_TAG_REGEX, '')
+    .trim();
+}
+
+export function stripAllWorkloadTagsFromNote(note?: string): string {
+  return stripReferralTagFromNote(note);
+}
+
+export function normalizeOffDutyStaffEntries(raw?: any): OffDutyStaffEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const list: OffDutyStaffEntry[] = [];
+  raw.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const staffName = String(item.staffName || item.n || '').trim();
+    if (!staffName) return;
+    const rawPos = String(item.position || item.p || 'RN').trim();
+    const amt = Number(item.amount ?? item.a) === 0.5 ? 0.5 : 1;
+    const rawPeriod = String(item.periodLabel || item.l || '').trim();
+    const periodLabel: OffDutyPeriodLabel =
+      rawPeriod === 'ครึ่งวันเช้า' || rawPeriod === 'ครึ่งวันบ่าย' || rawPeriod === 'ครึ่งเวร'
+        ? rawPeriod
+        : amt === 0.5
+        ? 'ครึ่งเวร'
+        : '';
+    const reason = String(item.reason || item.r || '').trim();
+    list.push({
+      staffName,
+      position: normalizeStaffPosition(rawPos),
+      amount: amt,
+      ...(amt === 0.5 && periodLabel ? { periodLabel } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  });
+  return list;
+}
+
+export function parseWorkloadMetaFromSheetNote(rawNote?: string): {
+  cleanNote: string;
+  referralData?: ReferralCenterData;
+  isOffDuty: boolean;
+  offDutyReason?: string;
+  offDutyStaff?: OffDutyStaffEntry[];
+} {
+  const txt = (rawNote || '').trim();
+  if (!txt) return { cleanNote: '', isOffDuty: false };
+
+  let referralData: ReferralCenterData | undefined;
+  const refMatch = txt.match(REFERRAL_TAG_REGEX);
+  if (refMatch) {
+    try {
+      referralData = normalizeReferralData(JSON.parse(refMatch[1]));
+    } catch {
+      referralData = undefined;
+    }
+  }
+
+  let isOffDuty = false;
+  let offDutyReason: string | undefined;
+  const offDutyMatch = txt.match(OFF_DUTY_TAG_REGEX);
+  if (offDutyMatch) {
+    isOffDuty = true;
+    try {
+      const parsed = JSON.parse(offDutyMatch[1]);
+      const r = typeof parsed?.r === 'string' ? parsed.r.trim() : typeof parsed?.reason === 'string' ? parsed.reason.trim() : '';
+      if (r) offDutyReason = r;
+    } catch {
+      // keep isOffDuty = true
+    }
+  }
+
+  let offDutyStaff: OffDutyStaffEntry[] | undefined;
+  const offStaffMatch = txt.match(OFF_STAFF_TAG_REGEX);
+  if (offStaffMatch) {
+    try {
+      const parsed = normalizeOffDutyStaffEntries(JSON.parse(offStaffMatch[1]));
+      if (parsed.length > 0) offDutyStaff = parsed;
+    } catch {
+      offDutyStaff = undefined;
+    }
+  }
+
+  const cleanNote = stripAllWorkloadTagsFromNote(txt);
+  return {
+    cleanNote,
+    ...(referralData ? { referralData } : {}),
+    isOffDuty,
+    ...(offDutyReason ? { offDutyReason } : {}),
+    ...(offDutyStaff && offDutyStaff.length > 0 ? { offDutyStaff } : {}),
+  };
 }
 
 export function parseReferralFromSheetNote(rawNote?: string): {
   cleanNote: string;
   referralData?: ReferralCenterData;
 } {
-  const txt = (rawNote || '').trim();
-  if (!txt) return { cleanNote: '' };
-  const match = txt.match(REFERRAL_TAG_REGEX);
-  if (!match) return { cleanNote: txt };
-  const cleanNote = txt.replace(REFERRAL_TAG_REGEX, '').trim();
-  try {
-    const parsed = JSON.parse(match[1]);
-    return {
-      cleanNote,
-      referralData: normalizeReferralData(parsed),
-    };
-  } catch {
-    return { cleanNote };
+  const parsed = parseWorkloadMetaFromSheetNote(rawNote);
+  return {
+    cleanNote: parsed.cleanNote,
+    ...(parsed.referralData ? { referralData: parsed.referralData } : {}),
+  };
+}
+
+export function isOffDutyWorkload(
+  w?: Pick<DailyWorkload, 'isOffDuty' | 'note'> | null
+): boolean {
+  if (!w) return false;
+  if (w.isOffDuty) return true;
+  return OFF_DUTY_TAG_REGEX.test(w.note || '');
+}
+
+export function getWorkloadOffDutyReason(
+  w?: Pick<DailyWorkload, 'offDutyReason' | 'note'> | null
+): string {
+  if (!w) return '';
+  if ((w.offDutyReason || '').trim()) return (w.offDutyReason || '').trim();
+  const parsed = parseWorkloadMetaFromSheetNote(w.note);
+  return parsed.offDutyReason || '';
+}
+
+export function getWorkloadOffDutyStaff(
+  w?: Pick<DailyWorkload, 'offDutyStaff' | 'note'> | null
+): OffDutyStaffEntry[] {
+  if (!w) return [];
+  if (Array.isArray(w.offDutyStaff) && w.offDutyStaff.length > 0) {
+    return normalizeOffDutyStaffEntries(w.offDutyStaff);
   }
+  return parseWorkloadMetaFromSheetNote(w.note).offDutyStaff || [];
+}
+
+export function getCanonicalOffDutyStaffSignature(entries?: OffDutyStaffEntry[] | null): string {
+  if (!entries || entries.length === 0) return '';
+  return entries
+    .map(
+      (e) =>
+        `${(e.staffName || '').trim()}:${e.position}:${e.amount}:${(e.periodLabel || '').trim()}:${(
+          e.reason || ''
+        ).trim()}`
+    )
+    .join(';');
+}
+
+export function formatOffDutyStaffSummaryText(entries?: OffDutyStaffEntry[] | null): string {
+  if (!entries || entries.length === 0) return '';
+  return entries
+    .map((e) => {
+      const halfSuffix =
+        e.amount === 0.5 ? ` 0.5 ${e.periodLabel || 'ครึ่งเวร'}` : '';
+      const posSuffix = isDailyWagePosition(e.position) ? ' [รายวัน]' : '';
+      const rSuffix = e.reason ? ` - ${e.reason}` : '';
+      return `${e.staffName}${posSuffix} (Off เวร${halfSuffix}${rSuffix})`;
+    })
+    .join(', ');
 }
 
 export function formatWorkloadNoteForSheet(
   note?: string,
-  referralData?: ReferralCenterData
+  referralData?: ReferralCenterData,
+  offDutyMeta?: {
+    isOffDuty?: boolean;
+    offDutyReason?: string;
+    offDutyStaff?: OffDutyStaffEntry[];
+  }
 ): string {
-  const cleaned = stripReferralTagFromNote(note);
-  if (!referralData) return cleaned;
-  const normalized = normalizeReferralData(referralData);
-  const compact: Record<string, { count: number; reason: string }> = {};
-  REFERRAL_ITEM_DEFINITIONS.forEach(({ key }) => {
-    compact[key] = {
-      count: Number(normalized[key]?.count) || 0,
-      reason: (normalized[key]?.reason || '').trim(),
-    };
-  });
-  const tag = `[[REFERRAL_JSON:${JSON.stringify(compact)}]]`;
-  return cleaned ? `${cleaned} ${tag}` : tag;
+  const parts: string[] = [];
+  const cleaned = stripAllWorkloadTagsFromNote(note);
+  if (cleaned) parts.push(cleaned);
+
+  if (referralData) {
+    const normalized = normalizeReferralData(referralData);
+    const compact: Record<string, { count: number; reason: string }> = {};
+    REFERRAL_ITEM_DEFINITIONS.forEach(({ key }) => {
+      compact[key] = {
+        count: Number(normalized[key]?.count) || 0,
+        reason: (normalized[key]?.reason || '').trim(),
+      };
+    });
+    parts.push(`[[REFERRAL_JSON:${JSON.stringify(compact)}]]`);
+  }
+
+  if (offDutyMeta?.isOffDuty) {
+    const reason = (offDutyMeta.offDutyReason || '').trim();
+    parts.push(`[[OFF_DUTY_JSON:${JSON.stringify({ r: reason })}]]`);
+  }
+
+  const normalizedStaff = normalizeOffDutyStaffEntries(offDutyMeta?.offDutyStaff);
+  if (normalizedStaff.length > 0) {
+    const compactStaff = normalizedStaff.map((s) => ({
+      n: s.staffName,
+      p: s.position,
+      a: s.amount,
+      ...(s.amount === 0.5 && s.periodLabel ? { l: s.periodLabel } : {}),
+      ...(s.reason ? { r: s.reason } : {}),
+    }));
+    parts.push(`[[OFF_STAFF_JSON:${JSON.stringify(compactStaff)}]]`);
+  }
+
+  return parts.join(' ');
 }
 
 export function formatReferralSummaryText(data?: ReferralCenterData | null): string {
@@ -546,17 +734,35 @@ export function normalizeWorkloadRecord(
       : [...DEFAULT_PREMIUM_SUB_CLINICS];
   const fallbackPoolId = (w.poolId || '').trim() || `POOL-${w.date}-${w.shift}`;
 
-  const parsedFromNote = parseReferralFromSheetNote(w.note);
+  const parsedFromNote = parseWorkloadMetaFromSheetNote(w.note);
   const resolvedReferralData = w.referralData
     ? normalizeReferralData(w.referralData)
     : parsedFromNote.referralData;
+  const resolvedIsOffDuty = Boolean(w.isOffDuty) || parsedFromNote.isOffDuty;
+  const resolvedOffDutyReason =
+    (w.offDutyReason || '').trim() || parsedFromNote.offDutyReason || '';
+  const resolvedOffDutyStaff =
+    Array.isArray(w.offDutyStaff) && w.offDutyStaff.length > 0
+      ? normalizeOffDutyStaffEntries(w.offDutyStaff)
+      : parsedFromNote.offDutyStaff;
   const cleanedNote = parsedFromNote.cleanNote;
+
+  const offDutyExtras: Partial<DailyWorkload> = {
+    ...(resolvedIsOffDuty ? { isOffDuty: true } : {}),
+    ...(resolvedIsOffDuty && resolvedOffDutyReason
+      ? { offDutyReason: resolvedOffDutyReason }
+      : {}),
+    ...(resolvedOffDutyStaff && resolvedOffDutyStaff.length > 0
+      ? { offDutyStaff: resolvedOffDutyStaff }
+      : {}),
+  };
 
   if (w.recordType === 'PREMIUM_POOL' || isPremiumPoolClinicName(clinic)) {
     return {
       ...w,
       note: cleanedNote,
       ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
+      ...offDutyExtras,
       clinicGroup: PREMIUM_CLINIC_GROUP,
       poolId: fallbackPoolId,
       recordType: 'PREMIUM_POOL',
@@ -573,6 +779,7 @@ export function normalizeWorkloadRecord(
       ...w,
       note: cleanedNote,
       ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
+      ...offDutyExtras,
       clinicGroup: PREMIUM_CLINIC_GROUP,
       poolId: fallbackPoolId,
       recordType: 'PREMIUM_SUB',
@@ -583,6 +790,7 @@ export function normalizeWorkloadRecord(
     ...w,
     note: cleanedNote,
     ...(resolvedReferralData ? { referralData: resolvedReferralData } : {}),
+    ...offDutyExtras,
     clinicGroup: w.clinicGroup || '',
     poolId: w.poolId || '',
     recordType: w.recordType || 'STANDARD',

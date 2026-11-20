@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef } from 'react';
 import {
   DailyWorkload,
+  StaffMember,
   WorkShift,
   SHIFTS,
   getEffectiveTotalPt,
@@ -16,6 +17,13 @@ import {
   isReferralWorkload,
   normalizeReferralData,
   SystemSettings,
+  isDailyWagePosition,
+  formatPositionLabel,
+  isOffDutyWorkload,
+  getWorkloadOffDutyReason,
+  getWorkloadOffDutyStaff,
+  formatOffDutyStaffSummaryText,
+  OFF_DUTY_STAFF_REASON_PRESETS,
 } from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
 import { buildDailyCensusLineMessage } from '../utils/lineReport';
@@ -41,11 +49,14 @@ import {
   AlertCircle,
   Star,
   Send,
-  Loader2
+  Loader2,
+  Plus,
+  PauseCircle
 } from 'lucide-react';
 
 interface DailyCensusTabProps {
   workloads: DailyWorkload[];
+  staffList?: StaffMember[];
   isAdmin?: boolean;
   premiumSubClinics?: string[];
   settings?: SystemSettings;
@@ -77,6 +88,7 @@ interface PremiumCensusGroup {
 
 export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({ 
   workloads,
+  staffList = [],
   isAdmin = false,
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   settings,
@@ -92,6 +104,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const [isSendingLine, setIsSendingLine] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
+  const [adminAddOffDutyStaffId, setAdminAddOffDutyStaffId] = useState<string>('');
   const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
   const [editWorkloadReasonError, setEditWorkloadReasonError] = useState<string>('');
   const [editModalError, setEditModalError] = useState<string>('');
@@ -100,6 +113,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const [deleteWorkloadReasonError, setDeleteWorkloadReasonError] = useState<string>('');
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
   const formattedThaiDate = useMemo(() => formatThaiFullDate(date), [date]);
+  const allDailyWageStaff = useMemo(
+    () => staffList.filter((s) => s.status === 'Active' && isDailyWagePosition(s.position)),
+    [staffList]
+  );
 
   // Filter workloads for this date and shift
   const filteredWorkloads = useMemo(() => {
@@ -179,6 +196,18 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   }, [filteredWorkloads, premiumSubClinics]);
 
   const clinicCount = regularWorkloads.length + premiumGroups.length;
+  const offDutyCount =
+    regularWorkloads.filter(isOffDutyWorkload).length +
+    premiumGroups.filter(
+      (grp) => grp.subRows.length === 0 && grp.poolRows.length > 0 && grp.poolRows.every(isOffDutyWorkload)
+    ).length;
+  const activeClinicCount = Math.max(0, clinicCount - offDutyCount);
+  const offDutyStaffCount =
+    regularWorkloads.reduce((s, w) => s + getWorkloadOffDutyStaff(w).length, 0) +
+    premiumGroups.reduce(
+      (s, grp) => s + grp.poolRows.reduce((ps, r) => ps + getWorkloadOffDutyStaff(r).length, 0),
+      0
+    );
 
   // Aggregate Totals (PREMIUM_POOL has 0 patients, PREMIUM_SUB has 0 staffing -> zero double-counting)
   const totals = useMemo(() => {
@@ -202,7 +231,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const totalNursingOnDuty = totals.rn + totals.pn + totals.na;
 
   const referralRecords = useMemo(
-    () => filteredWorkloads.filter(isReferralWorkload),
+    () => filteredWorkloads.filter((w) => isReferralWorkload(w) && !isOffDutyWorkload(w)),
     [filteredWorkloads]
   );
 
@@ -265,10 +294,21 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     ];
 
     const rows: (string | number)[][] = regularWorkloads.map((w, i) => {
-      const noteWithReferral =
-        isReferralWorkload(w) && w.referralData
-          ? [formatReferralSummaryText(w.referralData), w.note].filter(Boolean).join(' | ')
-          : w.note || '';
+      const itemIsOffDuty = isOffDutyWorkload(w);
+      const itemOffReason = getWorkloadOffDutyReason(w);
+      const itemOffStaff = getWorkloadOffDutyStaff(w);
+      const noteParts: string[] = [];
+      if (itemIsOffDuty) {
+        noteParts.push(`Off เวร: ${itemOffReason || 'งดออกตรวจ'}`);
+      } else if (isReferralWorkload(w) && w.referralData) {
+        const refText = formatReferralSummaryText(w.referralData);
+        if (refText) noteParts.push(refText);
+      }
+      if (!itemIsOffDuty && itemOffStaff.length > 0) {
+        noteParts.push(`Off เวรรายวัน: ${formatOffDutyStaffSummaryText(itemOffStaff)}`);
+      }
+      if (w.note) noteParts.push(w.note);
+      const noteWithReferral = noteParts.join(' | ');
       return [
         i + 1,
         `"${w.clinic}"`,
@@ -289,9 +329,24 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     });
 
     premiumGroups.forEach((grp, idx) => {
+      const isGroupOffDuty =
+        grp.subRows.length === 0 && grp.poolRows.length > 0 && grp.poolRows.every(isOffDutyWorkload);
+      const groupOffReason = grp.poolRows.map(getWorkloadOffDutyReason).filter(Boolean).join(', ');
+      const groupOffStaff = grp.poolRows.flatMap(getWorkloadOffDutyStaff);
+      const groupNoteParts: string[] = [];
+      if (isGroupOffDuty) {
+        groupNoteParts.push(`Off เวร: ${groupOffReason || 'งดออกตรวจ'}`);
+      } else if (groupOffStaff.length > 0) {
+        groupNoteParts.push(`Off เวรรายวัน: ${formatOffDutyStaffSummaryText(groupOffStaff)}`);
+      }
+      if (grp.note) groupNoteParts.push(grp.note);
+      const groupLabel = isGroupOffDuty
+        ? `${PREMIUM_CLINIC_GROUP} (Off เวร)`
+        : `${PREMIUM_CLINIC_GROUP} (รวม ${grp.subRows.length} แผนก - กำลังคนรวม)`;
+
       rows.push([
         regularWorkloads.length + idx + 1,
-        `"${PREMIUM_CLINIC_GROUP} (รวม ${grp.subRows.length} แผนก - กำลังคนรวม)"`,
+        `"${groupLabel}"`,
         `"${grp.shift}"`,
         grp.totalPt,
         grp.adultPt,
@@ -304,7 +359,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         grp.clerk,
         grp.serviceWorker,
         `"${grp.reporter}"`,
-        `"${grp.note || 'Pooled Staffing'}"`
+        `"${(groupNoteParts.join(' | ') || 'Pooled Staffing').replace(/"/g, '""')}"`
       ]);
       grp.subRows.forEach((sub) => {
         rows.push([
@@ -322,7 +377,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
           0,
           0,
           `"${sub.reporter}"`,
-          `"${sub.note || 'ใช้กำลังคนร่วม'}"`
+          `"${(sub.note || 'ใช้กำลังคนร่วม').replace(/"/g, '""')}"`
         ]);
       });
     });
@@ -499,6 +554,16 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 
         <div className="text-xs text-gray-500">
           แสดงข้อมูล <span className="font-bold text-blue-900">{clinicCount}</span> คลินิก
+          {offDutyCount > 0 && (
+            <span className="text-violet-800 font-semibold ml-1">
+              (เปิดบริการ {activeClinicCount} | Off เวร {offDutyCount})
+            </span>
+          )}
+          {offDutyStaffCount > 0 && (
+            <span className="text-violet-800 font-semibold ml-1">
+              (Off เวรรายวัน {offDutyStaffCount} คน)
+            </span>
+          )}
           {premiumGroups.length > 0 && (
             <span className="text-orange-700 font-semibold ml-1">
               (รวม {PREMIUM_CLINIC_GROUP} {premiumGroups.reduce((s, g) => s + g.subRows.length, 0)} แผนกย่อย)
@@ -637,7 +702,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 ) : (
                   <>
                     {regularWorkloads.map((w, index) => {
-                      const hasRefDetails = isReferralWorkload(w) && Boolean(w.referralData);
+                      const itemIsOffDuty = isOffDutyWorkload(w);
+                      const itemOffReason = getWorkloadOffDutyReason(w);
+                      const itemOffStaff = getWorkloadOffDutyStaff(w);
+                      const hasRefDetails = !itemIsOffDuty && isReferralWorkload(w) && Boolean(w.referralData);
                       const refData = hasRefDetails ? normalizeReferralData(w.referralData) : null;
                       const refTotal = refData ? getReferralTotalCount(refData) : 0;
 
@@ -645,37 +713,63 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                         <React.Fragment key={w.id}>
                           <tr
                             className={
-                              refData
+                              itemIsOffDuty
+                                ? 'bg-violet-50/75 hover:bg-violet-100/50 border-t border-violet-200'
+                                : refData
                                 ? 'bg-indigo-50/75 hover:bg-indigo-100/60 border-t-2 border-indigo-200'
                                 : 'hover:bg-slate-50/80'
                             }
                           >
                             <td
                               className={`py-2 px-1 text-center print:px-0.5 print:py-1 ${
-                                refData ? 'font-bold text-indigo-900' : 'text-gray-500'
+                                itemIsOffDuty
+                                  ? 'font-bold text-violet-900'
+                                  : refData
+                                  ? 'font-bold text-indigo-900'
+                                  : 'text-gray-500'
                               }`}
                             >
                               {index + 1}
                             </td>
                             <td
                               className={`py-2 px-2 break-words print:px-1 print:py-1 ${
-                                refData ? 'font-extrabold text-indigo-950' : 'font-bold text-gray-900'
+                                itemIsOffDuty
+                                  ? 'font-extrabold text-violet-950'
+                                  : refData
+                                  ? 'font-extrabold text-indigo-950'
+                                  : 'font-bold text-gray-900'
                               }`}
                             >
-                              {refData ? (
+                              {itemIsOffDuty ? (
                                 <div className="inline-flex items-center gap-1 flex-wrap">
                                   <span>{w.clinic}</span>
-                                  <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-indigo-200/80 text-indigo-900 print:text-[7.5px] print:px-1">
-                                    รวม {REFERRAL_ITEM_DEFINITIONS.length} รายการ
+                                  <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-violet-200/85 text-violet-950 print:text-[7.5px] print:px-1">
+                                    Off เวร
                                   </span>
                                 </div>
                               ) : (
-                                w.clinic
+                                <div className="inline-flex items-center gap-1 flex-wrap">
+                                  <span>{w.clinic}</span>
+                                  {refData && (
+                                    <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-indigo-200/80 text-indigo-900 print:text-[7.5px] print:px-1">
+                                      รวม {REFERRAL_ITEM_DEFINITIONS.length} รายการ
+                                    </span>
+                                  )}
+                                  {itemOffStaff.length > 0 && (
+                                    <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-violet-100 text-violet-900 border border-violet-300 print:text-[7.5px] print:px-1">
+                                      Off เวรรายวัน {itemOffStaff.length} คน
+                                    </span>
+                                  )}
+                                </div>
                               )}
                             </td>
                             <td
                               className={`py-2 px-1.5 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
-                                refData ? 'text-indigo-900 font-semibold' : 'text-gray-600'
+                                itemIsOffDuty
+                                  ? 'text-violet-900 font-semibold'
+                                  : refData
+                                  ? 'text-indigo-900 font-semibold'
+                                  : 'text-gray-600'
                               }`}
                             >
                               {w.shift}
@@ -695,13 +789,29 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                             <td className="py-2 px-1.5 text-gray-800 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">{w.reporter}</td>
                             <td
                               className={`py-2 px-2 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
-                                refData ? 'text-indigo-800 font-medium' : 'text-gray-500'
+                                itemIsOffDuty
+                                  ? 'text-violet-900 font-medium'
+                                  : refData
+                                  ? 'text-indigo-800 font-medium'
+                                  : 'text-gray-500'
                               }`}
                               title={w.note}
                             >
-                              <div className="whitespace-normal break-words">
-                                {refData ? (w.note || 'รายละเอียดตามรายการย่อย') : (w.note || '-')}
-                              </div>
+                              {itemIsOffDuty ? (
+                                <div className="whitespace-normal break-words">
+                                  <span className="font-bold">Off เวร{itemOffReason ? `: ${itemOffReason}` : ''}</span>
+                                  {w.note ? ` • ${w.note}` : ''}
+                                </div>
+                              ) : (
+                                <div className="whitespace-normal break-words">
+                                  {refData ? (w.note || 'รายละเอียดตามรายการย่อย') : (w.note || '-')}
+                                </div>
+                              )}
+                              {!itemIsOffDuty && itemOffStaff.length > 0 && (
+                                <div className="mt-0.5 text-[9.5px] text-violet-800 font-medium break-words">
+                                  Off เวรรายวัน: {formatOffDutyStaffSummaryText(itemOffStaff)}
+                                </div>
+                              )}
                               {(w.lastEditReason || w.lastEditedAt) && (
                                 <div className="no-print mt-0.5 text-[9.5px] text-amber-700 break-words" title={`${w.lastEditReason || ''} (${w.lastEditedAt ? formatThaiDateTime(w.lastEditedAt) : ''})`}>
                                   แก้ไข: {w.lastEditReason || '-'}
@@ -718,10 +828,15 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                         setEditingWorkload({
                                           ...w,
                                           totalPt: getEffectiveTotalPt(w),
-                                          ...(isReferralWorkload(w)
+                                          ...(itemIsOffDuty
+                                            ? { isOffDuty: true, offDutyReason: itemOffReason }
+                                            : {}),
+                                          ...(itemOffStaff.length > 0 ? { offDutyStaff: itemOffStaff } : {}),
+                                          ...(isReferralWorkload(w) && !itemIsOffDuty
                                             ? { referralData: normalizeReferralData(w.referralData) }
                                             : {}),
                                         });
+                                        setAdminAddOffDutyStaffId('');
                                         setEditWorkloadReason('');
                                         setEditWorkloadReasonError('');
                                         setEditModalError('');
@@ -809,23 +924,61 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 
                     {premiumGroups.map((grp, grpIdx) => {
                       const poolRec = grp.primaryPoolRecord;
+                      const isGroupOffDuty =
+                        grp.subRows.length === 0 &&
+                        grp.poolRows.length > 0 &&
+                        grp.poolRows.every(isOffDutyWorkload);
+                      const groupOffReason = grp.poolRows
+                        .map(getWorkloadOffDutyReason)
+                        .filter(Boolean)
+                        .join(', ');
+                      const groupOffStaff = grp.poolRows.flatMap(getWorkloadOffDutyStaff);
                       return (
                         <React.Fragment key={grp.key}>
                           {/* Master Row: ศูนย์ปัญญาภิรมย์ */}
-                          <tr className="bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200">
-                            <td className="py-2 px-1 text-center font-bold text-orange-900 print:px-0.5 print:py-1">
+                          <tr
+                            className={
+                              isGroupOffDuty
+                                ? 'bg-violet-50/75 hover:bg-violet-100/50 border-t-2 border-violet-200'
+                                : 'bg-orange-50/80 hover:bg-orange-100/70 border-t-2 border-orange-200'
+                            }
+                          >
+                            <td
+                              className={`py-2 px-1 text-center font-bold print:px-0.5 print:py-1 ${
+                                isGroupOffDuty ? 'text-violet-900' : 'text-orange-900'
+                              }`}
+                            >
                               {regularWorkloads.length + grpIdx + 1}
                             </td>
-                            <td className="py-2 px-2 font-extrabold text-orange-950 break-words print:px-1 print:py-1">
+                            <td
+                              className={`py-2 px-2 font-extrabold break-words print:px-1 print:py-1 ${
+                                isGroupOffDuty ? 'text-violet-950' : 'text-orange-950'
+                              }`}
+                            >
                               <div className="inline-flex items-center gap-1 flex-wrap">
-                                <Star className="w-3.5 h-3.5 text-orange-600 shrink-0 no-print" />
+                                <Star className={`w-3.5 h-3.5 shrink-0 no-print ${isGroupOffDuty ? 'text-violet-600' : 'text-orange-600'}`} />
                                 <span>{PREMIUM_CLINIC_GROUP}</span>
-                                <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-orange-200/80 text-orange-900 print:text-[7.5px] print:px-1">
-                                  รวม {grp.subRows.length} แผนก
-                                </span>
+                                {isGroupOffDuty ? (
+                                  <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-violet-200/85 text-violet-950 print:text-[7.5px] print:px-1">
+                                    Off เวร
+                                  </span>
+                                ) : (
+                                  <span className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded bg-orange-200/80 text-orange-900 print:text-[7.5px] print:px-1">
+                                    รวม {grp.subRows.length} แผนก
+                                  </span>
+                                )}
+                                {!isGroupOffDuty && groupOffStaff.length > 0 && (
+                                  <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-violet-100 text-violet-900 border border-violet-300 print:text-[7.5px] print:px-1">
+                                    Off เวรรายวัน {groupOffStaff.length} คน
+                                  </span>
+                                )}
                               </div>
                             </td>
-                            <td className="py-2 px-1.5 text-orange-900 font-semibold text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">
+                            <td
+                              className={`py-2 px-1.5 font-semibold text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
+                                isGroupOffDuty ? 'text-violet-900' : 'text-orange-900'
+                              }`}
+                            >
                               {grp.shift}
                             </td>
                             <td className="py-2 px-1 text-right font-extrabold text-blue-950 bg-blue-50/50 print:px-0.5 print:py-1">
@@ -861,10 +1014,27 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                             <td className="py-2 px-1.5 text-gray-900 font-medium text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1">
                               {grp.reporter}
                             </td>
-                            <td className="py-2 px-2 text-orange-800 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1" title={grp.note}>
-                              <div className="whitespace-normal break-words">
-                                {grp.note || (poolRec ? 'กำลังคนรวมทั้งคลินิก' : '-')}
-                              </div>
+                            <td
+                              className={`py-2 px-2 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-1 ${
+                                isGroupOffDuty ? 'text-violet-900 font-medium' : 'text-orange-800'
+                              }`}
+                              title={grp.note}
+                            >
+                              {isGroupOffDuty ? (
+                                <div className="whitespace-normal break-words">
+                                  <span className="font-bold">Off เวร{groupOffReason ? `: ${groupOffReason}` : ''}</span>
+                                  {grp.note ? ` • ${grp.note}` : ''}
+                                </div>
+                              ) : (
+                                <div className="whitespace-normal break-words">
+                                  {grp.note || (poolRec ? 'กำลังคนรวมทั้งคลินิก' : '-')}
+                                </div>
+                              )}
+                              {!isGroupOffDuty && groupOffStaff.length > 0 && (
+                                <div className="mt-0.5 text-[9.5px] text-violet-800 font-medium break-words">
+                                  Off เวรรายวัน: {formatOffDutyStaffSummaryText(groupOffStaff)}
+                                </div>
+                              )}
                               {poolRec && (poolRec.lastEditReason || poolRec.lastEditedAt) && (
                                 <div className="no-print mt-0.5 text-[9.5px] text-amber-700 break-words">
                                   แก้ไขกำลังคน: {poolRec.lastEditReason || '-'}
@@ -879,7 +1049,16 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          setEditingWorkload({ ...poolRec, totalPt: getEffectiveTotalPt(poolRec) });
+                                          const poolOff = isOffDutyWorkload(poolRec);
+                                          const poolOffReason = getWorkloadOffDutyReason(poolRec);
+                                          const poolOffStaff = getWorkloadOffDutyStaff(poolRec);
+                                          setEditingWorkload({
+                                            ...poolRec,
+                                            totalPt: getEffectiveTotalPt(poolRec),
+                                            ...(poolOff ? { isOffDuty: true, offDutyReason: poolOffReason } : {}),
+                                            ...(poolOffStaff.length > 0 ? { offDutyStaff: poolOffStaff } : {}),
+                                          });
+                                          setAdminAddOffDutyStaffId('');
                                           setEditWorkloadReason('');
                                           setEditWorkloadReasonError('');
                                           setEditModalError('');
@@ -1109,6 +1288,184 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 </div>
               </div>
 
+              {/* Admin Edit Modal: Daily Wage Off เวร Editor (+ legacy Off-Duty clear if present) */}
+              {editingWorkload.isOffDuty && (
+                <div className="rounded-xl border border-violet-300 bg-violet-50 p-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] text-violet-950">
+                    <strong>พบสถานะปิดบริการเดิม (Off เวรทั้งกะ):</strong>{' '}
+                    {editingWorkload.offDutyReason || 'งดออกตรวจ'}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingWorkload({
+                        ...editingWorkload,
+                        isOffDuty: false,
+                        offDutyReason: '',
+                      })
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-white border border-violet-300 text-violet-900 hover:bg-violet-100 font-semibold text-[11px] cursor-pointer"
+                  >
+                    ล้างสถานะปิดบริการเดิม
+                  </button>
+                </div>
+              )}
+
+              {editingWorkload.recordType !== 'PREMIUM_SUB' && (
+                <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-bold text-violet-950 flex items-center gap-1.5">
+                      <PauseCircle className="w-4 h-4 text-violet-700" />
+                      <span>เจ้าหน้าที่ตำแหน่ง &quot;รายวัน&quot; ที่ Off เวร (ยอดผู้ป่วยน้อยลง)</span>
+                    </div>
+                    <span className="text-[11px] font-semibold text-violet-800">
+                      {(editingWorkload.offDutyStaff || []).length} คน
+                    </span>
+                  </div>
+
+                  {(editingWorkload.offDutyStaff || []).length > 0 && (
+                    <div className="space-y-1.5">
+                      {(editingWorkload.offDutyStaff || []).map((entry, idx) => {
+                        const isOut = editingWorkload.shift !== 'ในเวลา 08:00-16:00';
+                        const pVal =
+                          entry.amount === 1
+                            ? 'FULL'
+                            : isOut
+                              ? 'HALF_SHIFT'
+                              : entry.periodLabel === 'ครึ่งวันบ่าย'
+                                ? 'HALF_PM'
+                                : 'HALF_AM';
+                        return (
+                          <div
+                            key={`${entry.staffName}-${idx}`}
+                            className="bg-white border border-violet-200 rounded-lg p-2 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-bold text-violet-950">
+                                {entry.staffName}{' '}
+                                <span className="text-[10px] font-semibold text-violet-700">
+                                  ([รายวัน] {formatPositionLabel(entry.position)})
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditingWorkload({
+                                    ...editingWorkload,
+                                    offDutyStaff: (editingWorkload.offDutyStaff || []).filter(
+                                      (_, i) => i !== idx
+                                    ),
+                                  })
+                                }
+                                className="text-gray-400 hover:text-red-600 p-0.5 cursor-pointer"
+                                title="นำออก"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <select
+                                value={pVal}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  const nextList = (editingWorkload.offDutyStaff || []).map((it, i) => {
+                                    if (i !== idx) return it;
+                                    if (v === 'HALF_SHIFT')
+                                      return { ...it, amount: 0.5 as const, periodLabel: 'ครึ่งเวร' as const };
+                                    if (v === 'HALF_AM')
+                                      return { ...it, amount: 0.5 as const, periodLabel: 'ครึ่งวันเช้า' as const };
+                                    if (v === 'HALF_PM')
+                                      return { ...it, amount: 0.5 as const, periodLabel: 'ครึ่งวันบ่าย' as const };
+                                    const copy = { ...it, amount: 1 as const };
+                                    delete copy.periodLabel;
+                                    return copy;
+                                  });
+                                  setEditingWorkload({ ...editingWorkload, offDutyStaff: nextList });
+                                }}
+                                className="px-2 py-1 border border-violet-200 rounded-lg text-xs bg-white"
+                              >
+                                {isOut ? (
+                                  <>
+                                    <option value="FULL">เต็มเวรนอกเวลา (1.0)</option>
+                                    <option value="HALF_SHIFT">ครึ่งเวร (0.5)</option>
+                                  </>
+                                ) : (
+                                  <>
+                                    <option value="FULL">เต็มวัน (1.0)</option>
+                                    <option value="HALF_AM">ครึ่งวันเช้า (0.5)</option>
+                                    <option value="HALF_PM">ครึ่งวันบ่าย (0.5)</option>
+                                  </>
+                                )}
+                              </select>
+                              <input
+                                type="text"
+                                value={entry.reason || ''}
+                                onChange={(e) => {
+                                  const nextList = (editingWorkload.offDutyStaff || []).map((it, i) =>
+                                    i === idx ? { ...it, reason: e.target.value } : it
+                                  );
+                                  setEditingWorkload({ ...editingWorkload, offDutyStaff: nextList });
+                                }}
+                                placeholder="เหตุผล Off เวร..."
+                                className="px-2 py-1 border border-violet-200 rounded-lg text-xs bg-white"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {allDailyWageStaff.length > 0 ? (
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <select
+                        value={adminAddOffDutyStaffId}
+                        onChange={(e) => setAdminAddOffDutyStaffId(e.target.value)}
+                        className="flex-1 px-2.5 py-1.5 border border-violet-200 rounded-lg text-xs bg-white"
+                      >
+                        <option value="">-- เลือกเจ้าหน้าที่ตำแหน่งรายวันเพื่อเพิ่ม Off เวร --</option>
+                        {allDailyWageStaff.map((s) => (
+                          <option key={s.staffId} value={s.staffId}>
+                            {s.name} ([รายวัน] {formatPositionLabel(s.position)} • {s.homeClinic})
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!adminAddOffDutyStaffId}
+                        onClick={() => {
+                          const st = allDailyWageStaff.find((s) => s.staffId === adminAddOffDutyStaffId);
+                          if (!st) return;
+                          const curr = editingWorkload.offDutyStaff || [];
+                          if (curr.some((x) => x.staffName === st.name && x.amount === 1)) return;
+                          setEditingWorkload({
+                            ...editingWorkload,
+                            offDutyStaff: [
+                              ...curr,
+                              {
+                                staffName: st.name,
+                                position: st.position,
+                                amount: 1,
+                                reason: OFF_DUTY_STAFF_REASON_PRESETS[0],
+                              },
+                            ],
+                          });
+                          setAdminAddOffDutyStaffId('');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-violet-700 hover:bg-violet-600 disabled:bg-gray-300 text-white font-semibold text-xs flex items-center justify-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>เพิ่ม Off เวรรายวัน</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-gray-500">
+                      ยังไม่มีบุคลากรตำแหน่ง &quot;รายวัน&quot; ในทะเบียนบุคลากรเมนู 5
+                    </div>
+                  )}
+                </div>
+              )}
+
               {isReferralWorkload(editingWorkload) ? (
                 <div className="bg-indigo-50/60 border border-indigo-200 rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
@@ -1140,6 +1497,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                 <input
                                   type="number"
                                   min="0"
+                                  disabled={Boolean(editingWorkload.isOffDuty)}
                                   value={entry.count || ''}
                                   onChange={(e) => {
                                     const nextRef: ReferralCenterData = {
@@ -1158,12 +1516,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                       admit: getReferralAdmitCount(nextRef),
                                     });
                                   }}
-                                  className="w-full text-center font-bold border border-indigo-200 rounded py-1 px-1.5 text-xs"
+                                  className="w-full text-center font-bold border border-indigo-200 rounded py-1 px-1.5 text-xs disabled:bg-gray-100 disabled:text-gray-400"
                                 />
                               </td>
                               <td className="py-1 px-2">
                                 <input
                                   type="text"
+                                  disabled={Boolean(editingWorkload.isOffDuty)}
                                   value={entry.reason}
                                   onChange={(e) => {
                                     const nextRef: ReferralCenterData = {
@@ -1179,7 +1538,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                     });
                                   }}
                                   placeholder="ระบุเหตุผล..."
-                                  className="w-full border border-gray-200 rounded py-1 px-2 text-xs"
+                                  className="w-full border border-gray-200 rounded py-1 px-2 text-xs disabled:bg-gray-100 disabled:text-gray-400"
                                 />
                               </td>
                             </tr>
@@ -1196,6 +1555,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <input
                     type="number"
                     min="0"
+                    disabled={Boolean(editingWorkload.isOffDuty)}
                     value={editingWorkload.totalPt}
                     onChange={(e) => {
                       const nextTotal = Math.max(0, Number(e.target.value) || 0);
@@ -1205,7 +1565,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                         adultPt: Math.max(0, nextTotal - (editingWorkload.childPt || 0)),
                       });
                     }}
-                    className="w-full px-2.5 py-1.5 border border-blue-300 rounded-lg text-xs font-bold text-blue-900"
+                    className="w-full px-2.5 py-1.5 border border-blue-300 rounded-lg text-xs font-bold text-blue-900 disabled:bg-gray-100 disabled:text-gray-400"
                   />
                 </div>
                 <div>
@@ -1213,6 +1573,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <input
                     type="number"
                     min="0"
+                    disabled={Boolean(editingWorkload.isOffDuty)}
                     value={editingWorkload.adultPt}
                     onChange={(e) => {
                       const nextAdult = Math.max(0, Number(e.target.value) || 0);
@@ -1222,7 +1583,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                         totalPt: nextAdult + (editingWorkload.childPt || 0),
                       });
                     }}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs disabled:bg-gray-100 disabled:text-gray-400"
                   />
                 </div>
                 <div>
@@ -1230,6 +1591,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <input
                     type="number"
                     min="0"
+                    disabled={Boolean(editingWorkload.isOffDuty)}
                     value={editingWorkload.childPt}
                     onChange={(e) => {
                       const nextChild = Math.max(0, Number(e.target.value) || 0);
@@ -1239,7 +1601,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                         totalPt: (editingWorkload.adultPt || 0) + nextChild,
                       });
                     }}
-                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs disabled:bg-gray-100 disabled:text-gray-400"
                   />
                 </div>
                 <div>
@@ -1247,9 +1609,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <input
                     type="number"
                     min="0"
+                    disabled={Boolean(editingWorkload.isOffDuty)}
                     value={editingWorkload.admit}
                     onChange={(e) => setEditingWorkload({ ...editingWorkload, admit: Number(e.target.value) || 0 })}
-                    className="w-full px-2.5 py-1.5 border border-red-300 rounded-lg text-xs font-bold text-red-600"
+                    className="w-full px-2.5 py-1.5 border border-red-300 rounded-lg text-xs font-bold text-red-600 disabled:bg-gray-100 disabled:text-gray-400"
                   />
                 </div>
               </div>
@@ -1266,9 +1629,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.hn}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, hn: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                   <div>
@@ -1277,9 +1641,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.rn}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, rn: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-blue-300 rounded text-center text-xs font-bold text-blue-900"
+                      className="w-full px-2 py-1 border border-blue-300 rounded text-center text-xs font-bold text-blue-900 disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                   <div>
@@ -1288,9 +1653,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.pn}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, pn: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-teal-300 rounded text-center text-xs font-bold text-teal-900"
+                      className="w-full px-2 py-1 border border-teal-300 rounded text-center text-xs font-bold text-teal-900 disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                   <div>
@@ -1299,9 +1665,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.na ?? editingWorkload.pca ?? 0}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, na: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-emerald-300 rounded text-center text-xs font-bold text-emerald-900"
+                      className="w-full px-2 py-1 border border-emerald-300 rounded text-center text-xs font-bold text-emerald-900 disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                   <div>
@@ -1310,9 +1677,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.clerk}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, clerk: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                   <div>
@@ -1321,9 +1689,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                       type="number"
                       step="0.5"
                       min="0"
+                      disabled={Boolean(editingWorkload.isOffDuty)}
                       value={editingWorkload.serviceWorker}
                       onChange={(e) => setEditingWorkload({ ...editingWorkload, serviceWorker: Number(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs"
+                      className="w-full px-2 py-1 border border-gray-300 rounded text-center text-xs disabled:bg-gray-100 disabled:text-gray-400"
                     />
                   </div>
                 </div>
@@ -1426,14 +1795,33 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  if (editingWorkload.isOffDuty && !(editingWorkload.offDutyReason || '').trim()) {
+                    setEditModalError('กรุณาระบุเหตุผลการ Off เวร');
+                    return;
+                  }
                   if (!editingWorkload.reporter.trim()) {
                     setEditModalError('กรุณาระบุชื่อผู้บันทึกรายงาน');
+                    return;
+                  }
+                  const dupWorkload = workloads.find(
+                    (w) =>
+                      w.id !== editingWorkload.id &&
+                      w.date === editingWorkload.date &&
+                      w.shift === editingWorkload.shift &&
+                      (w.clinic || '').trim() === (editingWorkload.clinic || '').trim() &&
+                      (w.recordType || 'STANDARD') === (editingWorkload.recordType || 'STANDARD')
+                  );
+                  if (dupWorkload) {
+                    setEditModalError(
+                      `ไม่สามารถบันทึกซ้ำได้: แผนก ${editingWorkload.clinic} วันที่ ${formatThaiShortDate(editingWorkload.date)} กะเวลา "${editingWorkload.shift}" มีรายการอื่นบันทึกไว้แล้ว`
+                    );
                     return;
                   }
                   if (!editWorkloadReason.trim()) {
                     setEditWorkloadReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
                     return;
                   }
+                  setEditModalError('');
                   onUpdateWorkload(editingWorkload, editWorkloadReason.trim());
                   setEditingWorkload(null);
                   setEditWorkloadReason('');

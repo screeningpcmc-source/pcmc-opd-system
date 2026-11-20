@@ -25,7 +25,11 @@ import {
   normalizeWorkloadRecord,
   normalizeStaffPosition,
   parseOtWorkClinic,
-  parseReferralFromSheetNote,
+  parseWorkloadMetaFromSheetNote,
+  isOffDutyWorkload,
+  getWorkloadOffDutyReason,
+  getWorkloadOffDutyStaff,
+  getCanonicalOffDutyStaffSignature,
   DEFAULT_OT_COST_CENTER,
   DEFAULT_OT_CONTROLLER_NAME,
   getStaffEmployeeCode,
@@ -93,10 +97,21 @@ function ensureReferralInClinicList(list?: string[]): string[] {
   return base;
 }
 
+function encodeWorkloadNoteForSheet(w: DailyWorkload): string {
+  const isOffDuty = isOffDutyWorkload(w);
+  const offDutyReason = getWorkloadOffDutyReason(w);
+  const offDutyStaff = getWorkloadOffDutyStaff(w);
+  return formatWorkloadNoteForSheet(w.note, w.referralData, {
+    isOffDuty,
+    offDutyReason,
+    offDutyStaff,
+  });
+}
+
 function prepareWorkloadForRemote(w: DailyWorkload): DailyWorkload {
   return {
     ...w,
-    note: formatWorkloadNoteForSheet(w.note, w.referralData),
+    note: encodeWorkloadNoteForSheet(w),
   };
 }
 
@@ -1257,10 +1272,14 @@ export const syncStaffMasterToSheet = async (
 };
 
 export function getWorkloadKey(w: DailyWorkload): string {
-  const parsedNote = parseReferralFromSheetNote(w.note);
+  const parsedNote = parseWorkloadMetaFromSheetNote(w.note);
   const effectiveNote = parsedNote.cleanNote;
   const effectiveReferral = w.referralData || parsedNote.referralData;
   const refSig = getCanonicalReferralSignature(effectiveReferral);
+  const effectiveIsOffDuty = Boolean(w.isOffDuty) || parsedNote.isOffDuty;
+  const effectiveOffReason = (w.offDutyReason || '').trim() || parsedNote.offDutyReason || '';
+  const effectiveOffStaff = getWorkloadOffDutyStaff(w);
+  const offStaffSig = getCanonicalOffDutyStaffSignature(effectiveOffStaff);
   const parts: Array<string | number> = [
     (w.date || '').trim(),
     (w.shift || '').trim(),
@@ -1282,6 +1301,12 @@ export function getWorkloadKey(w: DailyWorkload): string {
   ];
   if (refSig) {
     parts.push(refSig);
+  }
+  if (effectiveIsOffDuty) {
+    parts.push(`OFF:${effectiveOffReason}`);
+  }
+  if (offStaffSig) {
+    parts.push(`OFFS:${offStaffSig}`);
   }
   return parts.join('|');
 }
@@ -1886,7 +1911,7 @@ export const syncAllWithGoogleSheet = async (
           w.na ?? w.pca ?? 0,
           w.clerk,
           w.serviceWorker,
-          formatWorkloadNoteForSheet(w.note, w.referralData),
+          encodeWorkloadNoteForSheet(w),
           w.reporter,
           w.clinicGroup || '',
           w.poolId || '',
@@ -2050,7 +2075,7 @@ export const syncAllWithGoogleSheet = async (
             w.na ?? w.pca ?? 0,
             w.clerk,
             w.serviceWorker,
-            formatWorkloadNoteForSheet(w.note, w.referralData),
+            encodeWorkloadNoteForSheet(w),
             w.reporter,
             w.clinicGroup || '',
             w.poolId || '',
@@ -2187,7 +2212,7 @@ export const appendDailyWorkloadToSheet = async (
       entry.na ?? entry.pca ?? 0,
       entry.clerk,
       entry.serviceWorker,
-      formatWorkloadNoteForSheet(entry.note, entry.referralData),
+      encodeWorkloadNoteForSheet(entry),
       entry.reporter,
       entry.clinicGroup || '',
       entry.poolId || '',
@@ -3411,7 +3436,7 @@ export const pushAdminTableViaOAuth = async (params: {
         w.na ?? w.pca ?? 0,
         w.clerk,
         w.serviceWorker,
-        formatWorkloadNoteForSheet(w.note, w.referralData),
+        encodeWorkloadNoteForSheet(w),
         w.reporter,
         w.clinicGroup || '',
         w.poolId || '',
@@ -4186,7 +4211,7 @@ export const pushTargetedAdminRowViaOAuth = async (params: {
           u.na ?? u.pca ?? 0,
           u.clerk,
           u.serviceWorker,
-          formatWorkloadNoteForSheet(u.note, u.referralData),
+          encodeWorkloadNoteForSheet(u),
           u.reporter,
           u.clinicGroup || '',
           u.poolId || '',
