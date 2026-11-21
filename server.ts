@@ -453,6 +453,33 @@ async function createAppServer(): Promise<void> {
     res.status(200).json({ status: 'ok', message: 'LINE Messaging API webhook endpoint ready' });
   });
 
+  const SERVER_DB_PATH = path.join(process.cwd(), 'server-db.json');
+
+  function loadServerDb(): any {
+    try {
+      if (fs.existsSync(SERVER_DB_PATH)) {
+        return JSON.parse(fs.readFileSync(SERVER_DB_PATH, 'utf8'));
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  app.post('/api/db/sync', (req: Request, res: Response) => {
+    try {
+      const dbPayload = req.body;
+      if (dbPayload && typeof dbPayload === 'object') {
+        fs.writeFileSync(SERVER_DB_PATH, JSON.stringify(dbPayload, null, 2), 'utf8');
+        res.json({ ok: true, message: 'Database synced to server successfully' });
+      } else {
+        res.status(400).json({ ok: false, error: 'Invalid database payload' });
+      }
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+    }
+  });
+
   app.post('/api/line/webhook', (req: Request, res: Response) => {
     // Always return HTTP 200 OK immediately with zero 302 redirects for LINE Platform verification
     res.status(200).json({ status: 'ok' });
@@ -470,6 +497,24 @@ async function createAppServer(): Promise<void> {
 
     void (async () => {
       const token = getLineAccessToken();
+      const bkk = getBangkokDateParts();
+      const todayYmd = bkk.ymd;
+      const thaiShortMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+      const formatThaiShortServer = (ymd: string): string => {
+        const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (!m) return ymd;
+        const y = Number(m[1]) + 543;
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        return `${d} ${thaiShortMonths[mo - 1] || m[2]} ${y}`;
+      };
+      const addDaysBangkokYmd = (ymd: string, delta: number): string => {
+        const p = ymd.split('-').map(Number);
+        if (p.length !== 3) return ymd;
+        const dt = new Date(Date.UTC(p[0], p[1] - 1, p[2] + delta));
+        return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+      };
+
       for (const ev of events) {
         const src = ev?.source;
         if (!src) continue;
@@ -502,32 +547,110 @@ async function createAppServer(): Promise<void> {
             ? String(ev.message.text || '').trim().toLowerCase()
             : '';
 
-        if (
-          token &&
-          ev.replyToken &&
-          (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id')
-        ) {
-          try {
-            await fetch('https://api.line.me/v2/bot/message/reply', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                replyToken: ev.replyToken,
-                messages: [
-                  {
-                    type: 'text',
-                    text:
-                      `รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n${detectedId}` +
-                      (groupName ? `\nกลุ่ม: ${groupName}` : ''),
-                  },
-                ],
-              }),
+        if (token && ev.replyToken && txt) {
+          let replyText = '';
+          if (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id') {
+            replyText =
+              `รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n${detectedId}` +
+              (groupName ? `\nกลุ่ม: ${groupName}` : '');
+          } else if (
+            txt.includes('ใครลา') ||
+            txt.includes('ลาวันนี้') ||
+            txt.includes('พรุ่งนี้ใครลา') ||
+            (txt.includes('ลา') && (txt.includes('ใคร') || txt.includes('วันนี้') || txt.includes('พรุ่งนี้') || txt.includes('บ้าง')))
+          ) {
+            const isTomorrow = txt.includes('พรุ่งนี้');
+            const targetYmd = isTomorrow ? addDaysBangkokYmd(todayYmd, 1) : todayYmd;
+
+            const sdb = loadServerDb();
+            const leaves = Array.isArray(sdb?.leaves) ? sdb.leaves : [];
+            const matchedLeaves = leaves.filter((l: any) => {
+              const s = String(l.startDate || '').trim();
+              const e = String(l.endDate || '').trim();
+              if (!s) return false;
+              const end = e || s;
+              return targetYmd >= s && targetYmd <= end;
             });
-          } catch {
-            // ignore reply failures (e.g. dummy reply tokens)
+
+            const dateLabel = isTomorrow ? 'พรุ่งนี้' : 'วันนี้';
+            const thaiDate = formatThaiShortServer(targetYmd);
+            if (matchedLeaves.length > 0) {
+              const lines = matchedLeaves.map((l: any, idx: number) => {
+                const name = String(l.staffName || l.staffId || '').trim();
+                const pos = String(l.position || '').trim();
+                const clinic = String(l.clinic || '').trim();
+                const lType = String(l.leaveType || 'ลากิจ/ลาป่วย').trim();
+                const noteTxt = String(l.note || '').trim();
+                const periodMatch = noteTxt.match(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]/);
+                const periodLabel = String(l.period || (periodMatch ? periodMatch[1] : '')).trim();
+                const clinicPos = [pos, clinic].filter(Boolean).join(' • ');
+                return `${idx + 1}. ${name}${clinicPos ? ` (${clinicPos})` : ''} — ${lType}${periodLabel ? ` [${periodLabel}]` : ''}`;
+              });
+              replyText = `🏥 รายชื่อผู้ลาประจำ${dateLabel} (${thaiDate}):\nรวม ${matchedLeaves.length} คน\n${lines.join('\n')}`;
+            } else {
+              replyText = `✅ ไม่พบรายชื่อผู้ลาประจำ${dateLabel} (${thaiDate}) ครับ`;
+            }
+          } else if (
+            txt.includes('ot') ||
+            txt.includes('เวร') ||
+            txt.includes('นอกเวลา') ||
+            txt.includes('ใครอยู่เวร') ||
+            txt.includes('ใครอยู่ot') ||
+            txt.includes('โอที')
+          ) {
+            const isTomorrow = txt.includes('พรุ่งนี้');
+            const targetYmd = isTomorrow ? addDaysBangkokYmd(todayYmd, 1) : todayYmd;
+            const dateLabel = isTomorrow ? 'พรุ่งนี้' : 'วันนี้';
+            const thaiDate = formatThaiShortServer(targetYmd);
+
+            const sdb = loadServerDb();
+            const otList = Array.isArray(sdb?.ot) ? sdb.ot : [];
+            const matchedOt = otList.filter((o: any) => String(o.date || '').trim() === targetYmd);
+
+            if (matchedOt.length > 0) {
+              const lines = matchedOt.map((o: any, idx: number) => {
+                const name = String(o.staffName || '').trim();
+                const pos = String(o.position || '').trim();
+                const clinic = String(o.workClinic || '').trim();
+                const shift = String(o.shift || '').trim();
+                const rawHrs = Number(o.hours);
+                const hrs = Number.isFinite(rawHrs) && rawHrs > 0
+                  ? rawHrs
+                  : shift.includes('ในเวลาราชการ') ? 7 : 4;
+                return `${idx + 1}. ${name}${pos ? ` (${pos})` : ''} • ${clinic || 'นอกเวลา'}${shift ? ` [${shift}]` : ''} (${hrs} ชม.)`;
+              });
+              replyText = `🏥 รายชื่อผู้ปฏิบัติงาน OT / นอกเวลา ประจำ${dateLabel} (${thaiDate}):\nรวม ${matchedOt.length} รายการ\n${lines.join('\n')}`;
+            } else {
+              replyText = `✅ ไม่พบข้อมูลเวร OT ประจำ${dateLabel} (${thaiDate}) ในระบบครับ`;
+            }
+          } else if (
+            txt.includes('ช่วย') ||
+            txt.includes('คำสั่ง') ||
+            txt.includes('เมนู') ||
+            txt.includes('ทำอะไรได้') ||
+            txt.includes('bot') ||
+            txt.includes('help') ||
+            txt.includes('บูบี้')
+          ) {
+            replyText = `🤖 สวัสดีครับ ผม "บูบี้ ผู้ช่วย AI" ระบบ OPD รพ.ชลประทาน ถามข้อมูลได้ทันที:\n• "ใครลาวันนี้" หรือ "พรุ่งนี้ใครลาบ้าง"\n• "ใครอยู่ OT วันนี้" หรือ "พรุ่งนี้ใครอยู่ OT"\n• "/id" (ดูรหัสกลุ่ม LINE)`;
+          }
+
+          if (replyText) {
+            try {
+              await fetch('https://api.line.me/v2/bot/message/reply', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                  replyToken: ev.replyToken,
+                  messages: [{ type: 'text', text: replyText }],
+                }),
+              });
+            } catch {
+              // ignore reply failures
+            }
           }
         }
       }

@@ -3432,31 +3432,69 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         )}
 
         {showLineSetupGuide && (
-          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-3">
             <div className="font-bold text-slate-900">
-              วิธีเชื่อมต่อ LINE Multi-Round + Auto .JPEG ผ่าน Google Apps Script ให้ทำงานเสถียร 100%
+              วิธีเชื่อมต่อ LINE Multi-Round + Auto .JPEG + บอท &quot;บูบี้&quot; ตอบคำถามลา/OT อัตโนมัติ
             </div>
             <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-[11px] leading-relaxed space-y-1">
               <div className="font-bold">
-                ไม่ต้องใช้ Webhook URL และไม่ต้องกด Verify (ให้ปิดสวิตช์ Use webhook เป็น OFF ได้เลย):
+                1) การส่งรายงานประจำวันเข้ากลุ่ม (Push API): ไม่ต้องใช้ Webhook URL
               </div>
               <div>
-                ระบบส่งรายงานเข้ากลุ่ม LINE ใช้ <span className="font-semibold">Push API (ส่งออกทางเดียว)</span>{' '}
-                โดยรองรับการส่งหลายกลุ่มพร้อมกัน (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> และกลุ่มเพิ่มเติม) และรองรับการสร้างภาพ <span className="font-semibold">.jpeg</span> อัตโนมัติขึ้น Google Drive (โฟลเดอร์ <code className="bg-white border px-1 rounded font-mono">OPD_PCMC_LINE_Reports</code>)
+                ระบบส่งรายงานอัตโนมัติ (15:55 / 20:00 / 12:30 น.) ใช้ <span className="font-semibold">Push API (ส่งออกทางเดียว)</span>{' '}
+                ส่งเข้ากลุ่ม <code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> และกลุ่มอื่นได้ทันทีแม้ปิดสวิตช์ Use webhook
               </div>
             </div>
-            <ol className="list-decimal list-inside space-y-1.5 text-[11px] leading-relaxed">
-              <li>
-                อัปเดตโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุด → กด{' '}
-                <span className="font-semibold">Deploy → New version</span> (Who has access: Anyone) และอนุญาตสิทธิ์ Google Drive (ใช้สำหรับเก็บรูป <code className="bg-white border px-1 rounded font-mono">.jpeg</code> ชั่วคราวเพื่อให้ LINE ดึงภาพแสดงผล)
-              </li>
-              <li>
-                กำหนดรอบเวลาที่ต้องการในตารางด้านบน (ค่าแนะนำ: ในเวลา จ.–ศ. 15:55 น., นอกเวลา จ.–ศ. 20:00 น., วันหยุด 12:30 น.) แล้วกด <span className="font-semibold">บันทึกและตั้งเวลาอัตโนมัติ</span>
-              </li>
-              <li>
-                หากเปิดหน้าเว็บทิ้งไว้ตอนถึงเวลาส่ง ระบบจะเรนเดอร์ตารางเป็นภาพ <span className="font-semibold">.jpeg</span> ส่งเข้ากลุ่มอัตโนมัติทันที และหากปิดเบราว์เซอร์ไว้ Google Apps Script Trigger จะทำงานสำรองส่งข้อมูลให้ทุกวัน
-              </li>
-            </ol>
+
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-950 text-[11px] leading-relaxed space-y-2">
+              <div className="font-bold">
+                2) ถ้าต้องการให้บอท &quot;บูบี้ ผู้ช่วย AI&quot; ตอบคำถามในกลุ่ม (&quot;ใครลาวันนี้&quot;, &quot;พรุ่งนี้ใครลา&quot;, &quot;ใครอยู่ OT&quot;) และกด Verify ผ่าน 200 OK:
+              </div>
+              <p className="text-amber-900">
+                สาเหตุที่กด Verify แล้วขึ้น <b>404 Not Found</b> (Shared App URL ยังไม่ได้ Deploy), <b>302 Found</b> (Apps Script หรือ Dev URL ติดหน้า Redirect/Login), หรือ <b>405</b> (GitHub Pages เป็นเว็บสถิต): LINE กำหนดว่า Webhook URL ต้องตอบ <b>HTTP 200 OK โดยตรงทันที</b> วิธีที่เสถียรและฟรีตลอดชีพคือสร้าง <b>Cloudflare Worker (ฟรี)</b> วางขั้นกลางเพื่อตอบ 200 OK แล้วส่งต่อเข้า Google Apps Script (<code>Code.gs</code>)
+              </p>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-amber-950">โค้ด Cloudflare Worker (สร้าง 1 ครั้ง ฟรี 0 บาท):</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const gasEndpoint = (customGasUrl || settings.gasUrl || 'วาง_WEB_APP_URL_ของคุณที่นี่').trim();
+                      const workerCode = `export default {\n  async fetch(request, env, ctx) {\n    if (request.method === 'GET') return new Response('OK', { status: 200 });\n    const bodyText = await request.text();\n    const GAS_URL = ${JSON.stringify(gasEndpoint)};\n    if (GAS_URL.startsWith('https://')) {\n      ctx.waitUntil(fetch(GAS_URL, {\n        method: 'POST',\n        headers: { 'Content-Type': 'text/plain;charset=utf-8' },\n        body: bodyText,\n      }).catch(() => {}));\n    }\n    return new Response(JSON.stringify({ status: 'ok' }), {\n      status: 200,\n      headers: { 'Content-Type': 'application/json' },\n    });\n  },\n};`;
+                      navigator.clipboard.writeText(workerCode);
+                      setLineActionFeedback({ type: 'success', text: 'คัดลอกโค้ด Cloudflare Worker แล้ว! นำไปวางใน Cloudflare Workers แล้วเอา URL .workers.dev ไป Verify ใน LINE' });
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-700 hover:bg-amber-800 text-white text-[10.5px] font-bold cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>คัดลอกโค้ด Cloudflare Worker</span>
+                  </button>
+                </div>
+                <pre className="bg-slate-900 text-emerald-300 rounded-lg p-2.5 text-[10px] font-mono overflow-x-auto leading-normal">{`export default {
+  async fetch(request, env, ctx) {
+    if (request.method === 'GET') return new Response('OK', { status: 200 });
+    const bodyText = await request.text();
+    const GAS_URL = ${JSON.stringify((customGasUrl || settings.gasUrl || 'วาง_WEB_APP_URL_ของคุณที่นี่').trim())};
+    if (GAS_URL.startsWith('https://')) {
+      ctx.waitUntil(fetch(GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: bodyText,
+      }).catch(() => {}));
+    }
+    return new Response(JSON.stringify({ status: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};`}</pre>
+              </div>
+              <ol className="list-decimal list-inside space-y-1 text-[10.5px] text-amber-950">
+                <li>อัปเดตโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุดใน Google Sheets → กด <b>Deploy → New version</b> (ตั้งค่า <i>Who has access: Anyone</i>)</li>
+                <li>สมัครฟรีที่ <span className="font-mono">workers.cloudflare.com</span> → กด Create Worker → วางโค้ดด้านบนแล้วกด <b>Deploy</b></li>
+                <li>นำ URL ที่ได้ (เช่น <code className="bg-white border px-1 rounded font-mono">https://opd-line-bot.xxx.workers.dev</code>) ไปวางช่อง <b>Webhook URL</b> ใน LINE Developers Console แล้วกด <b>Verify</b> (จะผ่าน 200 OK ทันที!) และเปิด <b>Use webhook</b></li>
+              </ol>
+            </div>
           </div>
         )}
       </div>

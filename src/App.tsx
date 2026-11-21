@@ -137,6 +137,7 @@ import { LeaveAndOTTab } from './components/LeaveAndOTTab';
 import { DailyCensusTab } from './components/DailyCensusTab';
 import { ProductivityTab } from './components/ProductivityTab';
 import { AdminPanelTab } from './components/AdminPanelTab';
+import { CqiReportModal } from './components/CqiReportModal';
 import { 
   ClipboardPen, 
   CalendarClock, 
@@ -152,6 +153,7 @@ export default function App() {
   // App Database State (pre-loaded from local storage or hospital defaults)
   const [db, setDb] = useState(() => loadLocalDatabase());
   const [activeTab, setActiveTab] = useState<'workload' | 'leave_ot' | 'census' | 'productivity' | 'admin'>('workload');
+  const [showCqiModal, setShowCqiModal] = useState<boolean>(false);
 
   // Auth & Sync state
   const [user, setUser] = useState<User | null>(null);
@@ -3176,6 +3178,12 @@ export default function App() {
         isAdmin={isAdmin}
         adminOwnerName={adminOwnerName}
         onLockAdmin={handleLockAdmin}
+        onOpenCqi={() => setShowCqiModal(true)}
+      />
+
+      <CqiReportModal
+        isOpen={showCqiModal}
+        onClose={() => setShowCqiModal(false)}
       />
 
       {/* Floating Toast Message */}

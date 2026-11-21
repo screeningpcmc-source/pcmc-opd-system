@@ -1035,9 +1035,22 @@ export const loadLocalDatabase = (): AppDatabase => {
   };
 };
 
+export const syncDatabaseToServer = async (db: AppDatabase): Promise<void> => {
+  try {
+    await fetch('/api/db/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(db),
+    });
+  } catch {
+    // ignore
+  }
+};
+
 export const saveLocalDatabase = (db: AppDatabase): void => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    void syncDatabaseToServer(db);
   } catch (err) {
     console.error('Error saving local DB:', err);
   }

@@ -2,19 +2,22 @@ import React from 'react';
 import { 
   Building2, 
   ShieldCheck,
-  Lock
+  Lock,
+  FileText
 } from 'lucide-react';
 
 interface NavbarProps {
   isAdmin: boolean;
   adminOwnerName?: string;
   onLockAdmin?: () => void;
+  onOpenCqi?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   isAdmin,
   adminOwnerName,
   onLockAdmin,
+  onOpenCqi,
 }) => {
   return (
     <header className="no-print bg-gradient-to-r from-emerald-800 via-teal-800 to-cyan-900 text-white shadow-lg sticky top-0 z-50">
@@ -39,8 +42,20 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Admin Mode Indicator */}
+        {/* Actions & Admin Mode Indicator */}
         <div className="flex flex-wrap items-center gap-2">
+          {onOpenCqi && (
+            <button
+              type="button"
+              onClick={onOpenCqi}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/15 hover:bg-white/25 text-white border border-white/30 rounded-lg text-xs font-semibold transition-colors cursor-pointer shadow-xs"
+              title="ดูรายงานพัฒนาคุณภาพงาน (CQI)"
+            >
+              <FileText className="w-3.5 h-3.5 text-amber-300" />
+              <span>รายงาน CQI</span>
+            </button>
+          )}
+
           {isAdmin && (
             <div className="inline-flex items-center gap-1.5 bg-emerald-500/25 text-emerald-100 border border-emerald-400/40 rounded-lg px-2.5 py-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />

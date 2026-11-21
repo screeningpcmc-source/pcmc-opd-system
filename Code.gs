@@ -2678,6 +2678,15 @@ function fetchLineGroupNameGas_(channelAccessToken, groupId) {
 
 function handleLineWebhookEvents_(events) {
   var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var todayYmd = bkk.ymd;
+  var thaiShortMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  var formatShortThaiDate = function(ymd) {
+    var p = String(ymd || '').split('-');
+    if (p.length !== 3) return String(ymd || '');
+    return Number(p[2]) + ' ' + (thaiShortMonths[Number(p[1]) - 1] || p[1]) + ' ' + (Number(p[0]) + 543);
+  };
+
   for (var i = 0; i < events.length; i++) {
     var ev = events[i];
     if (!ev || !ev.source) continue;
@@ -2692,12 +2701,111 @@ function handleLineWebhookEvents_(events) {
     var txt = ev.type === 'message' && ev.message && ev.message.type === 'text'
       ? String(ev.message.text || '').trim().toLowerCase()
       : '';
-    if (token && ev.replyToken && (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id')) {
-      replyLineMessageGas_(
-        token,
-        ev.replyToken,
-        'รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n' + detectedId + (groupName ? '\nกลุ่ม: ' + groupName : '')
-      );
+
+    if (token && ev.replyToken && txt) {
+      var replyText = '';
+      if (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id') {
+        replyText = 'รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n' + detectedId + (groupName ? '\nกลุ่ม: ' + groupName : '');
+      } else if (
+        txt.indexOf('ใครลา') !== -1 ||
+        txt.indexOf('ลาวันนี้') !== -1 ||
+        txt.indexOf('พรุ่งนี้ใครลา') !== -1 ||
+        (txt.indexOf('ลา') !== -1 && (txt.indexOf('ใคร') !== -1 || txt.indexOf('วันนี้') !== -1 || txt.indexOf('พรุ่งนี้') !== -1 || txt.indexOf('บ้าง') !== -1))
+      ) {
+        var isTomorrowLeave = txt.indexOf('พรุ่งนี้') !== -1;
+        var targetLeaveYmd = isTomorrowLeave ? addDaysIsoGas_(todayYmd, 1) : todayYmd;
+        var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 9);
+        var lOff = (leaveData.headers[0] === 'Leave_ID') ? 1 : 0;
+        var matchedLeaves = [];
+
+        for (var li = 0; li < leaveData.rows.length; li++) {
+          var lr = leaveData.rows[li];
+          var sDate = String(lr[lOff] || '').trim();
+          var eDate = String(lr[lOff + 1] || '').trim() || sDate;
+          var sName = String(lr[lOff + 2] || '').trim();
+          if (!sDate || !sName) continue;
+          if (targetLeaveYmd >= sDate && targetLeaveYmd <= eDate) {
+            matchedLeaves.push({
+              name: sName,
+              pos: String(lr[lOff + 3] || '').trim(),
+              clinic: String(lr[lOff + 4] || '').trim(),
+              leaveType: String(lr[lOff + 5] || 'ลา').trim(),
+              note: String(lr[lOff + 7] || '').trim()
+            });
+          }
+        }
+
+        var leaveDateLabel = isTomorrowLeave ? 'พรุ่งนี้' : 'วันนี้';
+        var leaveThaiDate = formatShortThaiDate(targetLeaveYmd);
+        if (matchedLeaves.length > 0) {
+          var leaveLines = matchedLeaves.map(function(item, idx) {
+            var periodMatch = item.note.match(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]/);
+            var periodTxt = periodMatch ? ' [' + periodMatch[1] + ']' : '';
+            var meta = [item.pos, item.clinic].filter(Boolean).join(' • ');
+            return (idx + 1) + '. ' + item.name + (meta ? ' (' + meta + ')' : '') + ' — ' + item.leaveType + periodTxt;
+          });
+          replyText = '🏥 รายชื่อผู้ลาประจำ' + leaveDateLabel + ' (' + leaveThaiDate + '):\nรวม ' + matchedLeaves.length + ' คน\n' + leaveLines.join('\n');
+        } else {
+          replyText = '✅ ไม่พบรายชื่อผู้ลาประจำ' + leaveDateLabel + ' (' + leaveThaiDate + ') ครับ';
+        }
+      } else if (
+        txt.indexOf('ot') !== -1 ||
+        txt.indexOf('เวร') !== -1 ||
+        txt.indexOf('นอกเวลา') !== -1 ||
+        txt.indexOf('โอที') !== -1
+      ) {
+        var isTomorrowOt = txt.indexOf('พรุ่งนี้') !== -1;
+        var targetOtYmd = isTomorrowOt ? addDaysIsoGas_(todayYmd, 1) : todayYmd;
+        var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 9);
+        var oOff = (otData.headers[0] === 'OT_ID') ? 1 : 0;
+        var matchedOt = [];
+
+        for (var oi = 0; oi < otData.rows.length; oi++) {
+          var orow = otData.rows[oi];
+          var oDate = String(orow[oOff] || '').trim();
+          var oName = String(orow[oOff + 2] || '').trim();
+          if (!oDate || !oName) continue;
+          if (oDate === targetOtYmd) {
+            var oShift = String(orow[oOff + 1] || '').trim();
+            var oHrsNum = Number(orow[oOff + 6]);
+            if (!isFinite(oHrsNum) || oHrsNum <= 0) {
+              oHrsNum = oShift.indexOf('ในเวลาราชการ') !== -1 ? 7 : 4;
+            }
+            matchedOt.push({
+              name: oName,
+              pos: String(orow[oOff + 3] || '').trim(),
+              workClinic: String(orow[oOff + 5] || '').trim(),
+              shift: oShift,
+              hours: oHrsNum
+            });
+          }
+        }
+
+        var otDateLabel = isTomorrowOt ? 'พรุ่งนี้' : 'วันนี้';
+        var otThaiDate = formatShortThaiDate(targetOtYmd);
+        if (matchedOt.length > 0) {
+          var otLines = matchedOt.map(function(item, idx) {
+            return (idx + 1) + '. ' + item.name + (item.pos ? ' (' + item.pos + ')' : '') + ' • ' + (item.workClinic || 'นอกเวลา') + (item.shift ? ' [' + item.shift + ']' : '') + ' (' + item.hours + ' ชม.)';
+          });
+          replyText = '🏥 รายชื่อผู้ปฏิบัติงาน OT / นอกเวลา ประจำ' + otDateLabel + ' (' + otThaiDate + '):\nรวม ' + matchedOt.length + ' รายการ\n' + otLines.join('\n');
+        } else {
+          replyText = '✅ ไม่พบข้อมูลเวร OT ประจำ' + otDateLabel + ' (' + otThaiDate + ') ในระบบครับ';
+        }
+      } else if (
+        txt.indexOf('ช่วย') !== -1 ||
+        txt.indexOf('คำสั่ง') !== -1 ||
+        txt.indexOf('เมนู') !== -1 ||
+        txt.indexOf('ทำอะไรได้') !== -1 ||
+        txt.indexOf('bot') !== -1 ||
+        txt.indexOf('help') !== -1 ||
+        txt.indexOf('บูบี้') !== -1
+      ) {
+        replyText = '🤖 สวัสดีครับ ผม "บูบี้ ผู้ช่วย AI" ระบบ OPD รพ.ชลประทาน ถามข้อมูลได้ทันที:\n• "ใครลาวันนี้" หรือ "พรุ่งนี้ใครลาบ้าง"\n• "ใครอยู่ OT วันนี้" หรือ "พรุ่งนี้ใครอยู่ OT"\n• "/id" (ดูรหัสกลุ่ม LINE)';
+      }
+
+      if (replyText) {
+        replyLineMessageGas_(token, ev.replyToken, replyText);
+      }
     }
   }
   return { success: true };
