@@ -222,3 +222,25 @@ export function countGovernmentWorkdaysInRange(
 ): number {
   return calculateGovernmentLeaveStats(startIso, endIso, customHolidays).workDays;
 }
+
+export function isWeekendOrThaiHoliday(
+  isoDate: string,
+  customHolidays: CustomHoliday[] = []
+): boolean {
+  const d = parseIsoLocal(isoDate);
+  if (!d) return false;
+  const dow = d.getDay();
+  if (dow === 0 || dow === 6) return true;
+  const holidayMap = getHolidaysForYear(d.getFullYear(), customHolidays);
+  return holidayMap.has(toIsoDate(d));
+}
+
+export function doesDateMatchLineDayRule(
+  isoDate: string,
+  dayRule: 'ALL_DAYS' | 'WORKDAYS_MON_FRI' | 'WEEKENDS_AND_HOLIDAYS' = 'ALL_DAYS',
+  customHolidays: CustomHoliday[] = []
+): boolean {
+  if (dayRule === 'ALL_DAYS') return true;
+  const isHol = isWeekendOrThaiHoliday(isoDate, customHolidays);
+  return dayRule === 'WEEKENDS_AND_HOLIDAYS' ? isHol : !isHol;
+}

@@ -176,6 +176,10 @@ interface LeaveAndOTTabProps {
   onDeleteLeave: (id: string, reason: string) => void;
   onUpdateOT?: (updated: OTAttendance, reason: string) => void;
   onDeleteOT: (id: string, reason: string) => void;
+  onSaveUnitCostCenter?: (
+    clinic: string,
+    costCenter: string
+  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
 interface ExternalOtDraft {
@@ -235,6 +239,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   onDeleteLeave,
   onUpdateOT,
   onDeleteOT,
+  onSaveUnitCostCenter,
 }) => {
   const todayStr = getLocalTodayIso();
 
@@ -519,7 +524,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     'OUT_TIME' | 'ALL_OT' | WorkShift
   >('OUT_TIME');
   const [otPaySearch, setOtPaySearch] = useState<string>('');
+  const [localUnitCostCenters, setLocalUnitCostCenters] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem('pcmc_unit_cost_centers');
+      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
   const [otPayCostCenterOverride, setOtPayCostCenterOverride] = useState<string>('');
+  const [isSavingUnitCostCenter, setIsSavingUnitCostCenter] = useState<boolean>(false);
+  const [unitCostCenterSavedBadge, setUnitCostCenterSavedBadge] = useState<string>('');
   const [otPayControllerOverride, setOtPayControllerOverride] = useState<string>('');
 
   const otWorkClinicOptions = useMemo(() => {
@@ -1420,14 +1435,68 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     return Array.from(new Set([...outTimeClinics, ...allClinics, ...fromRecords]));
   }, [otRecords, outTimeClinics, allClinics]);
 
-  const resolvedOtPayCostCenter = useMemo(() => {
-    if (otPayCostCenterOverride.trim()) return otPayCostCenterOverride.trim();
+  const savedCostCenterForSelectedUnit = useMemo(() => {
     if (otPayClinic !== 'ALL') {
-      const mapped = (settings?.clinicCostCenters?.[otPayClinic] || '').trim();
-      if (mapped) return mapped;
+      const fromSettings = (settings?.clinicCostCenters?.[otPayClinic] || '').trim();
+      if (fromSettings) return fromSettings;
+      const fromLocal = (localUnitCostCenters[otPayClinic] || '').trim();
+      if (fromLocal) return fromLocal;
+    } else {
+      const fromLocalAll = (localUnitCostCenters['ALL'] || '').trim();
+      if (fromLocalAll) return fromLocalAll;
     }
     return (settings?.defaultCostCenter || '').trim() || DEFAULT_OT_COST_CENTER;
-  }, [otPayCostCenterOverride, otPayClinic, settings]);
+  }, [otPayClinic, settings, localUnitCostCenters]);
+
+  useEffect(() => {
+    // Load remembered Cost Center whenever unit selection or persisted settings change
+    if (otPayClinic === 'ALL') {
+      const remembered = (localUnitCostCenters['ALL'] || settings?.defaultCostCenter || '').trim();
+      setOtPayCostCenterOverride(remembered && remembered !== DEFAULT_OT_COST_CENTER ? remembered : '');
+    } else {
+      const remembered = (
+        settings?.clinicCostCenters?.[otPayClinic] ||
+        localUnitCostCenters[otPayClinic] ||
+        ''
+      ).trim();
+      setOtPayCostCenterOverride(remembered);
+    }
+    setUnitCostCenterSavedBadge('');
+  }, [otPayClinic, settings?.clinicCostCenters, settings?.defaultCostCenter, localUnitCostCenters]);
+
+  const resolvedOtPayCostCenter = useMemo(() => {
+    if (otPayCostCenterOverride.trim()) return otPayCostCenterOverride.trim();
+    return savedCostCenterForSelectedUnit;
+  }, [otPayCostCenterOverride, savedCostCenterForSelectedUnit]);
+
+  const handleSaveCurrentUnitCostCenter = async () => {
+    const cleanClinic = (otPayClinic || '').trim();
+    const cleanVal = otPayCostCenterOverride.trim();
+    if (!cleanClinic) return;
+    setIsSavingUnitCostCenter(true);
+    try {
+      setLocalUnitCostCenters((prev) => {
+        const next = { ...prev };
+        if (cleanVal) next[cleanClinic] = cleanVal;
+        else delete next[cleanClinic];
+        try {
+          localStorage.setItem('pcmc_unit_cost_centers', JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+      if (onSaveUnitCostCenter) {
+        await onSaveUnitCostCenter(cleanClinic, cleanVal);
+      }
+      setUnitCostCenterSavedBadge(
+        cleanVal ? `จำค่า "${cleanVal}" แล้ว ✓` : 'ล้างค่าเฉพาะหน่วยนี้แล้ว ✓'
+      );
+      setTimeout(() => setUnitCostCenterSavedBadge(''), 3000);
+    } finally {
+      setIsSavingUnitCostCenter(false);
+    }
+  };
 
   const resolvedOtPayControllerName = useMemo(() => {
     if (otPayControllerOverride.trim()) return otPayControllerOverride.trim();
@@ -4897,16 +4966,35 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                  Cost Center (ระบุชั่วคราวหรือแก้ถาวรที่เมนู 5):
-                </label>
-                <input
-                  type="text"
-                  value={otPayCostCenterOverride}
-                  onChange={(e) => setOtPayCostCenterOverride(e.target.value)}
-                  placeholder={`ค่าตั้งต้น: ${resolvedOtPayCostCenter}`}
-                  className="w-full text-xs rounded-lg border border-gray-300 px-2.5 py-1.5 bg-white font-mono"
-                />
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-[11px] font-bold text-gray-700">
+                    Cost Center ({otPayClinic === 'ALL' ? 'ค่าตั้งต้นทุกหน่วย' : `ประจำ${otPayClinic}`}):
+                  </label>
+                  {unitCostCenterSavedBadge && (
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                      {unitCostCenterSavedBadge}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={otPayCostCenterOverride}
+                    onChange={(e) => setOtPayCostCenterOverride(e.target.value)}
+                    placeholder={`ค่าตั้งต้น: ${savedCostCenterForSelectedUnit}`}
+                    className="flex-1 min-w-0 text-xs rounded-lg border border-gray-300 px-2.5 py-1.5 bg-white font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveCurrentUnitCostCenter}
+                    disabled={isSavingUnitCostCenter}
+                    title="บันทึก Cost Center ของหน่วยนี้ไว้ใช้งานครั้งถัดไป (ไม่ต้องใช้ Admin PIN)"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white text-[11px] font-bold shrink-0 cursor-pointer shadow-2xs"
+                  >
+                    <Save className="w-3 h-3" />
+                    <span>{isSavingUnitCostCenter ? 'กำลังจำ...' : 'จำค่าของหน่วย'}</span>
+                  </button>
+                </div>
               </div>
 
               <div>

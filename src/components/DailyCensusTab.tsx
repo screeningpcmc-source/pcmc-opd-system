@@ -27,7 +27,7 @@ import {
 } from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
 import { buildDailyCensusLineMessage } from '../utils/lineReport';
-import { exportElementAsJpeg } from '../utils/exportImage';
+import { exportElementAsJpeg, captureElementAsJpegDataUrl } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
 import { 
   FileText, 
@@ -62,7 +62,13 @@ interface DailyCensusTabProps {
   settings?: SystemSettings;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
   onDeleteWorkload?: (id: string, reason: string) => void;
-  onSendLineReportNow?: (params: { date: string; shift: string; message: string }) => Promise<{ ok: boolean; error?: string }>;
+  onSendLineReportNow?: (params: {
+    date: string;
+    shift: string;
+    message: string;
+    imageDataUrl?: string;
+    sendAsImage?: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 interface PremiumCensusGroup {
@@ -436,10 +442,21 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     if (!onSendLineReportNow || isSendingLine) return;
     setIsSendingLine(true);
     try {
+      const wantImage = settings?.lineSendAsImage ?? true;
+      let imageDataUrl: string | undefined;
+      if (wantImage && reportSheetRef.current) {
+        try {
+          imageDataUrl = await captureElementAsJpegDataUrl(reportSheetRef.current);
+        } catch {
+          imageDataUrl = undefined;
+        }
+      }
       await onSendLineReportNow({
         date,
         shift: shiftFilter,
         message: currentLineMessage,
+        imageDataUrl,
+        sendAsImage: wantImage,
       });
     } finally {
       setIsSendingLine(false);
@@ -479,8 +496,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
               type="button"
               onClick={handleSendLineNowClick}
               disabled={isSendingLine}
-              title={`ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้า LINE กลุ่ม (${
-                settings?.lineTargetId || 'กลุ่มหลัก OPD'
+              title={`ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้ากลุ่ม LINE (${
+                (settings?.lineTargetGroups || []).filter((g) => g.enabled).length > 1
+                  ? `${(settings?.lineTargetGroups || []).filter((g) => g.enabled).length} กลุ่ม`
+                  : settings?.lineTargetId || 'กลุ่มหลัก OPD'
               }) ทันที`}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
             >
@@ -489,7 +508,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
               ) : (
                 <Send className="w-3.5 h-3.5" />
               )}
-              <span>{isSendingLine ? 'กำลังส่งเข้า LINE...' : 'ส่งเข้า LINE กลุ่มทันที'}</span>
+              <span>
+                {isSendingLine
+                  ? 'กำลังสร้างภาพและส่ง...'
+                  : settings?.lineSendAsImage === false
+                  ? 'ส่งเข้า LINE กลุ่มทันที'
+                  : 'ส่งเข้า LINE กลุ่มทันที (.JPEG)'}
+              </span>
             </button>
           )}
           <button

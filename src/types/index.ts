@@ -629,10 +629,13 @@ export interface SystemSettings {
   otControllerName?: string;
   // LINE Messaging API Daily Patient Report Automation
   lineAutoEnabled?: boolean;
-  lineAutoTime?: string; // Default '03:59' (Asia/Bangkok)
+  lineAutoTime?: string; // Default '15:55' (Asia/Bangkok)
   lineAutoReportDayMode?: 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
   lineAutoShift?: 'ALL' | WorkShift;
   lineTargetId?: string;
+  lineTargetGroups?: LineTargetGroup[];
+  lineSchedules?: LineReportSchedule[];
+  lineSendAsImage?: boolean;
   lineChannelTokenSet?: boolean;
   lineLastSentAt?: string;
   lineLastSentReportDate?: string;
@@ -641,9 +644,105 @@ export interface SystemSettings {
   lineDetectedGroupName?: string;
 }
 
-export const DEFAULT_LINE_AUTO_TIME = '15:59';
+export const DEFAULT_LINE_AUTO_TIME = '15:55';
 export const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
 export type LineAutoReportDayMode = 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
+export type LineReportDayRule = 'ALL_DAYS' | 'WORKDAYS_MON_FRI' | 'WEEKENDS_AND_HOLIDAYS';
+
+export interface LineTargetGroup {
+  id: string;
+  name?: string;
+  enabled: boolean;
+}
+
+export interface LineReportSchedule {
+  id: string;
+  label: string;
+  enabled: boolean;
+  time: string; // HH:mm
+  dayRule: LineReportDayRule;
+  reportDayMode: LineAutoReportDayMode;
+  shift: 'ALL' | WorkShift;
+  sendAsImage?: boolean;
+}
+
+export const DEFAULT_LINE_TARGET_GROUPS: LineTargetGroup[] = [
+  { id: DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true },
+];
+
+export const DEFAULT_LINE_SCHEDULES: LineReportSchedule[] = [
+  {
+    id: 'sch-regular',
+    label: 'ในเวลาราชการ (จันทร์–ศุกร์)',
+    enabled: true,
+    time: '15:55',
+    dayRule: 'WORKDAYS_MON_FRI',
+    reportDayMode: 'TODAY',
+    shift: 'ในเวลา 08:00-16:00',
+    sendAsImage: true,
+  },
+  {
+    id: 'sch-ot-weekday',
+    label: 'นอกเวลา (จันทร์–ศุกร์)',
+    enabled: true,
+    time: '20:00',
+    dayRule: 'WORKDAYS_MON_FRI',
+    reportDayMode: 'TODAY',
+    shift: 'นอกเวลาเย็น 16:00-20:00',
+    sendAsImage: true,
+  },
+  {
+    id: 'sch-ot-holiday',
+    label: 'นอกเวลา (เสาร์–อาทิตย์ / นักขัตฤกษ์)',
+    enabled: true,
+    time: '12:30',
+    dayRule: 'WEEKENDS_AND_HOLIDAYS',
+    reportDayMode: 'TODAY',
+    shift: 'นอกเวลาวันหยุด 08:00-12:00',
+    sendAsImage: true,
+  },
+];
+
+/**
+ * Normalizes time string (including accidental Google Sheets 1899-12-30 serialized dates) into HH:mm.
+ */
+export function normalizeLineTimeString(
+  raw?: string | null,
+  fallback: string = DEFAULT_LINE_AUTO_TIME
+): string {
+  const s = String(raw || '').trim().replace(/^'+/, '');
+  if (!s) return fallback;
+  const direct = s.match(/^(\d{1,2}):(\d{1,2})(?::\d{1,2})?$/);
+  if (direct) {
+    const hh = Math.min(23, Math.max(0, Number(direct[1])));
+    const mm = Math.min(59, Math.max(0, Number(direct[2])));
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  // Google Sheets serial time (1899-12-30T...) or JS Date string
+  if (s.includes('1899') || s.includes('GMT') || s.includes('T')) {
+    const dt = new Date(s);
+    if (!Number.isNaN(dt.getTime())) {
+      try {
+        const bkk = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Bangkok',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        }).format(dt);
+        const m = bkk.match(/^(\d{2}):(\d{2})$/);
+        if (m) return `${m[1]}:${m[2]}`;
+      } catch {
+        // Fallback below
+      }
+    }
+    const embedded = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+    if (embedded && !s.startsWith('1899-12-30')) {
+      return `${embedded[1].padStart(2, '0')}:${embedded[2]}`;
+    }
+    return fallback;
+  }
+  return fallback;
+}
 
 export const DEFAULT_OT_COST_CENTER = '2012000000';
 export const DEFAULT_OT_CONTROLLER_NAME = 'นางสาว ประภัสสร พันธุ์วา';

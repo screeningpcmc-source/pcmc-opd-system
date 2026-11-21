@@ -38,6 +38,11 @@ import {
   DEFAULT_LINE_AUTO_TIME,
   DEFAULT_LINE_GROUP_ID,
   LineAutoReportDayMode,
+  LineTargetGroup,
+  LineReportSchedule,
+  DEFAULT_LINE_TARGET_GROUPS,
+  DEFAULT_LINE_SCHEDULES,
+  normalizeLineTimeString,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -251,6 +256,16 @@ function parseJsonRecordSafe<T = Record<string, any>>(raw?: string): T | null {
   }
 }
 
+function parseJsonArraySafe<T = any>(raw?: string): T[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseSheetOtRecord(r: string[], fallbackId: string, staffList?: StaffMember[]): OTAttendance {
   const rawPos = (r[3] || 'RN').trim();
   const shift = String(r[1] || 'นอกเวลาเย็น 16:00-20:00').trim() as WorkShift;
@@ -307,10 +322,13 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['OT_Hourly_Rates', JSON.stringify(settings.otHourlyRates || {})],
     ['OT_Controller_Name', (settings.otControllerName || DEFAULT_OT_CONTROLLER_NAME).trim()],
     ['Line_Auto_Enabled', settings.lineAutoEnabled ? 'true' : 'false'],
-    ['Line_Auto_Time', (settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME).trim()],
+    ['Line_Auto_Time', normalizeLineTimeString(settings.lineAutoTime, DEFAULT_LINE_AUTO_TIME)],
     ['Line_Auto_Report_Day', settings.lineAutoReportDayMode || 'TODAY'],
     ['Line_Auto_Shift', settings.lineAutoShift || 'ในเวลา 08:00-16:00'],
     ['Line_Target_Id', (settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()],
+    ['Line_Target_Groups', JSON.stringify(settings.lineTargetGroups || DEFAULT_LINE_TARGET_GROUPS)],
+    ['Line_Schedules', JSON.stringify(settings.lineSchedules || DEFAULT_LINE_SCHEDULES)],
+    ['Line_Send_As_Image', settings.lineSendAsImage !== false ? 'true' : 'false'],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
   if (Object.keys(codeMap).length > 0) {
@@ -1804,9 +1822,12 @@ export const syncAllWithGoogleSheet = async (
       : settingsMap['Line_Auto_Enabled'] !== undefined
       ? settingsMap['Line_Auto_Enabled'].toLowerCase() === 'true'
       : Boolean(db.settings.lineAutoEnabled),
-    lineAutoTime: settingsDirty
-      ? db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
-      : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+    lineAutoTime: normalizeLineTimeString(
+      settingsDirty
+        ? db.settings.lineAutoTime
+        : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime,
+      DEFAULT_LINE_AUTO_TIME
+    ),
     lineAutoReportDayMode: ((): LineAutoReportDayMode => {
       const raw = settingsDirty
         ? db.settings.lineAutoReportDayMode
@@ -1823,6 +1844,27 @@ export const syncAllWithGoogleSheet = async (
       : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
       ? settingsMap['Line_Target_Id']
       : db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID,
+    lineTargetGroups: settingsDirty
+      ? db.settings.lineTargetGroups || DEFAULT_LINE_TARGET_GROUPS
+      : parseJsonArraySafe<LineTargetGroup>(settingsMap['Line_Target_Groups']) ||
+        db.settings.lineTargetGroups ||
+        DEFAULT_LINE_TARGET_GROUPS,
+    lineSchedules: ((): LineReportSchedule[] => {
+      const rawArr = settingsDirty
+        ? db.settings.lineSchedules
+        : parseJsonArraySafe<LineReportSchedule>(settingsMap['Line_Schedules']) ||
+          db.settings.lineSchedules;
+      const list = rawArr && rawArr.length > 0 ? rawArr : DEFAULT_LINE_SCHEDULES;
+      return list.map((s) => ({
+        ...s,
+        time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+      }));
+    })(),
+    lineSendAsImage: settingsDirty
+      ? db.settings.lineSendAsImage !== false
+      : settingsMap['Line_Send_As_Image'] !== undefined
+      ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
+      : db.settings.lineSendAsImage !== false,
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -2863,9 +2905,12 @@ function mergeRemoteDataRows(
       : settingsMap['Line_Auto_Enabled'] !== undefined
       ? settingsMap['Line_Auto_Enabled'].toLowerCase() === 'true'
       : Boolean(db.settings.lineAutoEnabled),
-    lineAutoTime: settingsDirty
-      ? db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
-      : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+    lineAutoTime: normalizeLineTimeString(
+      settingsDirty
+        ? db.settings.lineAutoTime
+        : settingsMap['Line_Auto_Time'] || db.settings.lineAutoTime,
+      DEFAULT_LINE_AUTO_TIME
+    ),
     lineAutoReportDayMode: ((): LineAutoReportDayMode => {
       const raw = settingsDirty
         ? db.settings.lineAutoReportDayMode
@@ -2882,6 +2927,27 @@ function mergeRemoteDataRows(
       : settingsMap['Line_Target_Id'] !== undefined && settingsMap['Line_Target_Id'] !== ''
       ? settingsMap['Line_Target_Id']
       : db.settings.lineTargetId || DEFAULT_LINE_GROUP_ID,
+    lineTargetGroups: settingsDirty
+      ? db.settings.lineTargetGroups || DEFAULT_LINE_TARGET_GROUPS
+      : parseJsonArraySafe<LineTargetGroup>(settingsMap['Line_Target_Groups']) ||
+        db.settings.lineTargetGroups ||
+        DEFAULT_LINE_TARGET_GROUPS,
+    lineSchedules: ((): LineReportSchedule[] => {
+      const rawArr = settingsDirty
+        ? db.settings.lineSchedules
+        : parseJsonArraySafe<LineReportSchedule>(settingsMap['Line_Schedules']) ||
+          db.settings.lineSchedules;
+      const list = rawArr && rawArr.length > 0 ? rawArr : DEFAULT_LINE_SCHEDULES;
+      return list.map((s) => ({
+        ...s,
+        time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+      }));
+    })(),
+    lineSendAsImage: settingsDirty
+      ? db.settings.lineSendAsImage !== false
+      : settingsMap['Line_Send_As_Image'] !== undefined
+      ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
+      : db.settings.lineSendAsImage !== false,
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -4856,13 +4922,17 @@ export const fetchServerLineStatus = async (
 
 export const sendLineMessageViaServerProxy = async (params: {
   targetId?: string;
+  targetIds?: string[];
   message: string;
+  imageUrl?: string;
+  previewImageUrl?: string;
 }): Promise<{
   available: boolean;
   ok: boolean;
   statusText?: string;
   sentAt?: string;
   groupName?: string;
+  sentCount?: number;
   error?: string;
 }> => {
   try {
@@ -4871,7 +4941,10 @@ export const sendLineMessageViaServerProxy = async (params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         targetId: (params.targetId || DEFAULT_LINE_GROUP_ID).trim(),
+        ...(params.targetIds && params.targetIds.length > 0 ? { targetIds: params.targetIds } : {}),
         message: params.message,
+        ...(params.imageUrl ? { imageUrl: params.imageUrl } : {}),
+        ...(params.previewImageUrl ? { previewImageUrl: params.previewImageUrl } : {}),
       }),
     });
     const contentType = res.headers.get('content-type') || '';
@@ -4885,6 +4958,7 @@ export const sendLineMessageViaServerProxy = async (params: {
       statusText: data?.statusText,
       sentAt: data?.sentAt,
       groupName: data?.groupName,
+      sentCount: data?.sentCount,
       error: data?.error,
     };
   } catch {
@@ -4898,6 +4972,9 @@ export const configureLineViaServerProxy = async (params: {
   reportDayMode: LineAutoReportDayMode;
   shift: 'ALL' | WorkShift;
   targetId: string;
+  targetGroups?: LineTargetGroup[];
+  schedules?: LineReportSchedule[];
+  sendAsImage?: boolean;
   gasUrl?: string;
   adminPin?: string;
 }): Promise<{
@@ -4951,6 +5028,9 @@ export const configureLineAutomationViaAppsScript = async (params: {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
+    targetGroups?: LineTargetGroup[];
+    schedules?: LineReportSchedule[];
+    sendAsImage?: boolean;
   };
   db: AppDatabase;
   expectedDirtyVersion?: number;
@@ -5020,14 +5100,82 @@ export const configureLineAutomationViaAppsScript = async (params: {
   }
 };
 
+export const uploadLineReportJpegViaAppsScript = async (params: {
+  gasUrl: string;
+  base64Jpeg: string;
+  filename?: string;
+}): Promise<{ ok: boolean; imageUrl?: string; previewImageUrl?: string; error?: string }> => {
+  const { gasUrl, base64Jpeg, filename } = params;
+  if (!gasUrl) {
+    return { ok: false, error: 'ยังไม่ได้เชื่อมต่อ Google Apps Script Web App URL' };
+  }
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'uploadLineReportJpeg',
+        payload: {
+          base64Jpeg: base64Jpeg.replace(/^data:image\/\w+;base64,/, ''),
+          filename: filename || `OPD_Census_${Date.now()}.jpeg`,
+        },
+      }),
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    const data = await res.json();
+    if (!data || data.success === false || !data.imageUrl) {
+      return { ok: false, error: String(data?.error || 'อัปโหลดภาพ .jpeg ไปยัง Google Drive ไม่สำเร็จ') };
+    }
+    return {
+      ok: true,
+      imageUrl: String(data.imageUrl),
+      previewImageUrl: String(data.previewImageUrl || data.imageUrl),
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+export const saveUnitCostCenterViaAppsScript = async (params: {
+  gasUrl: string;
+  clinic: string;
+  costCenter: string;
+}): Promise<{ ok: boolean; error?: string }> => {
+  const { gasUrl, clinic, costCenter } = params;
+  if (!gasUrl) return { ok: false, error: 'ไม่มี Web App URL' };
+  try {
+    const res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'saveUnitCostCenter',
+        payload: { clinic, costCenter },
+      }),
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    const data = await res.json();
+    if (!data || data.success === false) {
+      return { ok: false, error: String(data?.error || 'บันทึก Cost Center ไม่สำเร็จ') };
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
 export const sendLineDailyCensusNowViaAppsScript = async (params: {
   gasUrl: string;
-  adminPin: string;
+  adminPin?: string;
   targetId?: string;
+  targetIds?: string[];
   date?: string;
   shift?: string;
   reportDayMode?: LineAutoReportDayMode;
   message?: string;
+  imageUrl?: string;
+  previewImageUrl?: string;
+  imageBase64?: string;
+  scheduleId?: string;
   db: AppDatabase;
 }): Promise<{
   ok: boolean;
@@ -5037,7 +5185,21 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
   targetDate?: string;
   syncedDb?: AppDatabase;
 }> => {
-  const { gasUrl, adminPin, targetId, date, shift, reportDayMode, message, db } = params;
+  const {
+    gasUrl,
+    adminPin,
+    targetId,
+    targetIds,
+    date,
+    shift,
+    reportDayMode,
+    message,
+    imageUrl,
+    previewImageUrl,
+    imageBase64,
+    scheduleId,
+    db,
+  } = params;
   if (!gasUrl || !adminPin) {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
@@ -5050,10 +5212,15 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
         adminPin,
         payload: {
           targetId: (targetId || DEFAULT_LINE_GROUP_ID).trim(),
+          ...(targetIds && targetIds.length > 0 ? { targetIds } : {}),
           ...(date ? { date } : {}),
           ...(shift ? { shift } : {}),
           ...(reportDayMode ? { reportDayMode } : {}),
           ...(message ? { message } : {}),
+          ...(imageUrl ? { imageUrl } : {}),
+          ...(previewImageUrl ? { previewImageUrl } : {}),
+          ...(imageBase64 ? { imageBase64 } : {}),
+          ...(scheduleId ? { scheduleId } : {}),
         },
       }),
     });

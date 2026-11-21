@@ -19,6 +19,37 @@
 
 var DEFAULT_WEB_APP_CLIENT_URL = 'https://screeningpcmc-source.github.io/pcmc-opd-system/';
 var DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
+var DEFAULT_LINE_AUTO_TIME = '15:55';
+var LINE_REPORT_DRIVE_FOLDER_NAME = 'OPD_PCMC_LINE_Reports';
+var DEFAULT_LINE_SCHEDULES = [
+  {
+    id: 'WORKDAY_REG',
+    label: 'ในเวลาราชการ (จันทร์-ศุกร์)',
+    time: '15:55',
+    dayRule: 'WORKDAYS_MON_FRI',
+    shift: 'ในเวลา 08:00-16:00',
+    reportDayMode: 'TODAY',
+    enabled: true
+  },
+  {
+    id: 'WORKDAY_EVENING',
+    label: 'นอกเวลาราชการ (จันทร์-ศุกร์)',
+    time: '20:00',
+    dayRule: 'WORKDAYS_MON_FRI',
+    shift: 'นอกเวลาเย็น 16:00-20:00',
+    reportDayMode: 'TODAY',
+    enabled: true
+  },
+  {
+    id: 'HOLIDAY_MORNING',
+    label: 'นอกเวลาราชการ (เสาร์-อาทิตย์ / วันหยุดนักขัตฤกษ์)',
+    time: '12:30',
+    dayRule: 'WEEKENDS_AND_HOLIDAYS',
+    shift: 'นอกเวลาวันหยุด 08:00-12:00',
+    reportDayMode: 'TODAY',
+    enabled: true
+  }
+];
 
 var SHEET_NAMES = {
   STAFF: 'Staff_Master',
@@ -66,7 +97,7 @@ function onOpen() {
       .addItem('🔗 สร้างลิงก์เชื่อมต่ออัตโนมัติ (แชร์ทีม OPD)', 'showShareLinkDialog')
       .addItem('⚙️ บันทึก Web App URL (/exec) ลงในชีท', 'promptAndSaveGasUrl')
       .addSeparator()
-      .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)', 'setupLineDailyTrigger0359Ui')
+      .addItem('⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:55 / 20:00 / 12:30 น.)', 'setupLineDailyTrigger0359Ui')
       .addItem('🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)', 'updateLineTokenUi')
       .addItem('📨 ทดสอบส่งรายงานผู้ป่วยประจำวันเข้า LINE ทันที', 'manualSendDailyCensusToLineUi')
       .addSeparator()
@@ -130,11 +161,16 @@ function setupOpdDatabase() {
         ['Leave_Types', DEFAULT_LEAVE_TYPES.join(', ')],
         ['Custom_Holidays', '[]'],
         ['Gas_Web_App_URL', getSavedGasUrl_()],
+        ['Default_Cost_Center', '2012000000'],
+        ['Clinic_Cost_Centers', '{}'],
         ['Line_Auto_Enabled', 'false'],
-        ['Line_Auto_Time', '15:59'],
+        ['Line_Auto_Time', DEFAULT_LINE_AUTO_TIME],
         ['Line_Auto_Report_Day', 'TODAY'],
         ['Line_Auto_Shift', 'ในเวลา 08:00-16:00'],
-        ['Line_Target_Id', DEFAULT_LINE_GROUP_ID]
+        ['Line_Target_Id', DEFAULT_LINE_GROUP_ID],
+        ['Line_Target_Groups', JSON.stringify([{ id: DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true }])],
+        ['Line_Schedules', JSON.stringify(DEFAULT_LINE_SCHEDULES)],
+        ['Line_Send_As_Image', 'true']
       ]
     }
   ];
@@ -153,7 +189,11 @@ function setupOpdDatabase() {
         .setHorizontalAlignment('center');
       sheet.setFrozenRows(1);
       if (schema.rows && schema.rows.length > 0) {
-        sheet.getRange(2, 1, schema.rows.length, schema.headers.length).setValues(schema.rows);
+        var bodyRange = sheet.getRange(2, 1, schema.rows.length, schema.headers.length);
+        if (schema.name === SHEET_NAMES.SETTINGS) {
+          sheet.getRange(2, 2, schema.rows.length, 1).setNumberFormat('@');
+        }
+        bodyRange.setValues(schema.rows);
       }
     }
   });
@@ -287,6 +327,15 @@ function doPost(e) {
     }
     if (action === 'appendOT') {
       return jsonResponse_(appendOTFromApi_(payload));
+    }
+    if (action === 'saveUnitCostCenter') {
+      return jsonResponse_(saveUnitCostCenterFromApi_(payload || {}));
+    }
+    if (action === 'uploadLineReportJpeg') {
+      return jsonResponse_(uploadLineReportJpegFromApi_(payload || {}));
+    }
+    if (action === 'sendAutoScheduledLineReport') {
+      return jsonResponse_(sendAutoScheduledLineReportFromClientApi_(payload || {}));
     }
 
     var adminActions = [
@@ -445,6 +494,9 @@ function saveGasUrlToSettings_(gasUrl) {
 
 function formatCellValue_(val) {
   if (val instanceof Date) {
+    if (val.getFullYear() <= 1900) {
+      return Utilities.formatDate(val, 'Asia/Bangkok', 'HH:mm');
+    }
     return Utilities.formatDate(val, 'Asia/Bangkok', 'yyyy-MM-dd');
   }
   return val === null || val === undefined ? '' : String(val);
@@ -521,7 +573,14 @@ function buildPublicReadAllPayload_() {
       .filter(function(r) {
         return r[0] && r[0] !== 'Admin_Pin' && r[0] !== 'Line_Channel_Token';
       })
-      .map(function(r) { return r.slice(0, 2); });
+      .map(function(r) {
+        var key = String(r[0] || '').trim();
+        var val = String(r[1] || '');
+        if (key === 'Line_Auto_Time') {
+          val = parseLineAutoTimeGas_(val).formatted;
+        }
+        return [key, val];
+      });
 
     var hasLineToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
     var hasTokenSetRow = settingsRows.some(function(r) { return r[0] === 'Line_Channel_Token_Set'; });
@@ -782,6 +841,9 @@ function replaceSheetBodyRows_(sheet, rows) {
     sheet.getRange(2, 1, lastRow - 1, maxCols).clearContent();
   }
   if (rows && rows.length > 0) {
+    if (sheet.getName() === SHEET_NAMES.SETTINGS && rows[0].length >= 2) {
+      sheet.getRange(2, 2, rows.length, 1).setNumberFormat('@');
+    }
     sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
   }
   SpreadsheetApp.flush();
@@ -938,12 +1000,21 @@ function writeSettingsToSheet_(settings) {
   var lineAutoEnabledVal = settings.lineAutoEnabled !== undefined
     ? (settings.lineAutoEnabled ? 'true' : 'false')
     : (existingMap['Line_Auto_Enabled'] || 'false');
-  var lineAutoTimeVal = String(settings.lineAutoTime || existingMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
+  var lineAutoTimeVal = parseLineAutoTimeGas_(settings.lineAutoTime || existingMap['Line_Auto_Time'] || DEFAULT_LINE_AUTO_TIME).formatted;
   var lineAutoReportDayVal = String(settings.lineAutoReportDayMode || existingMap['Line_Auto_Report_Day'] || 'TODAY').trim() || 'TODAY';
   var lineAutoShiftVal = String(settings.lineAutoShift || existingMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
   var lineTargetIdVal = settings.lineTargetId !== undefined
     ? String(settings.lineTargetId || DEFAULT_LINE_GROUP_ID).trim()
     : String(existingMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
+  var lineTargetGroupsVal = Array.isArray(settings.lineTargetGroups)
+    ? JSON.stringify(settings.lineTargetGroups)
+    : (existingMap['Line_Target_Groups'] || JSON.stringify([{ id: lineTargetIdVal || DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true }]));
+  var lineSchedulesVal = Array.isArray(settings.lineSchedules)
+    ? JSON.stringify(settings.lineSchedules)
+    : (existingMap['Line_Schedules'] || JSON.stringify(DEFAULT_LINE_SCHEDULES));
+  var lineSendAsImageVal = settings.lineSendAsImage !== undefined
+    ? (settings.lineSendAsImage ? 'true' : 'false')
+    : (existingMap['Line_Send_As_Image'] || 'true');
 
   var entries = [
     ['NHPPD', String(settings.nhppd || 0.4)],
@@ -968,6 +1039,9 @@ function writeSettingsToSheet_(settings) {
     ['Line_Auto_Report_Day', lineAutoReportDayVal],
     ['Line_Auto_Shift', lineAutoShiftVal],
     ['Line_Target_Id', lineTargetIdVal],
+    ['Line_Target_Groups', lineTargetGroupsVal],
+    ['Line_Schedules', lineSchedulesVal],
+    ['Line_Send_As_Image', lineSendAsImageVal],
     ['Line_Channel_Token_Set', hasLineTokenProp ? 'true' : 'false']
   ];
   if (existingMap['Line_Last_Sent_At']) entries.push(['Line_Last_Sent_At', existingMap['Line_Last_Sent_At']]);
@@ -1681,10 +1755,11 @@ function updateSettingsKeysFromApi_(payload) {
 
     var existingRow = existingRowByKey[key];
     if (existingRow) {
-      sheet.getRange(existingRow, 2).setValue(val);
+      sheet.getRange(existingRow, 2).setNumberFormat('@').setValue(val);
     } else {
-      sheet.appendRow([key, val]);
-      existingRowByKey[key] = sheet.getLastRow();
+      var nextRow = sheet.getLastRow() + 1;
+      sheet.getRange(nextRow, 1, 1, 2).setNumberFormats([['@', '@']]).setValues([[key, val]]);
+      existingRowByKey[key] = nextRow;
     }
   }
   SpreadsheetApp.flush();
@@ -1695,6 +1770,135 @@ function updateSettingsKeysFromApi_(payload) {
   var res = buildPublicReadAllPayload_();
   res.targeted = true;
   return res;
+}
+
+function saveUnitCostCenterFromApi_(payload) {
+  var clinic = String((payload && payload.clinic) || '').trim();
+  var costCenter = String((payload && payload.costCenter) || '').trim();
+  if (!clinic) {
+    return { success: false, error: 'กรุณาระบุชื่อหน่วยงานหรือห้องตรวจ' };
+  }
+
+  var settingsMap = readSettingsMapGas_();
+  if (clinic === 'ALL') {
+    var finalDefault = costCenter || '2012000000';
+    upsertSettingsEntriesGas_([['Default_Cost_Center', finalDefault]]);
+    return { success: true, clinic: 'ALL', costCenter: finalDefault };
+  }
+
+  var mapObj = {};
+  try {
+    var parsed = JSON.parse(settingsMap['Clinic_Cost_Centers'] || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      mapObj = parsed;
+    }
+  } catch (e) {
+    mapObj = {};
+  }
+
+  if (costCenter) {
+    mapObj[clinic] = costCenter;
+  } else {
+    delete mapObj[clinic];
+  }
+
+  upsertSettingsEntriesGas_([['Clinic_Cost_Centers', JSON.stringify(mapObj)]]);
+  return {
+    success: true,
+    clinic: clinic,
+    costCenter: costCenter,
+    clinicCostCenters: mapObj
+  };
+}
+
+function getOrCreateLineReportFolderGas_() {
+  var folders = DriveApp.getFoldersByName(LINE_REPORT_DRIVE_FOLDER_NAME);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  return DriveApp.createFolder(LINE_REPORT_DRIVE_FOLDER_NAME);
+}
+
+function cleanupOldLineReportFilesGas_(folder, maxAgeDays) {
+  try {
+    var cutoffMs = Date.now() - (Number(maxAgeDays || 14) * 86400000);
+    var files = folder.getFiles();
+    var removed = 0;
+    while (files.hasNext() && removed < 20) {
+      var f = files.next();
+      if (f.getDateCreated().getTime() < cutoffMs) {
+        f.setTrashed(true);
+        removed += 1;
+      }
+    }
+  } catch (e) {
+    // ignore cleanup failure
+  }
+}
+
+function uploadLineReportJpegFromApi_(payload) {
+  try {
+    var rawB64 = String((payload && (payload.base64Jpeg || payload.imageBase64)) || '').trim();
+    rawB64 = rawB64.replace(/^data:image\/\w+;base64,/, '');
+    if (!rawB64) {
+      return { success: false, error: 'ไม่พบข้อมูลไฟล์ภาพ .jpeg' };
+    }
+
+    var safeFilename = String((payload && payload.filename) || ('OPD_Census_' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd_HHmmss') + '.jpeg'))
+      .replace(/[^\w.\-\u0E00-\u0E7F]/g, '_');
+    if (!/\.jpe?g$/i.test(safeFilename)) {
+      safeFilename += '.jpeg';
+    }
+
+    var bytes = Utilities.base64Decode(rawB64);
+    var blob = Utilities.newBlob(bytes, 'image/jpeg', safeFilename);
+    var folder = getOrCreateLineReportFolderGas_();
+    cleanupOldLineReportFilesGas_(folder, 14);
+
+    var file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    var fileId = file.getId();
+
+    var candidates = [
+      'https://lh3.googleusercontent.com/d/' + fileId + '=w2000',
+      'https://drive.google.com/uc?export=view&id=' + fileId,
+      'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w2000'
+    ];
+    var chosenUrl = candidates[0];
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        var checkRes = UrlFetchApp.fetch(candidates[i], {
+          method: 'get',
+          muteHttpExceptions: true,
+          followRedirects: true
+        });
+        var headers = checkRes.getAllHeaders();
+        var ct = String(headers['Content-Type'] || headers['content-type'] || '').toLowerCase();
+        if (checkRes.getResponseCode() === 200 && ct.indexOf('image/') === 0) {
+          chosenUrl = candidates[i];
+          break;
+        }
+      } catch (fetchErr) {
+        // try next candidate
+      }
+    }
+
+    var previewUrl = chosenUrl.indexOf('lh3.googleusercontent.com') !== -1
+      ? ('https://lh3.googleusercontent.com/d/' + fileId + '=w1000')
+      : chosenUrl;
+
+    return {
+      success: true,
+      fileId: fileId,
+      imageUrl: chosenUrl,
+      previewImageUrl: previewUrl
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: 'อัปโหลดภาพไปยัง Google Drive ไม่สำเร็จ: ' + String(err && err.message ? err.message : err)
+    };
+  }
 }
 
 function syncAdminAllFromApi_(payload) {
@@ -1758,24 +1962,201 @@ function upsertSettingsEntriesGas_(pairs) {
     if (!key) continue;
     var rIdx = existingRowByKey[key];
     if (rIdx) {
-      sheet.getRange(rIdx, 2).setValue(val);
+      sheet.getRange(rIdx, 2).setNumberFormat('@').setValue(val);
     } else {
-      sheet.appendRow([key, val]);
-      existingRowByKey[key] = sheet.getLastRow();
+      var nextRow = sheet.getLastRow() + 1;
+      sheet.getRange(nextRow, 1, 1, 2).setNumberFormats([['@', '@']]).setValues([[key, val]]);
+      existingRowByKey[key] = nextRow;
     }
   }
   SpreadsheetApp.flush();
 }
 
 function parseLineAutoTimeGas_(timeStr) {
-  var m = String(timeStr || '15:59').trim().match(/^(\d{1,2}):(\d{1,2})$/);
+  if (timeStr instanceof Date) {
+    var f = Utilities.formatDate(timeStr, 'Asia/Bangkok', 'HH:mm');
+    var df = f.split(':');
+    return { hour: Number(df[0]), minute: Number(df[1]), formatted: f };
+  }
+  var s = String(timeStr || DEFAULT_LINE_AUTO_TIME).trim();
+  var m = s.match(/^(\d{1,2}):(\d{1,2})$/);
   var hh = m ? Math.min(23, Math.max(0, Number(m[1]))) : 15;
-  var mm = m ? Math.min(59, Math.max(0, Number(m[2]))) : 59;
+  var mm = m ? Math.min(59, Math.max(0, Number(m[2]))) : 55;
   return {
     hour: hh,
     minute: mm,
     formatted: (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm
   };
+}
+
+var THAI_FIXED_HOLIDAYS_GAS_ = [
+  '01-01', '04-06', '04-13', '04-14', '04-15', '05-04', '06-03',
+  '07-28', '08-12', '10-13', '10-23', '12-05', '12-10', '12-31'
+];
+
+var THAI_LUNAR_HOLIDAYS_GAS_ = {
+  2024: [
+    { date: '2024-02-24' }, { date: '2024-05-10', noSub: true }, { date: '2024-05-22' },
+    { date: '2024-07-20' }, { date: '2024-07-21' }
+  ],
+  2025: [
+    { date: '2025-02-12' }, { date: '2025-05-09', noSub: true }, { date: '2025-05-11' },
+    { date: '2025-07-10' }, { date: '2025-07-11' }
+  ],
+  2026: [
+    { date: '2026-03-03' }, { date: '2026-05-13', noSub: true }, { date: '2026-05-31' },
+    { date: '2026-07-29' }, { date: '2026-07-30' }
+  ],
+  2027: [
+    { date: '2027-02-21' }, { date: '2027-05-20' }, { date: '2027-07-18' }, { date: '2027-07-19' }
+  ],
+  2028: [
+    { date: '2028-02-10' }, { date: '2028-05-08' }, { date: '2028-07-06' }, { date: '2028-07-07' }
+  ]
+};
+
+function addDaysIsoGas_(ymd, deltaDays) {
+  var p = String(ymd || '').split('-');
+  if (p.length !== 3) return getBangkokDatePartsGas_().ymd;
+  var dt = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + Number(deltaDays || 0)));
+  return dt.getUTCFullYear() + '-' +
+    (dt.getUTCMonth() + 1 < 10 ? '0' : '') + (dt.getUTCMonth() + 1) + '-' +
+    (dt.getUTCDate() < 10 ? '0' : '') + dt.getUTCDate();
+}
+
+function getThaiHolidaySetForYearGas_(year, customHolidaysList) {
+  var map = {};
+  var pendingSubs = [];
+  var register = function(iso, noSub) {
+    map[iso] = true;
+    var p = iso.split('-');
+    if (p.length !== 3) return;
+    var dow = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))).getUTCDay();
+    if (!noSub && (dow === 0 || dow === 6)) {
+      pendingSubs.push(iso);
+    }
+  };
+  THAI_FIXED_HOLIDAYS_GAS_.forEach(function(md) {
+    register(year + '-' + md, false);
+  });
+  var prevDec31Dow = new Date(Date.UTC(year - 1, 11, 31)).getUTCDay();
+  if (prevDec31Dow === 0 || prevDec31Dow === 6) {
+    pendingSubs.push((year - 1) + '-12-31');
+  }
+  (THAI_LUNAR_HOLIDAYS_GAS_[year] || []).forEach(function(item) {
+    register(item.date, Boolean(item.noSub));
+  });
+  pendingSubs.forEach(function(baseIso) {
+    var cursor = addDaysIsoGas_(baseIso, 1);
+    for (var g = 0; g < 14; g++) {
+      var p = cursor.split('-');
+      var dow = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))).getUTCDay();
+      if (dow !== 0 && dow !== 6 && !map[cursor]) {
+        if (Number(p[0]) === year) map[cursor] = true;
+        break;
+      }
+      cursor = addDaysIsoGas_(cursor, 1);
+    }
+  });
+  (customHolidaysList || []).forEach(function(ch) {
+    if (ch && ch.date && String(ch.date).indexOf(String(year) + '-') === 0) {
+      map[String(ch.date).trim()] = true;
+    }
+  });
+  return map;
+}
+
+function isWeekendOrThaiHolidayGas_(ymd, settingsMap) {
+  var p = String(ymd || '').split('-');
+  if (p.length !== 3) return false;
+  var year = Number(p[0]);
+  var dow = new Date(Date.UTC(year, Number(p[1]) - 1, Number(p[2]))).getUTCDay();
+  if (dow === 0 || dow === 6) return true;
+  var customList = [];
+  try {
+    var parsedCustom = JSON.parse((settingsMap && settingsMap['Custom_Holidays']) || '[]');
+    if (Array.isArray(parsedCustom)) customList = parsedCustom;
+  } catch (e) {}
+  var hMap = getThaiHolidaySetForYearGas_(year, customList);
+  return Boolean(hMap[ymd]);
+}
+
+function matchesLineDayRuleGas_(ymd, dayRule, settingsMap) {
+  if (!dayRule || dayRule === 'ALL_DAYS') return true;
+  var isHol = isWeekendOrThaiHolidayGas_(ymd, settingsMap);
+  return dayRule === 'WEEKENDS_AND_HOLIDAYS' ? isHol : !isHol;
+}
+
+function getLineSchedulesFromSettingsMap_(settingsMap) {
+  try {
+    var raw = settingsMap && settingsMap['Line_Schedules'];
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(function(s, idx) {
+          return {
+            id: String(s.id || ('SCH-' + (idx + 1))),
+            label: String(s.label || ('รอบที่ ' + (idx + 1))),
+            time: parseLineAutoTimeGas_(s.time || DEFAULT_LINE_AUTO_TIME).formatted,
+            dayRule: String(s.dayRule || 'ALL_DAYS'),
+            shift: String(s.shift || 'ในเวลา 08:00-16:00'),
+            reportDayMode: String(s.reportDayMode || 'TODAY'),
+            enabled: s.enabled !== false
+          };
+        });
+      }
+    }
+  } catch (e) {}
+  var singleTime = parseLineAutoTimeGas_((settingsMap && settingsMap['Line_Auto_Time']) || DEFAULT_LINE_AUTO_TIME).formatted;
+  var singleShift = String((settingsMap && settingsMap['Line_Auto_Shift']) || 'ในเวลา 08:00-16:00').trim();
+  var singleMode = String((settingsMap && settingsMap['Line_Auto_Report_Day']) || 'TODAY').trim();
+  return DEFAULT_LINE_SCHEDULES.map(function(d, idx) {
+    if (idx === 0) {
+      return {
+        id: d.id,
+        label: d.label,
+        time: singleTime,
+        dayRule: d.dayRule,
+        shift: singleShift || d.shift,
+        reportDayMode: singleMode || d.reportDayMode,
+        enabled: true
+      };
+    }
+    return d;
+  });
+}
+
+function resolveLineTargetIdsGas_(settingsMap, explicitTargetIds, explicitTargetId) {
+  var seen = {};
+  var out = [];
+  var add = function(id) {
+    var clean = String(id || '').trim();
+    if (clean && !seen[clean]) {
+      seen[clean] = true;
+      out.push(clean);
+    }
+  };
+  if (Array.isArray(explicitTargetIds) && explicitTargetIds.length > 0) {
+    explicitTargetIds.forEach(add);
+  }
+  if (out.length === 0 && explicitTargetId) {
+    add(explicitTargetId);
+  }
+  if (out.length === 0 && settingsMap && settingsMap['Line_Target_Groups']) {
+    try {
+      var groups = JSON.parse(settingsMap['Line_Target_Groups']);
+      if (Array.isArray(groups)) {
+        groups.forEach(function(g) {
+          if (g && g.enabled !== false && g.id) add(g.id);
+        });
+      }
+    } catch (e) {}
+  }
+  if (out.length === 0 && settingsMap && settingsMap['Line_Target_Id']) {
+    add(settingsMap['Line_Target_Id']);
+  }
+  if (out.length === 0) add(DEFAULT_LINE_GROUP_ID);
+  return out;
 }
 
 function getBangkokDatePartsGas_(dateObj) {
@@ -1790,15 +2171,6 @@ function getBangkokDatePartsGas_(dateObj) {
     month: Number(p[1]),
     day: Number(p[2])
   };
-}
-
-function addDaysIsoGas_(ymd, deltaDays) {
-  var p = String(ymd || '').split('-');
-  if (p.length !== 3) return getBangkokDatePartsGas_().ymd;
-  var dt = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + Number(deltaDays || 0)));
-  return dt.getUTCFullYear() + '-' +
-    (dt.getUTCMonth() + 1 < 10 ? '0' : '') + (dt.getUTCMonth() + 1) + '-' +
-    (dt.getUTCDate() < 10 ? '0' : '') + dt.getUTCDate();
 }
 
 function formatThaiFullDateGas_(ymd) {
@@ -1816,14 +2188,30 @@ function formatThaiFullDateGas_(ymd) {
   return 'วัน' + thaiDays[dow] + 'ที่ ' + d + ' ' + thaiMonths[m - 1] + ' พ.ศ. ' + (y + 543);
 }
 
-function computeNextBangkokRunEpochGas_(timeStr, forceNextDay) {
-  var t = parseLineAutoTimeGas_(timeStr);
+function computeNextMatchingRunEpochGas_(schedules, settingsMap) {
+  var activeSchedules = (schedules || []).filter(function(s) { return s && s.enabled !== false; });
+  if (activeSchedules.length === 0) return null;
   var bkk = getBangkokDatePartsGas_(new Date());
-  var targetEpoch = Date.UTC(bkk.year, bkk.month - 1, bkk.day, t.hour - 7, t.minute, 0, 0);
-  if (forceNextDay || targetEpoch <= Date.now() + 60000) {
-    targetEpoch = Date.UTC(bkk.year, bkk.month - 1, bkk.day + 1, t.hour - 7, t.minute, 0, 0);
+  var nowMs = Date.now();
+  var earliest = null;
+
+  for (var offset = 0; offset <= 10; offset++) {
+    var candidateYmd = addDaysIsoGas_(bkk.ymd, offset);
+    var cp = candidateYmd.split('-');
+    var cy = Number(cp[0]), cm = Number(cp[1]), cd = Number(cp[2]);
+    for (var sIdx = 0; sIdx < activeSchedules.length; sIdx++) {
+      var sch = activeSchedules[sIdx];
+      if (!matchesLineDayRuleGas_(candidateYmd, sch.dayRule, settingsMap)) continue;
+      var parsed = parseLineAutoTimeGas_(sch.time);
+      var epoch = Date.UTC(cy, cm - 1, cd, parsed.hour - 7, parsed.minute, 0, 0);
+      if (epoch <= nowMs + 45000) continue;
+      if (!earliest || epoch < earliest.epoch) {
+        earliest = { epoch: epoch, schedule: sch };
+      }
+    }
+    if (earliest) break;
   }
-  return targetEpoch;
+  return earliest;
 }
 
 function removeLineTriggersGas_() {
@@ -1836,31 +2224,38 @@ function removeLineTriggersGas_() {
   }
 }
 
-function syncLineAutomationTriggers_(enabled, timeStr) {
+function syncLineAutomationTriggers_(enabled, timeStr, settingsMapOverride) {
   removeLineTriggersGas_();
   if (!enabled) {
+    PropertiesService.getScriptProperties().deleteProperty('LINE_NEXT_RUN_AT');
     return { installed: false, count: 0, nextRunAt: '' };
   }
-  var parsed = parseLineAutoTimeGas_(timeStr);
-  var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, false);
+  var settingsMap = settingsMapOverride || readSettingsMapGas_();
+  var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
+  var nextInfo = computeNextMatchingRunEpochGas_(schedules, settingsMap);
+  var fallbackParsed = parseLineAutoTimeGas_(timeStr || DEFAULT_LINE_AUTO_TIME);
+  var nextEpoch = nextInfo ? nextInfo.epoch : (function() {
+    var bkk = getBangkokDatePartsGas_(new Date());
+    var e = Date.UTC(bkk.year, bkk.month - 1, bkk.day, fallbackParsed.hour - 7, fallbackParsed.minute, 0, 0);
+    if (e <= Date.now() + 45000) {
+      e = Date.UTC(bkk.year, bkk.month - 1, bkk.day + 1, fallbackParsed.hour - 7, fallbackParsed.minute, 0, 0);
+    }
+    return e;
+  })();
+
   ScriptApp.newTrigger('runLineDailyCensusTrigger_')
     .timeBased()
     .at(new Date(nextEpoch))
     .create();
 
-  // Safety-net daily trigger (~10 minutes later) ensures tomorrow's exact HH:mm trigger is always refreshed
-  var totalMins = parsed.hour * 60 + parsed.minute + 10;
-  var backupHour = Math.floor((totalMins % 1440) / 60);
-  var backupMin = totalMins % 60;
+  // Hourly safety-net ensures multi-round triggers (15:55 / 20:00 / 12:30) always chain and catch up
   ScriptApp.newTrigger('runLineDailyBackupTrigger_')
     .timeBased()
-    .everyDays(1)
-    .atHour(backupHour)
-    .nearMinute(backupMin)
-    .inTimezone('Asia/Bangkok')
+    .everyHours(1)
     .create();
 
-  var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss') +
+    (nextInfo && nextInfo.schedule ? ' (' + nextInfo.schedule.label + ')' : '');
   PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
   return { installed: true, count: 2, nextRunAt: nextRunThai };
 }
@@ -2111,34 +2506,66 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
   return { text: msg, clinicCount: clinicCount, totalPt: totals.totalPt };
 }
 
-function pushLineMessageGas_(channelAccessToken, targetId, text) {
+function pushLineMessageGas_(channelAccessToken, targetIdsInput, text, imageUrl, previewImageUrl) {
   var token = String(channelAccessToken || '').trim();
-  var to = String(targetId || '').trim();
-  if (!token) return { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token' };
-  if (!to) return { ok: false, error: 'ยังไม่ได้ระบุ LINE Group ID / Target ID' };
+  var targetList = Array.isArray(targetIdsInput)
+    ? targetIdsInput
+    : (String(targetIdsInput || '').trim() ? [String(targetIdsInput || '').trim()] : []);
+  targetList = targetList.map(function(t) { return String(t || '').trim(); }).filter(Boolean);
 
-  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: 'Bearer ' + token },
-    payload: JSON.stringify({
-      to: to,
-      messages: [{ type: 'text', text: String(text || '') }]
-    }),
-    muteHttpExceptions: true
-  });
-  var code = res.getResponseCode();
-  if (code >= 200 && code < 300) {
-    return { ok: true };
+  if (!token) return { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token' };
+  if (targetList.length === 0) return { ok: false, error: 'ยังไม่ได้ระบุ LINE Group ID / Target ID' };
+
+  var messages = [];
+  var cleanImageUrl = String(imageUrl || '').trim();
+  var cleanPreviewUrl = String(previewImageUrl || cleanImageUrl).trim();
+  if (cleanImageUrl.indexOf('https://') === 0) {
+    messages.push({
+      type: 'image',
+      originalContentUrl: cleanImageUrl,
+      previewImageUrl: cleanPreviewUrl.indexOf('https://') === 0 ? cleanPreviewUrl : cleanImageUrl
+    });
   }
-  var rawBody = res.getContentText();
-  if (code === 401) {
-    return {
-      ok: false,
-      error: 'LINE API HTTP 401: Channel Access Token ใน Google Apps Script (ScriptProperties) ไม่ถูกต้องหรือหมดอายุ/ถูก Reissue ใหม่แล้ว กรุณาอัปเดตผ่านเมนู Google Sheets "🏥 ระบบ OPD รพ.ชลประทาน → 🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)"'
-    };
+  if (String(text || '').trim()) {
+    messages.push({ type: 'text', text: String(text || '') });
   }
-  return { ok: false, error: 'LINE API HTTP ' + code + ': ' + rawBody };
+  if (messages.length === 0) {
+    return { ok: false, error: 'ไม่มีข้อความหรือรูปภาพที่จะส่ง' };
+  }
+
+  var errors = [];
+  var sentCount = 0;
+  for (var i = 0; i < targetList.length; i++) {
+    var to = targetList[i];
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify({ to: to, messages: messages }),
+      muteHttpExceptions: true
+    });
+    var code = res.getResponseCode();
+    if (code >= 200 && code < 300) {
+      sentCount += 1;
+    } else if (code === 401) {
+      return {
+        ok: false,
+        sentCount: sentCount,
+        error: 'LINE API HTTP 401: Channel Access Token ใน Google Apps Script (ScriptProperties) ไม่ถูกต้องหรือหมดอายุ/ถูก Reissue ใหม่แล้ว กรุณาอัปเดตผ่านเมนู Google Sheets "🏥 ระบบ OPD รพ.ชลประทาน → 🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)"'
+      };
+    } else {
+      errors.push(to + ': HTTP ' + code + ' ' + res.getContentText());
+    }
+  }
+
+  if (errors.length > 0 && sentCount === 0) {
+    return { ok: false, sentCount: 0, error: errors.join(' | ') };
+  }
+  return {
+    ok: true,
+    sentCount: sentCount,
+    partialErrors: errors.length > 0 ? errors.join(' | ') : ''
+  };
 }
 
 function verifyLineTokenGas_(channelAccessToken, targetId) {
@@ -2274,7 +2701,7 @@ function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
   return bkkTodayYmd;
 }
 
-function sendScheduledCensusReportGas_(sourceTag) {
+function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload) {
   var settingsMap = readSettingsMapGas_();
   var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
   if (!enabled && sourceTag !== 'MANUAL') {
@@ -2282,35 +2709,69 @@ function sendScheduledCensusReportGas_(sourceTag) {
   }
 
   var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
-  var targetId = String(settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
-  var reportDayMode = String(settingsMap['Line_Auto_Report_Day'] || 'TODAY').trim();
-  var shiftFilter = String(settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
+  var targetIds = resolveLineTargetIdsGas_(
+    settingsMap,
+    extraPayload && extraPayload.targetIds,
+    extraPayload && extraPayload.targetId
+  );
+  var reportDayMode = String(
+    (specificSchedule && specificSchedule.reportDayMode) ||
+    (extraPayload && extraPayload.reportDayMode) ||
+    settingsMap['Line_Auto_Report_Day'] ||
+    'TODAY'
+  ).trim();
+  var shiftFilter = String(
+    (specificSchedule && specificSchedule.shift) ||
+    (extraPayload && extraPayload.shift) ||
+    settingsMap['Line_Auto_Shift'] ||
+    'ในเวลา 08:00-16:00'
+  ).trim() || 'ในเวลา 08:00-16:00';
 
   var bkk = getBangkokDatePartsGas_(new Date());
-  var targetDate = resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
+  var targetDate = String((extraPayload && extraPayload.date) || '').trim() ||
+    resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
 
+  var scheduleKey = specificSchedule && specificSchedule.id ? String(specificSchedule.id) : 'DEFAULT';
+  var dedupePropKey = 'LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey;
   if (sourceTag !== 'MANUAL') {
-    var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY') || '').trim();
+    var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty(dedupePropKey) || '').trim();
     if (lastSentTriggerDay === bkk.ymd) {
-      return { success: true, skipped: true, reason: 'Already sent today (' + bkk.ymd + ')' };
+      return { success: true, skipped: true, reason: 'Already sent today (' + bkk.ymd + ' / ' + scheduleKey + ')' };
+    }
+  }
+
+  var imageUrl = String((extraPayload && extraPayload.imageUrl) || '').trim();
+  var previewImageUrl = String((extraPayload && extraPayload.previewImageUrl) || imageUrl).trim();
+  if (!imageUrl && extraPayload && extraPayload.imageBase64) {
+    var upRes = uploadLineReportJpegFromApi_({
+      base64Jpeg: extraPayload.imageBase64,
+      filename: 'OPD_Census_' + targetDate + '.jpeg'
+    });
+    if (upRes.success && upRes.imageUrl) {
+      imageUrl = upRes.imageUrl;
+      previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
     }
   }
 
   var report = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
-  var pushRes = pushLineMessageGas_(token, targetId, report.text);
+  var textToSend = String((extraPayload && extraPayload.message) || '').trim() || report.text;
+  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl);
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
 
   if (pushRes.ok) {
     if (sourceTag !== 'MANUAL') {
+      PropertiesService.getScriptProperties().setProperty(dedupePropKey, bkk.ymd);
       PropertiesService.getScriptProperties().setProperty('LINE_LAST_TRIGGER_BKK_DAY', bkk.ymd);
     }
-    var okStatus = 'ส่งสำเร็จ (' + report.clinicCount + ' คลินิก, ผู้ป่วย ' + report.totalPt + ' ราย)';
+    var schedTag = specificSchedule && specificSchedule.label ? (' [' + specificSchedule.label + ']') : '';
+    var imgTag = imageUrl ? ' + ภาพ.jpeg' : '';
+    var okStatus = 'ส่งสำเร็จ' + schedTag + imgTag + ' (' + targetIds.length + ' กลุ่ม • ' + report.clinicCount + ' คลินิก, ' + report.totalPt + ' ราย)';
     upsertSettingsEntriesGas_([
       ['Line_Last_Sent_At', nowThai],
       ['Line_Last_Sent_Report_Date', targetDate],
       ['Line_Last_Status', okStatus]
     ]);
-    return { success: true, targetDate: targetDate, statusText: okStatus, sentAt: nowThai };
+    return { success: true, targetDate: targetDate, statusText: okStatus, sentAt: nowThai, sentCount: pushRes.sentCount };
   } else {
     var errStatus = 'ส่งไม่สำเร็จ: ' + pushRes.error;
     upsertSettingsEntriesGas_([
@@ -2321,31 +2782,64 @@ function sendScheduledCensusReportGas_(sourceTag) {
   }
 }
 
+function hhmmToMinsGas_(hm) {
+  var p = parseLineAutoTimeGas_(hm);
+  return p.hour * 60 + p.minute;
+}
+
+function runDueLineSchedulesGas_(sourceTag) {
+  var settingsMap = readSettingsMapGas_();
+  var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+  if (!enabled) {
+    removeLineTriggersGas_();
+    return;
+  }
+  var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var nowMins = hhmmToMinsGas_(bkk.hm);
+
+  for (var i = 0; i < schedules.length; i++) {
+    var sch = schedules[i];
+    if (!sch || sch.enabled === false) continue;
+    if (!matchesLineDayRuleGas_(bkk.ymd, sch.dayRule, settingsMap)) continue;
+    var schMins = hhmmToMinsGas_(sch.time);
+    var diff = nowMins - schMins;
+    // Allow 2 mins early and up to 75 mins catch-up window
+    if (diff >= -2 && diff <= 75) {
+      sendScheduledCensusReportGas_(sourceTag, sch, null);
+    }
+  }
+}
+
 function runLineDailyCensusTrigger_() {
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(20000);
-    sendScheduledCensusReportGas_('AUTO_EXACT');
+    runDueLineSchedulesGas_('AUTO_EXACT');
   } finally {
     var settingsMap = readSettingsMapGas_();
     var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
-    var timeStr = String(settingsMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
+    var timeStr = parseLineAutoTimeGas_(settingsMap['Line_Auto_Time'] || DEFAULT_LINE_AUTO_TIME).formatted;
     if (enabled) {
-      var parsed = parseLineAutoTimeGas_(timeStr);
-      // Schedule specifically for tomorrow so it triggers once per day at HH:mm
       var existing = ScriptApp.getProjectTriggers();
       for (var i = 0; i < existing.length; i++) {
         if (existing[i].getHandlerFunction() === 'runLineDailyCensusTrigger_') {
           ScriptApp.deleteTrigger(existing[i]);
         }
       }
-      var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, true);
-      ScriptApp.newTrigger('runLineDailyCensusTrigger_')
-        .timeBased()
-        .at(new Date(nextEpoch))
-        .create();
-      var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
-      PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+      var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
+      var nextInfo = computeNextMatchingRunEpochGas_(schedules, settingsMap);
+      if (nextInfo) {
+        ScriptApp.newTrigger('runLineDailyCensusTrigger_')
+          .timeBased()
+          .at(new Date(nextInfo.epoch))
+          .create();
+        var nextRunThai = Utilities.formatDate(new Date(nextInfo.epoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss') +
+          (nextInfo.schedule ? ' (' + nextInfo.schedule.label + ')' : '');
+        PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+      } else {
+        syncLineAutomationTriggers_(true, timeStr, settingsMap);
+      }
     }
     try { lock.releaseLock(); } catch (e) {}
   }
@@ -2361,25 +2855,22 @@ function runLineDailyBackupTrigger_() {
       removeLineTriggersGas_();
       return;
     }
-    var timeStr = String(settingsMap['Line_Auto_Time'] || '15:59').trim() || '15:59';
-    var parsed = parseLineAutoTimeGas_(timeStr);
-    var bkk = getBangkokDatePartsGas_(new Date());
-    var lastSentDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY') || '').trim();
-    if (lastSentDay !== bkk.ymd && bkk.hm >= parsed.formatted) {
-      sendScheduledCensusReportGas_('AUTO_BACKUP');
-    }
-    // Ensure tomorrow's exact HH:mm trigger is present
+    runDueLineSchedulesGas_('AUTO_BACKUP');
     var hasExact = ScriptApp.getProjectTriggers().some(function(t) {
       return t.getHandlerFunction() === 'runLineDailyCensusTrigger_';
     });
     if (!hasExact) {
-      var nextEpoch = computeNextBangkokRunEpochGas_(parsed.formatted, false);
-      ScriptApp.newTrigger('runLineDailyCensusTrigger_')
-        .timeBased()
-        .at(new Date(nextEpoch))
-        .create();
-      var nextRunThai = Utilities.formatDate(new Date(nextEpoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
-      PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+      var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
+      var nextInfo = computeNextMatchingRunEpochGas_(schedules, settingsMap);
+      if (nextInfo) {
+        ScriptApp.newTrigger('runLineDailyCensusTrigger_')
+          .timeBased()
+          .at(new Date(nextInfo.epoch))
+          .create();
+        var nextRunThai = Utilities.formatDate(new Date(nextInfo.epoch), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss') +
+          (nextInfo.schedule ? ' (' + nextInfo.schedule.label + ')' : '');
+        PropertiesService.getScriptProperties().setProperty('LINE_NEXT_RUN_AT', nextRunThai);
+      }
     }
   } finally {
     try { lock.releaseLock(); } catch (e) {}
@@ -2388,10 +2879,17 @@ function runLineDailyBackupTrigger_() {
 
 function configureLineAutomationFromApi_(payload) {
   var enabled = Boolean(payload.enabled);
-  var parsed = parseLineAutoTimeGas_(payload.time || '15:59');
+  var parsed = parseLineAutoTimeGas_(payload.time || DEFAULT_LINE_AUTO_TIME);
   var reportDayMode = String(payload.reportDayMode || 'TODAY').trim() || 'TODAY';
   var shift = String(payload.shift || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
   var targetId = String(payload.targetId || DEFAULT_LINE_GROUP_ID).trim();
+  var targetGroups = Array.isArray(payload.targetGroups) && payload.targetGroups.length > 0
+    ? payload.targetGroups
+    : [{ id: targetId || DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true }];
+  var schedules = Array.isArray(payload.schedules) && payload.schedules.length > 0
+    ? payload.schedules
+    : DEFAULT_LINE_SCHEDULES;
+  var sendAsImage = payload.sendAsImage !== undefined ? Boolean(payload.sendAsImage) : true;
   var incomingToken = String(payload.channelAccessToken || '').trim();
 
   if (payload.clearToken) {
@@ -2401,7 +2899,6 @@ function configureLineAutomationFromApi_(payload) {
   }
 
   var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
-  var triggerInfo = syncLineAutomationTriggers_(enabled, parsed.formatted);
 
   upsertSettingsEntriesGas_([
     ['Line_Auto_Enabled', enabled ? 'true' : 'false'],
@@ -2409,8 +2906,14 @@ function configureLineAutomationFromApi_(payload) {
     ['Line_Auto_Report_Day', reportDayMode],
     ['Line_Auto_Shift', shift],
     ['Line_Target_Id', targetId],
+    ['Line_Target_Groups', JSON.stringify(targetGroups)],
+    ['Line_Schedules', JSON.stringify(schedules)],
+    ['Line_Send_As_Image', sendAsImage ? 'true' : 'false'],
     ['Line_Channel_Token_Set', hasToken ? 'true' : 'false']
   ]);
+
+  var freshSettingsMap = readSettingsMapGas_();
+  var triggerInfo = syncLineAutomationTriggers_(enabled, parsed.formatted, freshSettingsMap);
 
   var res = buildPublicReadAllPayload_();
   res.targeted = true;
@@ -2425,11 +2928,28 @@ function configureLineAutomationFromApi_(payload) {
   return res;
 }
 
+function sendAutoScheduledLineReportFromClientApi_(payload) {
+  var settingsMap = readSettingsMapGas_();
+  var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+  if (!enabled) {
+    return { success: false, error: 'ระบบส่งรายงานอัตโนมัติปิดอยู่' };
+  }
+  var bkk = getBangkokDatePartsGas_(new Date());
+  var schedId = String((payload && payload.scheduleId) || 'CLIENT_AUTO').trim();
+  var sch = {
+    id: schedId,
+    label: String((payload && payload.scheduleLabel) || 'อัตโนมัติ (ภาพ .jpeg)'),
+    shift: String((payload && payload.shift) || settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00'),
+    reportDayMode: String((payload && payload.reportDayMode) || settingsMap['Line_Auto_Report_Day'] || 'TODAY')
+  };
+  return sendScheduledCensusReportGas_('CLIENT_AUTO', sch, payload);
+}
+
 function sendDailyCensusToLineNowFromApi_(payload) {
   var settingsMap = readSettingsMapGas_();
   var token = String(payload.channelAccessToken || '').trim() ||
     String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
-  var targetId = String(payload.targetId || settingsMap['Line_Target_Id'] || DEFAULT_LINE_GROUP_ID).trim();
+  var targetIds = resolveLineTargetIdsGas_(settingsMap, payload.targetIds, payload.targetId);
 
   if (payload.channelAccessToken) {
     PropertiesService.getScriptProperties().setProperty('LINE_CHANNEL_ACCESS_TOKEN', String(payload.channelAccessToken).trim());
@@ -2450,10 +2970,24 @@ function sendDailyCensusToLineNowFromApi_(payload) {
     metaTotalPt = built.totalPt;
   }
 
-  var pushRes = pushLineMessageGas_(token, targetId, textToSend);
+  var imageUrl = String(payload.imageUrl || '').trim();
+  var previewImageUrl = String(payload.previewImageUrl || imageUrl).trim();
+  if (!imageUrl && payload.imageBase64) {
+    var upRes = uploadLineReportJpegFromApi_({
+      base64Jpeg: payload.imageBase64,
+      filename: 'OPD_Census_' + targetDate + '.jpeg'
+    });
+    if (upRes.success && upRes.imageUrl) {
+      imageUrl = upRes.imageUrl;
+      previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
+    }
+  }
+
+  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl);
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  var imgTag = imageUrl ? ' (พร้อมภาพ .jpeg)' : '';
   var statusText = pushRes.ok
-    ? (metaClinicCount > 0 ? 'ส่งทันทีสำเร็จ (' + metaClinicCount + ' คลินิก, ผู้ป่วย ' + metaTotalPt + ' ราย)' : 'ส่งรายงานเข้า LINE สำเร็จ')
+    ? (metaClinicCount > 0 ? 'ส่งทันทีสำเร็จ' + imgTag + ' (' + targetIds.length + ' กลุ่ม • ' + metaClinicCount + ' คลินิก, ' + metaTotalPt + ' ราย)' : 'ส่งรายงานเข้า LINE สำเร็จ' + imgTag + ' (' + targetIds.length + ' กลุ่ม)')
     : 'ส่งไม่สำเร็จ: ' + pushRes.error;
 
   upsertSettingsEntriesGas_([
@@ -2469,6 +3003,7 @@ function sendDailyCensusToLineNowFromApi_(payload) {
   res.statusText = statusText;
   res.sentAt = nowThai;
   res.targetDate = targetDate;
+  res.sentCount = pushRes.sentCount || 0;
   return res;
 }
 
@@ -2485,7 +3020,7 @@ function getLineAutomationStatusFromApi_() {
   return {
     success: true,
     enabled: String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true',
-    time: String(settingsMap['Line_Auto_Time'] || '15:59'),
+    time: parseLineAutoTimeGas_(settingsMap['Line_Auto_Time'] || DEFAULT_LINE_AUTO_TIME).formatted,
     triggerInstalled: triggers.length > 0,
     triggerCount: triggers.length,
     nextRunAt: String(PropertiesService.getScriptProperties().getProperty('LINE_NEXT_RUN_AT') || ''),
@@ -2580,7 +3115,7 @@ function setupLineDailyTrigger0359Ui() {
   if (!targetId) {
     var grpPrompt = ui.prompt(
       'LINE Group ID (รหัสกลุ่ม)',
-      'วาง LINE Group ID (ขึ้นต้นด้วย C...) ที่ต้องการให้ส่งรายงานเวลา 15:59 น.:',
+      'วาง LINE Group ID (ขึ้นต้นด้วย C...) ที่ต้องการให้ส่งรายงานอัตโนมัติ:',
       ui.ButtonSet.OK_CANCEL
     );
     if (grpPrompt.getSelectedButton() !== ui.Button.OK) return;
@@ -2588,16 +3123,20 @@ function setupLineDailyTrigger0359Ui() {
     if (!targetId) return;
   }
 
-  var triggerInfo = syncLineAutomationTriggers_(true, '15:59');
+  var schedulesJson = settingsMap['Line_Schedules'] || JSON.stringify(DEFAULT_LINE_SCHEDULES);
   upsertSettingsEntriesGas_([
     ['Line_Auto_Enabled', 'true'],
-    ['Line_Auto_Time', '15:59'],
+    ['Line_Auto_Time', DEFAULT_LINE_AUTO_TIME],
     ['Line_Auto_Report_Day', 'TODAY'],
     ['Line_Auto_Shift', 'ในเวลา 08:00-16:00'],
     ['Line_Target_Id', targetId],
+    ['Line_Schedules', schedulesJson],
+    ['Line_Send_As_Image', 'true'],
     ['Line_Channel_Token_Set', 'true']
   ]);
-  ui.alert('ตั้งเวลาส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มเวลา 15:59 น. (Asia/Bangkok) สำเร็จ!\nรอบถัดไป: ' + triggerInfo.nextRunAt);
+  var updatedMap = readSettingsMapGas_();
+  var triggerInfo = syncLineAutomationTriggers_(true, DEFAULT_LINE_AUTO_TIME, updatedMap);
+  ui.alert('ตั้งเวลาส่งรายงานผู้ป่วยประจำวันเข้า LINE อัตโนมัติ (15:55 / 20:00 / 12:30 น.) สำเร็จ!\nรอบถัดไป: ' + triggerInfo.nextRunAt);
 }
 
 function manualSendDailyCensusToLineUi() {

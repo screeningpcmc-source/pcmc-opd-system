@@ -35,7 +35,12 @@ import {
   WorkShift,
   DEFAULT_LINE_AUTO_TIME,
   DEFAULT_LINE_GROUP_ID,
+  DEFAULT_LINE_TARGET_GROUPS,
+  DEFAULT_LINE_SCHEDULES,
   LineAutoReportDayMode,
+  LineTargetGroup,
+  LineReportSchedule,
+  normalizeLineTimeString,
   isOffDutyWorkload,
   getWorkloadOffDutyReason,
   getWorkloadOffDutyStaff
@@ -109,10 +114,14 @@ import {
   fetchLineAutomationStatusViaAppsScript,
   configureLineViaServerProxy,
   sendLineMessageViaServerProxy,
+  uploadLineReportJpegViaAppsScript,
+  saveUnitCostCenterViaAppsScript,
   LineAutomationStatusInfo,
   AppDatabase
 } from './services/sheetsService';
 import { buildDailyCensusLineMessage, resolveLineAutoReportDate } from './utils/lineReport';
+import { renderDailyCensusReportJpegDataUrl } from './utils/censusJpegGenerator';
+import { doesDateMatchLineDayRule } from './utils/thaiHolidays';
 import { formatThaiLeaveRange, formatThaiShortDate, getLocalTodayIso } from './utils/thaiDate';
 import { 
   initAuth, 
@@ -2461,13 +2470,99 @@ export default function App() {
     );
   };
 
-  // Handler: Configure LINE Group Daily Report Automation (Server Proxy + Code.gs Trigger)
+  // Handler: Save Unit Cost Center (allowed for general OPD staff from Menu 2 & persists locally + GAS)
+  const handleSaveUnitCostCenter = async (
+    clinic: string,
+    costCenter: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const cleanClinic = (clinic || '').trim();
+    const cleanCostCenter = (costCenter || '').trim();
+    if (!cleanClinic) {
+      return { ok: false, error: 'กรุณาเลือกหน่วยงานหรือห้องตรวจ' };
+    }
+
+    const baseDb = dbRef.current;
+    const prevSettings = baseDb.settings;
+    let nextSettings: SystemSettings;
+
+    if (cleanClinic === 'ALL') {
+      const resolvedDefault = cleanCostCenter || prevSettings.defaultCostCenter || '2012000000';
+      nextSettings = {
+        ...prevSettings,
+        defaultCostCenter: resolvedDefault,
+      };
+    } else {
+      const nextMap = { ...(prevSettings.clinicCostCenters || {}) };
+      if (cleanCostCenter) {
+        nextMap[cleanClinic] = cleanCostCenter;
+      } else {
+        delete nextMap[cleanClinic];
+      }
+      nextSettings = {
+        ...prevSettings,
+        clinicCostCenters: nextMap,
+      };
+    }
+
+    try {
+      const rawLocal = localStorage.getItem('pcmc_unit_cost_centers');
+      const localMap: Record<string, string> = rawLocal ? JSON.parse(rawLocal) : {};
+      if (cleanCostCenter) localMap[cleanClinic] = cleanCostCenter;
+      else delete localMap[cleanClinic];
+      localStorage.setItem('pcmc_unit_cost_centers', JSON.stringify(localMap));
+    } catch {
+      // ignore localStorage failure
+    }
+
+    mutationSeqRef.current += 1;
+    const nextDb: AppDatabase = { ...baseDb, settings: nextSettings };
+    dbRef.current = nextDb;
+    setDb(nextDb);
+
+    const gasUrl = (baseDb.settings.gasUrl || '').trim();
+    if (gasUrl) {
+      const res = await saveUnitCostCenterViaAppsScript({
+        gasUrl,
+        clinic: cleanClinic,
+        costCenter: cleanCostCenter,
+      });
+      if (res.ok) {
+        lastSyncEpochRef.current = Date.now();
+        setLastSyncedAt(formatSyncTime());
+        showToast(
+          cleanCostCenter
+            ? `บันทึก Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} แล้ว`
+            : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
+          'success'
+        );
+        return { ok: true };
+      }
+      showToast(
+        `จำค่า Cost Center บนเครื่องแล้ว แต่ซิงค์ไปยัง Google Sheets ไม่สำเร็จ (${res.error || 'ตรวจสอบ Code.gs ล่าสุด'})`,
+        'info'
+      );
+      return { ok: true };
+    }
+
+    showToast(
+      cleanCostCenter
+        ? `จำค่า Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} เรียบร้อยแล้ว`
+        : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
+      'success'
+    );
+    return { ok: true };
+  };
+
+  // Handler: Configure LINE Group Daily Report Automation (Multi-Group + Multi-Schedule + .JPEG)
   const handleConfigureLineAutomation = async (config: {
     enabled: boolean;
     time: string;
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
+    targetGroups?: LineTargetGroup[];
+    schedules?: LineReportSchedule[];
+    sendAsImage?: boolean;
   }): Promise<{
     ok: boolean;
     error?: string;
@@ -2482,20 +2577,51 @@ export default function App() {
     const baseDb = dbRef.current;
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     const adminPin = unlockedAdminPinRef.current;
+
+    const cleanTargetGroups: LineTargetGroup[] =
+      Array.isArray(config.targetGroups) && config.targetGroups.length > 0
+        ? config.targetGroups
+        : baseDb.settings.lineTargetGroups && baseDb.settings.lineTargetGroups.length > 0
+        ? baseDb.settings.lineTargetGroups
+        : DEFAULT_LINE_TARGET_GROUPS.map((g) => ({ ...g }));
+
     const resolvedTargetId = (
       config.targetId ||
+      cleanTargetGroups.find((g) => g.enabled)?.id ||
       baseDb.settings.lineTargetId ||
       DEFAULT_LINE_GROUP_ID
     ).trim();
+
+    const cleanSchedules: LineReportSchedule[] =
+      Array.isArray(config.schedules) && config.schedules.length > 0
+        ? config.schedules.map((s) => ({
+            ...s,
+            time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+          }))
+        : baseDb.settings.lineSchedules && baseDb.settings.lineSchedules.length > 0
+        ? baseDb.settings.lineSchedules
+        : DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s }));
+
+    const resolvedPrimaryTime = normalizeLineTimeString(
+      config.time || cleanSchedules[0]?.time || DEFAULT_LINE_AUTO_TIME,
+      DEFAULT_LINE_AUTO_TIME
+    );
+    const resolvedSendAsImage =
+      typeof config.sendAsImage === 'boolean'
+        ? config.sendAsImage
+        : baseDb.settings.lineSendAsImage ?? true;
 
     const dirtyVer = markSettingsDirty();
     const optimisticSettings: SystemSettings = {
       ...baseDb.settings,
       lineAutoEnabled: config.enabled,
-      lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+      lineAutoTime: resolvedPrimaryTime,
       lineAutoReportDayMode: config.reportDayMode,
       lineAutoShift: config.shift,
       lineTargetId: resolvedTargetId,
+      lineTargetGroups: cleanTargetGroups,
+      lineSchedules: cleanSchedules,
+      lineSendAsImage: resolvedSendAsImage,
     };
     const optimisticDb: AppDatabase = { ...baseDb, settings: optimisticSettings };
     dbRef.current = optimisticDb;
@@ -2504,10 +2630,13 @@ export default function App() {
     // 1. Prefer server-side proxy (/api/line/configure), which securely passes .env token to GAS server-to-server
     const proxyRes = await configureLineViaServerProxy({
       enabled: config.enabled,
-      time: config.time || DEFAULT_LINE_AUTO_TIME,
+      time: resolvedPrimaryTime,
       reportDayMode: config.reportDayMode,
       shift: config.shift,
       targetId: resolvedTargetId,
+      targetGroups: cleanTargetGroups,
+      schedules: cleanSchedules,
+      sendAsImage: resolvedSendAsImage,
       ...(gasUrl ? { gasUrl } : {}),
       ...(adminPin ? { adminPin } : {}),
     });
@@ -2519,7 +2648,7 @@ export default function App() {
         const gasRawAuto = proxyRes.gasData.lineAutomation as Partial<LineAutomationStatusInfo> | undefined;
         lineAutomation = {
           enabled: config.enabled,
-          time: config.time || DEFAULT_LINE_AUTO_TIME,
+          time: normalizeLineTimeString(gasRawAuto?.time || resolvedPrimaryTime, resolvedPrimaryTime),
           triggerInstalled: Boolean(gasRawAuto?.triggerInstalled),
           triggerCount: Number(gasRawAuto?.triggerCount) || 0,
           nextRunAt: String(gasRawAuto?.nextRunAt || proxyRes.serverNextRunAt || ''),
@@ -2530,7 +2659,7 @@ export default function App() {
       } else {
         lineAutomation = {
           enabled: config.enabled,
-          time: config.time || DEFAULT_LINE_AUTO_TIME,
+          time: resolvedPrimaryTime,
           triggerInstalled: false,
           triggerCount: 0,
           nextRunAt: String(proxyRes.serverNextRunAt || ''),
@@ -2543,10 +2672,13 @@ export default function App() {
       const finalSettings: SystemSettings = {
         ...dbRef.current.settings,
         lineAutoEnabled: config.enabled,
-        lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+        lineAutoTime: resolvedPrimaryTime,
         lineAutoReportDayMode: config.reportDayMode,
         lineAutoShift: config.shift,
         lineTargetId: resolvedTargetId,
+        lineTargetGroups: cleanTargetGroups,
+        lineSchedules: cleanSchedules,
+        lineSendAsImage: resolvedSendAsImage,
         lineChannelTokenSet: Boolean(lineAutomation.hasToken || proxyRes.hasServerToken),
         ...(proxyRes.groupName ? { lineDetectedGroupName: proxyRes.groupName } : {}),
       };
@@ -2557,7 +2689,7 @@ export default function App() {
       showToast(
         config.enabled
           ? proxyRes.gasSynced
-            ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${resolvedTargetId}) เวลา ${config.time || '15:59'} น. สำเร็จ`
+            ? `บันทึกและตั้งเวลาส่งรายงานเข้า LINE (${cleanSchedules.filter((s) => s.enabled).length} รอบ) สำเร็จ`
             : `บันทึกบนเซิร์ฟเวอร์แล้ว แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
                 proxyRes.gasError ? ` (${proxyRes.gasError})` : ''
               }`
@@ -2581,7 +2713,14 @@ export default function App() {
     const res = await configureLineAutomationViaAppsScript({
       gasUrl,
       adminPin,
-      config: { ...config, targetId: resolvedTargetId },
+      config: {
+        ...config,
+        time: resolvedPrimaryTime,
+        targetId: resolvedTargetId,
+        targetGroups: cleanTargetGroups,
+        schedules: cleanSchedules,
+        sendAsImage: resolvedSendAsImage,
+      },
       db: optimisticDb,
       expectedDirtyVersion: dirtyVer,
     });
@@ -2595,10 +2734,13 @@ export default function App() {
       const mergedSettings: SystemSettings = {
         ...res.syncedDb.settings,
         lineAutoEnabled: config.enabled,
-        lineAutoTime: config.time || DEFAULT_LINE_AUTO_TIME,
+        lineAutoTime: resolvedPrimaryTime,
         lineAutoReportDayMode: config.reportDayMode,
         lineAutoShift: config.shift,
         lineTargetId: resolvedTargetId,
+        lineTargetGroups: cleanTargetGroups,
+        lineSchedules: cleanSchedules,
+        lineSendAsImage: resolvedSendAsImage,
         lineChannelTokenSet:
           res.lineAutomation?.hasToken ?? Boolean(res.syncedDb.settings.lineChannelTokenSet),
       };
@@ -2609,20 +2751,23 @@ export default function App() {
 
     showToast(
       config.enabled
-        ? `ตั้งเวลาส่งรายงานเข้า LINE กลุ่มเวลา ${config.time || '15:59'} น. สำเร็จ`
+        ? `ตั้งเวลาส่งรายงานเข้า LINE (${cleanSchedules.filter((s) => s.enabled).length} รอบ) สำเร็จ`
         : 'บันทึกการปิดส่งรายงาน LINE อัตโนมัติแล้ว',
       'success'
     );
     return { ok: true, lineAutomation: res.lineAutomation };
   };
 
-  // Handler: Immediate push to LINE Group via Server Proxy (/api/line/send) with GAS fallback
+  // Handler: Immediate push to LINE Group(s) with optional .JPEG table snapshot
   const handleSendLineReportNow = async (params: {
     targetId?: string;
+    targetIds?: string[];
     date?: string;
     shift?: string;
     reportDayMode?: LineAutoReportDayMode;
     message?: string;
+    imageDataUrl?: string;
+    sendAsImage?: boolean;
   }): Promise<{ ok: boolean; error?: string }> => {
     if (!isAdmin) {
       const err = 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น';
@@ -2630,11 +2775,23 @@ export default function App() {
       return { ok: false, error: err };
     }
     const baseDb = dbRef.current;
-    const resolvedTargetId = (
-      params.targetId ||
-      baseDb.settings.lineTargetId ||
-      DEFAULT_LINE_GROUP_ID
-    ).trim();
+    const configuredGroups = (baseDb.settings.lineTargetGroups || []).filter(
+      (g) => g.enabled && (g.id || '').trim()
+    );
+    const resolvedTargetIds = Array.from(
+      new Set(
+        (params.targetIds && params.targetIds.length > 0
+          ? params.targetIds
+          : configuredGroups.length > 0
+          ? configuredGroups.map((g) => g.id)
+          : [params.targetId || baseDb.settings.lineTargetId || DEFAULT_LINE_GROUP_ID]
+        )
+          .map((id) => (id || '').trim())
+          .filter(Boolean)
+      )
+    );
+    const resolvedTargetId = resolvedTargetIds[0] || DEFAULT_LINE_GROUP_ID;
+
     const resolvedDate =
       params.date ||
       resolveLineAutoReportDate(
@@ -2642,20 +2799,63 @@ export default function App() {
         params.reportDayMode || baseDb.settings.lineAutoReportDayMode || 'TODAY'
       );
     const resolvedShift = params.shift || baseDb.settings.lineAutoShift || 'ในเวลา 08:00-16:00';
+    const premSubs = baseDb.settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
     const messageToSend =
       (params.message || '').trim() ||
       buildDailyCensusLineMessage({
         workloads: baseDb.workloads,
         date: resolvedDate,
         shiftFilter: resolvedShift,
-        premiumSubClinics: baseDb.settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS],
+        premiumSubClinics: premSubs,
         includeClinicBreakdown: true,
       });
+
+    const wantImage = params.sendAsImage ?? baseDb.settings.lineSendAsImage ?? true;
+    const gasUrl = (baseDb.settings.gasUrl || '').trim();
+    let uploadedImageUrl = '';
+    let uploadedPreviewUrl = '';
+    let imageUploadNote = '';
+
+    if (wantImage) {
+      try {
+        let base64Jpeg = '';
+        if (params.imageDataUrl) {
+          base64Jpeg = params.imageDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        } else {
+          const generated = renderDailyCensusReportJpegDataUrl({
+            workloads: baseDb.workloads,
+            date: resolvedDate,
+            shiftFilter: resolvedShift,
+            premiumSubClinics: premSubs,
+          });
+          base64Jpeg = generated.base64;
+        }
+        if (base64Jpeg && gasUrl) {
+          const upRes = await uploadLineReportJpegViaAppsScript({
+            gasUrl,
+            base64Jpeg,
+            filename: `OPD_Census_${resolvedDate}.jpeg`,
+          });
+          if (upRes.ok && upRes.imageUrl) {
+            uploadedImageUrl = upRes.imageUrl;
+            uploadedPreviewUrl = upRes.previewImageUrl || upRes.imageUrl;
+          } else {
+            imageUploadNote = upRes.error || 'ยังไม่อัปเดต Code.gs สำหรับฝากไฟล์ภาพ .jpeg บน Google Drive';
+          }
+        } else if (!gasUrl) {
+          imageUploadNote = 'ยังไม่ได้เชื่อม Google Apps Script URL จึงส่งเฉพาะข้อความ';
+        }
+      } catch (imgErr) {
+        imageUploadNote = String(imgErr instanceof Error ? imgErr.message : imgErr);
+      }
+    }
 
     // 1. Try server-side LINE Messaging API proxy first (uses .env token securely)
     const proxyRes = await sendLineMessageViaServerProxy({
       targetId: resolvedTargetId,
+      targetIds: resolvedTargetIds,
       message: messageToSend,
+      ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl, previewImageUrl: uploadedPreviewUrl } : {}),
     });
 
     if (proxyRes.available) {
@@ -2676,8 +2876,13 @@ export default function App() {
       setDb(updatedDb);
 
       if (proxyRes.ok) {
+        const imgSuffix = uploadedImageUrl
+          ? ' (แนบภาพตาราง .JPEG แล้ว)'
+          : imageUploadNote
+          ? ` (ส่งข้อความสำเร็จ — หมายเหตุรูปภาพ: ${imageUploadNote})`
+          : '';
         showToast(
-          `ส่งรายงานเข้ากลุ่ม LINE ${proxyRes.groupName ? `"${proxyRes.groupName}" ` : ''}เรียบร้อยแล้ว!`,
+          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${imgSuffix} เรียบร้อยแล้ว!`,
           'success'
         );
         return { ok: true };
@@ -2688,7 +2893,6 @@ export default function App() {
     }
 
     // 2. Fallback to Apps Script if running in static build mode without Node backend
-    const gasUrl = (baseDb.settings.gasUrl || '').trim();
     const adminPin = unlockedAdminPinRef.current;
     if (!gasUrl || !adminPin) {
       const err = 'กรุณาเชื่อมต่อ Google Apps Script Web App URL และปลดล็อก Admin PIN ก่อน';
@@ -2700,10 +2904,12 @@ export default function App() {
       gasUrl,
       adminPin,
       targetId: resolvedTargetId,
+      targetIds: resolvedTargetIds,
       date: resolvedDate,
       shift: resolvedShift,
       reportDayMode: params.reportDayMode,
       message: messageToSend,
+      ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl, previewImageUrl: uploadedPreviewUrl } : {}),
       db: baseDb,
     });
 
@@ -2713,13 +2919,160 @@ export default function App() {
     }
 
     if (res.ok) {
-      showToast(res.statusText || 'ส่งรายงานเข้ากลุ่ม LINE เรียบร้อยแล้ว!', 'success');
+      showToast(
+        res.statusText ||
+          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${uploadedImageUrl ? ' (พร้อมภาพ .JPEG)' : ''} เรียบร้อยแล้ว!`,
+        'success'
+      );
       return { ok: true };
     }
     const gasErr = res.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ';
     showToast(gasErr, 'error');
     return { ok: false, error: gasErr };
   };
+
+  // Client-side multi-schedule Bangkok-time auto-scheduler (renders .jpeg table automatically when open)
+  useEffect(() => {
+    const checkSchedules = async () => {
+      const curDb = dbRef.current;
+      const st = curDb.settings;
+      if (!st.lineAutoEnabled) return;
+
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Bangkok',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+      const parts = Object.fromEntries(fmt.formatToParts(new Date()).map((p) => [p.type, p.value]));
+      const bkkHour = parts.hour === '24' ? '00' : parts.hour;
+      const bkkYmd = `${parts.year}-${parts.month}-${parts.day}`;
+      const bkkHm = `${bkkHour}:${parts.minute}`;
+
+      const schedules =
+        st.lineSchedules && st.lineSchedules.length > 0
+          ? st.lineSchedules
+          : DEFAULT_LINE_SCHEDULES;
+      const customHolidays = st.customHolidays || [];
+
+      let dedupeMap: Record<string, string> = {};
+      try {
+        dedupeMap = JSON.parse(localStorage.getItem('pcmc_line_client_auto_dedupe_v1') || '{}');
+      } catch {
+        dedupeMap = {};
+      }
+
+      for (const sch of schedules) {
+        if (!sch.enabled) continue;
+        const schTime = normalizeLineTimeString(sch.time, DEFAULT_LINE_AUTO_TIME);
+        if (bkkHm !== schTime) continue;
+        if (!doesDateMatchLineDayRule(bkkYmd, sch.dayRule, customHolidays)) continue;
+
+        const dedupeKey = `${sch.id}|${bkkYmd}`;
+        if (dedupeMap[dedupeKey]) continue;
+        dedupeMap[dedupeKey] = new Date().toISOString();
+        try {
+          localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
+        } catch {
+          // ignore
+        }
+
+        const targetDate = resolveLineAutoReportDate(
+          curDb.workloads,
+          sch.reportDayMode || 'TODAY'
+        );
+        const premSubs = st.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
+        const msg = buildDailyCensusLineMessage({
+          workloads: curDb.workloads,
+          date: targetDate,
+          shiftFilter: sch.shift,
+          premiumSubClinics: premSubs,
+          includeClinicBreakdown: true,
+        });
+
+        const groups = (st.lineTargetGroups || []).filter((g) => g.enabled && (g.id || '').trim());
+        const targetIds = Array.from(
+          new Set(
+            (groups.length > 0 ? groups.map((g) => g.id) : [st.lineTargetId || DEFAULT_LINE_GROUP_ID])
+              .map((id) => (id || '').trim())
+              .filter(Boolean)
+          )
+        );
+        const gasUrl = (st.gasUrl || '').trim();
+        let imageUrl = '';
+        let previewImageUrl = '';
+
+        if (st.lineSendAsImage !== false && gasUrl) {
+          try {
+            const rendered = renderDailyCensusReportJpegDataUrl({
+              workloads: curDb.workloads,
+              date: targetDate,
+              shiftFilter: sch.shift,
+              premiumSubClinics: premSubs,
+            });
+            const up = await uploadLineReportJpegViaAppsScript({
+              gasUrl,
+              base64Jpeg: rendered.base64,
+              filename: `OPD_Census_${targetDate}_${sch.id}.jpeg`,
+            });
+            if (up.ok && up.imageUrl) {
+              imageUrl = up.imageUrl;
+              previewImageUrl = up.previewImageUrl || up.imageUrl;
+            }
+          } catch {
+            // proceed with text fallback if image render/upload fails
+          }
+        }
+
+        let sentViaGas = false;
+        if (gasUrl) {
+          try {
+            const gasRes = await fetch(gasUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+              body: JSON.stringify({
+                action: 'sendAutoScheduledLineReport',
+                payload: {
+                  scheduleId: sch.id,
+                  scheduleLabel: sch.label,
+                  targetIds,
+                  targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
+                  date: targetDate,
+                  shift: sch.shift,
+                  reportDayMode: sch.reportDayMode,
+                  message: msg,
+                  ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
+                },
+              }),
+            });
+            if (gasRes.ok) {
+              const gasJson = await gasRes.json();
+              if (gasJson?.success) sentViaGas = true;
+            }
+          } catch {
+            // fallback to server proxy below
+          }
+        }
+
+        if (!sentViaGas) {
+          await sendLineMessageViaServerProxy({
+            targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
+            targetIds,
+            message: msg,
+            ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
+          });
+        }
+      }
+    };
+
+    const timerId = window.setInterval(() => {
+      void checkSchedules();
+    }, 30_000);
+    return () => window.clearInterval(timerId);
+  }, []);
 
   const handleFetchLineStatus = useCallback(async (): Promise<LineAutomationStatusInfo | null> => {
     const baseDb = dbRef.current;
@@ -2732,7 +3085,10 @@ export default function App() {
     const updatedSettings: SystemSettings = {
       ...latest.settings,
       lineAutoEnabled: res.status.enabled,
-      lineAutoTime: res.status.time || latest.settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME,
+      lineAutoTime: normalizeLineTimeString(
+        res.status.time || latest.settings.lineAutoTime,
+        DEFAULT_LINE_AUTO_TIME
+      ),
       lineChannelTokenSet: res.status.hasToken,
       lineTargetId: res.status.targetId || latest.settings.lineTargetId,
       lineDetectedGroupId: res.status.detectedGroupId || latest.settings.lineDetectedGroupId,
@@ -2912,6 +3268,7 @@ export default function App() {
             onDeleteLeave={handleDeleteLeave}
             onUpdateOT={handleUpdateOT}
             onDeleteOT={handleDeleteOT}
+            onSaveUnitCostCenter={handleSaveUnitCostCenter}
           />
         )}
 

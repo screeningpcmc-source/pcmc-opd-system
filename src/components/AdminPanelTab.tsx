@@ -29,7 +29,13 @@ import {
   WORKLOAD_SHIFTS,
   DEFAULT_LINE_AUTO_TIME,
   DEFAULT_LINE_GROUP_ID,
-  LineAutoReportDayMode
+  DEFAULT_LINE_TARGET_GROUPS,
+  DEFAULT_LINE_SCHEDULES,
+  LineAutoReportDayMode,
+  LineTargetGroup,
+  LineReportSchedule,
+  LineReportDayRule,
+  normalizeLineTimeString
 } from '../types';
 import {
   markReferralClinicRemovedByAdmin,
@@ -83,7 +89,8 @@ import {
   Loader2,
   MessageSquare,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  ImageDown
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
@@ -122,6 +129,9 @@ interface AdminPanelTabProps {
     reportDayMode: LineAutoReportDayMode;
     shift: 'ALL' | WorkShift;
     targetId: string;
+    targetGroups?: LineTargetGroup[];
+    schedules?: LineReportSchedule[];
+    sendAsImage?: boolean;
   }) => Promise<{
     ok: boolean;
     error?: string;
@@ -131,10 +141,13 @@ interface AdminPanelTabProps {
   }>;
   onSendLineReportNow?: (params: {
     targetId?: string;
+    targetIds?: string[];
     date?: string;
     shift?: string;
     reportDayMode?: LineAutoReportDayMode;
     message?: string;
+    imageDataUrl?: string;
+    sendAsImage?: boolean;
   }) => Promise<{ ok: boolean; error?: string }>;
   onFetchLineStatus?: () => Promise<LineAutomationStatusInfo | null>;
 }
@@ -252,7 +265,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [selectedCostCenterClinic, setSelectedCostCenterClinic] = useState<string>(
     inTimeClinics[0] || IN_TIME_CLINICS[0]
   );
-  const [clinicCostCenterDraft, setClinicCostCenterDraft] = useState<string>('');
+  const [clinicCostCenterDraft, setClinicCostCenterDraft] = useState<string>(
+    (settings.clinicCostCenters || {})[inTimeClinics[0] || IN_TIME_CLINICS[0]] || ''
+  );
+  const [clinicCostCenterSavedMsg, setClinicCostCenterSavedMsg] = useState<string>('');
   const [otRateNurse, setOtRateNurse] = useState<number>(() =>
     getOtHourlyRate('RN', settings.otHourlyRates)
   );
@@ -270,10 +286,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   );
   const [settingsSaved, setSettingsSaved] = useState<boolean>(false);
 
-  // LINE Messaging API Automation state
+  // LINE Messaging API Automation state (Multi-Group + Multi-Schedule + .JPEG)
   const [lineAutoEnabled, setLineAutoEnabled] = useState<boolean>(Boolean(settings.lineAutoEnabled));
-  const [lineAutoTime, setLineAutoTime] = useState<string>(
-    settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME
+  const [lineAutoTime, setLineAutoTime] = useState<string>(() =>
+    normalizeLineTimeString(settings.lineAutoTime, DEFAULT_LINE_AUTO_TIME)
   );
   const [lineAutoReportDayMode, setLineAutoReportDayMode] = useState<LineAutoReportDayMode>(
     settings.lineAutoReportDayMode || 'TODAY'
@@ -283,6 +299,26 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   );
   const [lineTargetId, setLineTargetId] = useState<string>(
     settings.lineTargetId || DEFAULT_LINE_GROUP_ID
+  );
+  const [lineTargetGroups, setLineTargetGroups] = useState<LineTargetGroup[]>(() =>
+    settings.lineTargetGroups && settings.lineTargetGroups.length > 0
+      ? settings.lineTargetGroups
+      : settings.lineTargetId && settings.lineTargetId.trim() !== DEFAULT_LINE_GROUP_ID
+      ? [{ id: settings.lineTargetId.trim(), name: 'กลุ่ม LINE หลัก', enabled: true }]
+      : DEFAULT_LINE_TARGET_GROUPS.map((g) => ({ ...g }))
+  );
+  const [newLineGroupId, setNewLineGroupId] = useState<string>('');
+  const [newLineGroupName, setNewLineGroupName] = useState<string>('');
+  const [lineSchedules, setLineSchedules] = useState<LineReportSchedule[]>(() =>
+    settings.lineSchedules && settings.lineSchedules.length > 0
+      ? settings.lineSchedules.map((s) => ({
+          ...s,
+          time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+        }))
+      : DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s }))
+  );
+  const [lineSendAsImage, setLineSendAsImage] = useState<boolean>(
+    settings.lineSendAsImage ?? true
   );
   const [isSavingLineAuto, setIsSavingLineAuto] = useState<boolean>(false);
   const [isTestingLineSend, setIsTestingLineSend] = useState<boolean>(false);
@@ -321,11 +357,33 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setOtRateClerk(getOtHourlyRate('Clerk', settings.otHourlyRates));
     setOtRateServiceWorker(getOtHourlyRate('Service Worker', settings.otHourlyRates));
     setLineAutoEnabled(Boolean(settings.lineAutoEnabled));
-    setLineAutoTime(settings.lineAutoTime || DEFAULT_LINE_AUTO_TIME);
+    setLineAutoTime(normalizeLineTimeString(settings.lineAutoTime, DEFAULT_LINE_AUTO_TIME));
     setLineAutoReportDayMode(settings.lineAutoReportDayMode || 'TODAY');
     setLineAutoShift(settings.lineAutoShift || 'ในเวลา 08:00-16:00');
     setLineTargetId(settings.lineTargetId || DEFAULT_LINE_GROUP_ID);
+    if (settings.lineTargetGroups && settings.lineTargetGroups.length > 0) {
+      setLineTargetGroups(settings.lineTargetGroups);
+    } else if (settings.lineTargetId && settings.lineTargetId.trim() !== DEFAULT_LINE_GROUP_ID) {
+      setLineTargetGroups([{ id: settings.lineTargetId.trim(), name: 'กลุ่ม LINE หลัก', enabled: true }]);
+    } else {
+      setLineTargetGroups(DEFAULT_LINE_TARGET_GROUPS.map((g) => ({ ...g })));
+    }
+    if (settings.lineSchedules && settings.lineSchedules.length > 0) {
+      setLineSchedules(
+        settings.lineSchedules.map((s) => ({
+          ...s,
+          time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+        }))
+      );
+    } else {
+      setLineSchedules(DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s })));
+    }
+    setLineSendAsImage(settings.lineSendAsImage ?? true);
   }, [settings]);
+
+  useEffect(() => {
+    setClinicCostCenterDraft(clinicCostCenters[selectedCostCenterClinic] || '');
+  }, [selectedCostCenterClinic, clinicCostCenters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -363,17 +421,59 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     [workloads, resolvedLinePreviewDate, lineAutoShift, premiumSubClinics]
   );
 
+  const activeLineTargetIds = useMemo(() => {
+    const enabledFromGroups = lineTargetGroups
+      .filter((g) => g.enabled && (g.id || '').trim())
+      .map((g) => g.id.trim());
+    if (enabledFromGroups.length > 0) return Array.from(new Set(enabledFromGroups));
+    const single = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
+    return single ? [single] : [DEFAULT_LINE_GROUP_ID];
+  }, [lineTargetGroups, lineTargetId]);
+
   const handleSaveLineAutomation = async () => {
     setLineActionFeedback(null);
-    const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
-    const cleanTime = /^\d{2}:\d{2}$/.test(lineAutoTime.trim())
-      ? lineAutoTime.trim()
-      : DEFAULT_LINE_AUTO_TIME;
+    const cleanedGroups: LineTargetGroup[] = (
+      lineTargetGroups.length > 0
+        ? lineTargetGroups
+        : DEFAULT_LINE_TARGET_GROUPS.map((g) => ({ ...g }))
+    )
+      .map((g) => ({
+        id: (g.id || '').trim(),
+        name: (g.name || '').trim() || undefined,
+        enabled: Boolean(g.enabled),
+      }))
+      .filter((g) => g.id);
 
-    if (lineAutoEnabled && !cleanTargetId) {
+    const enabledIds = cleanedGroups.filter((g) => g.enabled).map((g) => g.id);
+    const cleanTargetId = (
+      enabledIds[0] ||
+      cleanedGroups[0]?.id ||
+      lineTargetId ||
+      DEFAULT_LINE_GROUP_ID
+    ).trim();
+
+    const cleanedSchedules: LineReportSchedule[] = (
+      lineSchedules.length > 0
+        ? lineSchedules
+        : DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s }))
+    ).map((s, idx) => ({
+      ...s,
+      id: s.id || `sch-${idx + 1}`,
+      label: (s.label || '').trim() || `รอบที่ ${idx + 1}`,
+      time: normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME),
+      sendAsImage: lineSendAsImage,
+    }));
+
+    const firstEnabledSched = cleanedSchedules.find((s) => s.enabled) || cleanedSchedules[0];
+    const cleanTime = normalizeLineTimeString(
+      firstEnabledSched?.time || lineAutoTime,
+      DEFAULT_LINE_AUTO_TIME
+    );
+
+    if (lineAutoEnabled && enabledIds.length === 0 && !cleanTargetId) {
       setLineActionFeedback({
         type: 'error',
-        text: 'กรุณาระบุ LINE Group ID (ขึ้นต้นด้วย C...) ก่อนเปิดใช้งานส่งอัตโนมัติ',
+        text: 'กรุณาเปิดใช้งานอย่างน้อย 1 LINE Group ID (ขึ้นต้นด้วย C...) ก่อนบันทึก',
       });
       return;
     }
@@ -390,7 +490,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     if (lineAutoEnabled && !tokenAvailable) {
       setLineActionFeedback({
         type: 'error',
-        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)"',
+        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (หลายรอบ)"',
       });
       return;
     }
@@ -401,27 +501,42 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       const res = await onConfigureLineAutomation({
         enabled: lineAutoEnabled,
         time: cleanTime,
-        reportDayMode: lineAutoReportDayMode,
-        shift: lineAutoShift,
+        reportDayMode: firstEnabledSched?.reportDayMode || lineAutoReportDayMode,
+        shift: firstEnabledSched?.shift || lineAutoShift,
         targetId: cleanTargetId,
+        targetGroups: cleanedGroups,
+        schedules: cleanedSchedules,
+        sendAsImage: lineSendAsImage,
       });
       if (res.ok) {
+        setLineAutoTime(cleanTime);
+        setLineTargetId(cleanTargetId);
+        setLineTargetGroups(cleanedGroups);
+        setLineSchedules(cleanedSchedules);
         if (res.lineAutomation) setLineStatusInfo(res.lineAutomation);
         const srv = await fetchServerLineStatus(cleanTargetId, true);
         if (srv) setServerLineStatus(srv);
+        const activeSchedSummary = cleanedSchedules
+          .filter((s) => s.enabled)
+          .map((s) => `${s.time} น.`)
+          .join(', ');
         if (lineAutoEnabled && res.gasSynced === false) {
           setLineActionFeedback({
             type: 'info',
-            text: `บันทึกตั้งค่าบนเซิร์ฟเวอร์นี้แล้ว (${cleanTime} น.) แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
+            text: `บันทึกตั้งค่า (${activeSchedSummary || cleanTime + ' น.'} • ${enabledIds.length} กลุ่ม${
+              lineSendAsImage ? ' • ภาพ .jpeg' : ''
+            }) แล้ว แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
               res.gasError ? `: ${res.gasError}` : ''
-            } — หากเปิดใช้งานจาก GitHub Pages หรือรอตั้งเวลาอัตโนมัติบน Google Cloud กรุณาอัปเดตและ Deploy Code.gs ล่าสุดแล้วใช้เมนู "🔑 อัปเดต LINE Token ใหม่" ใน Google Sheets`,
+            } — กรุณาอัปเดตและ Deploy Code.gs ล่าสุดใน Google Sheets`,
           });
         } else {
           setLineActionFeedback({
             type: 'success',
             text: lineAutoEnabled
-              ? `บันทึกและตั้งเวลาอัตโนมัติ ${cleanTime} น. (Asia/Bangkok) สำหรับกลุ่ม ${
-                  srv?.groupName ? `"${srv.groupName}"` : cleanTargetId
+              ? `บันทึกและตั้งเวลาส่งอัตโนมัติ ${cleanedSchedules.filter((s) => s.enabled).length} รอบ (${
+                  activeSchedSummary || `${cleanTime} น.`
+                }) เข้า ${enabledIds.length} กลุ่ม LINE${
+                  lineSendAsImage ? ' (พร้อมภาพ .jpeg)' : ''
                 } สำเร็จ${
                   res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
                 }`
@@ -439,13 +554,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     }
   };
 
-  const handleTestSendLineNow = async () => {
+  const handleTestSendLineNow = async (overrideSched?: LineReportSchedule) => {
     setLineActionFeedback(null);
-    const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
-    if (!cleanTargetId) {
+    const targetIds = activeLineTargetIds;
+    const cleanTargetId = targetIds[0] || DEFAULT_LINE_GROUP_ID;
+    if (targetIds.length === 0) {
       setLineActionFeedback({
         type: 'error',
-        text: 'กรุณาระบุ LINE Group ID ก่อนทดสอบส่งเข้ากลุ่ม',
+        text: 'กรุณาระบุและเปิดใช้งาน LINE Group ID อย่างน้อย 1 กลุ่มก่อนทดสอบส่ง',
       });
       return;
     }
@@ -459,7 +575,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     if (!latestSrv?.hasServerToken && !lineStatusInfo?.hasToken && !settings.lineChannelTokenSet) {
       setLineActionFeedback({
         type: 'error',
-        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)"',
+        text: 'ไม่พบ LINE Channel Token บนเซิร์ฟเวอร์นี้ — หากเปิดใช้งานจาก GitHub Pages กรุณาตั้งค่าใน Google Sheets เมนู "🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ"',
       });
       return;
     }
@@ -471,21 +587,36 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       return;
     }
     if (!onSendLineReportNow) return;
+    const targetDayMode = overrideSched?.reportDayMode || lineAutoReportDayMode;
+    const targetShift = overrideSched?.shift || lineAutoShift;
+    const targetDate = resolveLineAutoReportDate(workloads, targetDayMode);
+    const msgText = overrideSched
+      ? buildDailyCensusLineMessage({
+          workloads,
+          date: targetDate,
+          shiftFilter: targetShift,
+          premiumSubClinics,
+          includeClinicBreakdown: true,
+        })
+      : linePreviewMessage;
+
     setIsTestingLineSend(true);
     try {
       const sendRes = await onSendLineReportNow({
         targetId: cleanTargetId,
-        date: resolvedLinePreviewDate,
-        shift: lineAutoShift,
-        reportDayMode: lineAutoReportDayMode,
-        message: linePreviewMessage,
+        targetIds,
+        date: targetDate,
+        shift: targetShift,
+        reportDayMode: targetDayMode,
+        message: msgText,
+        sendAsImage: lineSendAsImage,
       });
       if (sendRes.ok) {
         setLineActionFeedback({
           type: 'success',
-          text: `ส่งรายงานวันที่ ${formatThaiShortDate(resolvedLinePreviewDate)} เข้ากลุ่ม LINE ${
-            serverLineStatus?.groupName ? `"${serverLineStatus.groupName}" ` : ''
-          }สำเร็จ!`,
+          text: `ส่งรายงาน${lineSendAsImage ? ' (.jpeg + ข้อความ)' : ''} วันที่ ${formatThaiShortDate(
+            targetDate
+          )} เข้า ${targetIds.length} กลุ่ม LINE สำเร็จ!`,
         });
         const srv = await fetchServerLineStatus(cleanTargetId, true);
         if (srv) setServerLineStatus(srv);
@@ -513,7 +644,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     setIsCheckingLineStatus(true);
     setLineActionFeedback(null);
     try {
-      const cleanTargetId = (lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
+      const cleanTargetId = (activeLineTargetIds[0] || lineTargetId || DEFAULT_LINE_GROUP_ID).trim();
       const srv = await fetchServerLineStatus(cleanTargetId, true);
       if (srv) setServerLineStatus(srv);
       const fresh = onFetchLineStatus ? await onFetchLineStatus() : null;
@@ -2306,8 +2437,15 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </div>
 
             <div className="bg-white/90 rounded-lg border border-violet-200/80 p-3 space-y-2">
-              <div className="text-[11px] font-bold text-gray-800">
-                กำหนด Cost Center เฉพาะห้องตรวจ (ถ้าต่างจากค่าหลัก)
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] font-bold text-gray-800">
+                  กำหนด Cost Center เฉพาะห้องตรวจ (บันทึกจำค่าแยกแต่ละแผนกทันที)
+                </div>
+                {clinicCostCenterSavedMsg && (
+                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                    {clinicCostCenterSavedMsg}
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
                 <div className="sm:col-span-5">
@@ -2321,7 +2459,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white font-medium"
                   >
                     {allClinicsForFilter.map((c) => (
-                      <option key={c} value={c}>{c}</option>
+                      <option key={c} value={c}>
+                        {c}{clinicCostCenters[c] ? ` (${clinicCostCenters[c]})` : ''}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -2340,12 +2480,31 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     onClick={() => {
                       if (!selectedCostCenterClinic) return;
                       const trimmed = clinicCostCenterDraft.trim();
-                      setClinicCostCenters((prev) => {
-                        const next = { ...prev };
-                        if (trimmed) next[selectedCostCenterClinic] = trimmed;
-                        else delete next[selectedCostCenterClinic];
-                        return next;
+                      const nextClinicCostCenters = { ...clinicCostCenters };
+                      if (trimmed) nextClinicCostCenters[selectedCostCenterClinic] = trimmed;
+                      else delete nextClinicCostCenters[selectedCostCenterClinic];
+                      setClinicCostCenters(nextClinicCostCenters);
+                      try {
+                        const raw = localStorage.getItem('pcmc_unit_cost_centers');
+                        const localMap: Record<string, string> = raw ? JSON.parse(raw) : {};
+                        if (trimmed) localMap[selectedCostCenterClinic] = trimmed;
+                        else delete localMap[selectedCostCenterClinic];
+                        localStorage.setItem('pcmc_unit_cost_centers', JSON.stringify(localMap));
+                      } catch {
+                        // ignore
+                      }
+                      onSaveSettings({
+                        ...settings,
+                        defaultCostCenter: defaultCostCenter.trim() || DEFAULT_OT_COST_CENTER,
+                        clinicCostCenters: nextClinicCostCenters,
+                        otControllerName: otControllerName.trim() || DEFAULT_OT_CONTROLLER_NAME,
                       });
+                      setClinicCostCenterSavedMsg(
+                        trimmed
+                          ? `จำค่า "${selectedCostCenterClinic}: ${trimmed}" แล้ว ✓`
+                          : `ล้างค่าของ "${selectedCostCenterClinic}" แล้ว ✓`
+                      );
+                      setTimeout(() => setClinicCostCenterSavedMsg(''), 3000);
                     }}
                     className="w-full py-1.5 px-2.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold rounded-lg cursor-pointer"
                   >
@@ -2358,18 +2517,41 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   {Object.entries(clinicCostCenters).map(([cl, cc]) => (
                     <span
                       key={cl}
-                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-violet-100 text-violet-900 text-[11px] font-medium"
+                      onClick={() => {
+                        setSelectedCostCenterClinic(cl);
+                        setClinicCostCenterDraft(cc);
+                      }}
+                      title="คลิกเพื่อเลือกแก้ไข Cost Center ของแผนกนี้"
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-violet-100 text-violet-900 text-[11px] font-medium cursor-pointer hover:bg-violet-200/80"
                     >
                       <span>{cl}: <strong className="font-mono">{cc}</strong></span>
                       <button
                         type="button"
-                        onClick={() =>
-                          setClinicCostCenters((prev) => {
-                            const next = { ...prev };
-                            delete next[cl];
-                            return next;
-                          })
-                        }
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          const nextClinicCostCenters = { ...clinicCostCenters };
+                          delete nextClinicCostCenters[cl];
+                          setClinicCostCenters(nextClinicCostCenters);
+                          if (selectedCostCenterClinic === cl) {
+                            setClinicCostCenterDraft('');
+                          }
+                          try {
+                            const raw = localStorage.getItem('pcmc_unit_cost_centers');
+                            const localMap: Record<string, string> = raw ? JSON.parse(raw) : {};
+                            delete localMap[cl];
+                            localStorage.setItem('pcmc_unit_cost_centers', JSON.stringify(localMap));
+                          } catch {
+                            // ignore
+                          }
+                          onSaveSettings({
+                            ...settings,
+                            defaultCostCenter: defaultCostCenter.trim() || DEFAULT_OT_COST_CENTER,
+                            clinicCostCenters: nextClinicCostCenters,
+                            otControllerName: otControllerName.trim() || DEFAULT_OT_CONTROLLER_NAME,
+                          });
+                          setClinicCostCenterSavedMsg(`ลบ Cost Center ของ "${cl}" แล้ว ✓`);
+                          setTimeout(() => setClinicCostCenterSavedMsg(''), 3000);
+                        }}
                         className="text-violet-600 hover:text-red-600 cursor-pointer"
                         title="ลบ Cost Center เฉพาะห้องนี้"
                       >
@@ -2576,7 +2758,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         </form>
       </div>
 
-      {/* SECTION 5: LINE Group Daily Patient Report Automation (15:59 Asia/Bangkok) */}
+      {/* SECTION 5: LINE Group Daily Patient Report Automation (Multi-Schedule + Multi-Group + .JPEG) */}
       <div className="bg-white rounded-2xl shadow-xs border border-emerald-200/90 p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-emerald-100 pb-3">
           <div className="flex items-center gap-2.5">
@@ -2585,10 +2767,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             </div>
             <div>
               <h3 className="text-sm font-bold text-gray-900">
-                ระบบออโตเมชั่นส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่ม (Auto Daily Report)
+                ระบบออโตเมชั่นส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่ม (Multi-Round &amp; Auto .JPEG)
               </h3>
               <p className="text-[11px] text-gray-500">
-                รันอัตโนมัติทุกวันผ่าน Google Apps Script (เวลาไทย UTC+7) แม้ปิดเบราว์เซอร์ • ค่าเริ่มต้น 15:59 น. (ยอดวันนี้เฉพาะในเวลา)
+                ตั้งส่งอัตโนมัติได้หลายรอบเวลา (15:55 / 20:00 / 12:30 น.) พร้อมรองรับหลายกลุ่ม LINE และส่งภาพรายงาน (.jpeg) อัตโนมัติ
               </p>
             </div>
           </div>
@@ -2597,12 +2779,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             {lineStatusInfo?.triggerInstalled ? (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>ทริกเกอร์ทำงานอัตโนมัติ ({lineStatusInfo.time} น.)</span>
+                <span>
+                  ทริกเกอร์อัตโนมัติ ({normalizeLineTimeString(lineStatusInfo.time, DEFAULT_LINE_AUTO_TIME)} น.)
+                </span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-[11px] font-semibold">
                 <Clock className="w-3.5 h-3.5 text-slate-500" />
-                <span>{lineAutoEnabled ? 'รอติดตั้งทริกเกอร์บน Apps Script' : 'ยังไม่เปิดใช้งานอัตโนมัติ'}</span>
+                <span>{lineAutoEnabled ? 'พร้อมทำงานอัตโนมัติตามรอบที่กำหนด' : 'ยังไม่เปิดใช้งานอัตโนมัติ'}</span>
               </span>
             )}
             <button
@@ -2657,32 +2841,33 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               )}
               {(serverLineStatus?.groupVerified || lineStatusInfo?.groupVerified) && (
                 <span className="text-[10px] text-emerald-700/90 font-medium">
-                  กลุ่มปลายทาง: {serverLineStatus?.groupName || lineStatusInfo?.groupName || lineTargetId}
-                </span>
-              )}
-              {serverLineStatus && !serverLineStatus.groupVerified && serverLineStatus.groupError && (
-                <span className="text-[10px] text-red-700 font-medium">
-                  {serverLineStatus.groupError}
-                </span>
-              )}
-              {!serverLineStatus && lineStatusInfo?.hasToken && lineStatusInfo.tokenVerified === false && lineStatusInfo.tokenError && (
-                <span className="text-[10px] text-red-700 font-medium">
-                  {lineStatusInfo.tokenError}
+                  กลุ่มหลัก: {serverLineStatus?.groupName || lineStatusInfo?.groupName || activeLineTargetIds[0]}
+                  {activeLineTargetIds.length > 1 ? ` (+อีก ${activeLineTargetIds.length - 1} กลุ่ม)` : ''}
                 </span>
               )}
             </div>
           </div>
 
           <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3">
-            <div className="text-[10px] font-semibold text-slate-500 uppercase">รอบส่งอัตโนมัติถัดไป</div>
+            <div className="text-[10px] font-semibold text-slate-500 uppercase">รอบส่งอัตโนมัติที่เปิดอยู่</div>
             <div className="mt-1 font-bold text-gray-800 font-mono text-[11px]">
-              {lineStatusInfo?.nextRunAt
-                ? `${lineStatusInfo.nextRunAt} น.`
-                : serverLineStatus?.serverNextRunAt
-                ? `${serverLineStatus.serverNextRunAt} น. (Server)`
-                : lineAutoEnabled
-                ? `ทุกวันเวลา ${lineAutoTime || DEFAULT_LINE_AUTO_TIME} น.`
-                : '- (ปิดอยู่)'}
+              {!lineAutoEnabled ? (
+                '- (ปิดอยู่)'
+              ) : lineSchedules.some((s) => s.enabled) ? (
+                <div className="space-y-0.5">
+                  {lineSchedules
+                    .filter((s) => s.enabled)
+                    .map((s) => (
+                      <div key={s.id} className="truncate">
+                        • {normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME)} น. ({s.label})
+                      </div>
+                    ))}
+                </div>
+              ) : lineStatusInfo?.nextRunAt ? (
+                `${lineStatusInfo.nextRunAt} น.`
+              ) : (
+                `ทุกวันเวลา ${normalizeLineTimeString(lineAutoTime, DEFAULT_LINE_AUTO_TIME)} น.`
+              )}
             </div>
           </div>
 
@@ -2703,12 +2888,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
         {/* Auto-Detected Group ID Banner from Webhook */}
         {(lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId) &&
-          (lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId) !== lineTargetId.trim() && (
+          !lineTargetGroups.some(
+            (g) => g.id.trim() === (lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId || '').trim()
+          ) && (
             <div className="p-3 rounded-xl bg-cyan-50 border border-cyan-200 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2 text-cyan-950">
                 <MessageSquare className="w-4 h-4 text-cyan-700 shrink-0" />
                 <span>
-                  ตรวจพบ Group ID จาก LINE Webhook:{' '}
+                  ตรวจพบ Group ID ใหม่จาก LINE Webhook:{' '}
                   <strong className="font-mono">
                     {lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId}
                   </strong>
@@ -2721,14 +2908,27 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() =>
-                  setLineTargetId(
-                    lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId || ''
-                  )
-                }
+                onClick={() => {
+                  const detectedId = (
+                    lineStatusInfo?.detectedGroupId ||
+                    settings.lineDetectedGroupId ||
+                    ''
+                  ).trim();
+                  const detectedName = (
+                    lineStatusInfo?.detectedGroupName ||
+                    settings.lineDetectedGroupName ||
+                    'กลุ่ม LINE ใหม่'
+                  ).trim();
+                  if (!detectedId) return;
+                  setLineTargetId(detectedId);
+                  setLineTargetGroups((prev) => [
+                    ...prev,
+                    { id: detectedId, name: detectedName, enabled: true },
+                  ]);
+                }}
                 className="px-3 py-1 rounded-lg bg-cyan-700 hover:bg-cyan-800 text-white text-[11px] font-bold cursor-pointer"
               >
-                ใช้รหัสกลุ่มนี้
+                + เพิ่มกลุ่มนี้เข้ารายการ
               </button>
             </div>
           )}
@@ -2753,8 +2953,8 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         )}
 
         {/* Configuration Fields */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 bg-emerald-50/35 border border-emerald-200/70 rounded-xl p-4">
-          <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-emerald-100">
+        <div className="space-y-4 bg-emerald-50/35 border border-emerald-200/70 rounded-xl p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-emerald-100">
             <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -2763,113 +2963,347 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 className="w-4 h-4 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
               />
               <span className="text-xs font-bold text-emerald-950">
-                เปิดใช้งานส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มอัตโนมัติทุกวัน
+                เปิดใช้งานส่งรายงานผู้ป่วยประจำวันเข้า LINE กลุ่มอัตโนมัติ
               </span>
             </label>
             <button
               type="button"
               onClick={() => {
                 setLineAutoEnabled(true);
-                setLineAutoTime('15:59');
+                setLineSchedules(DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s })));
+                setLineAutoTime('15:55');
                 setLineAutoReportDayMode('TODAY');
                 setLineAutoShift('ในเวลา 08:00-16:00');
+                setLineSendAsImage(true);
               }}
-              className="px-2.5 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-50 text-[11px] font-bold cursor-pointer"
+              className="px-3 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-50 text-[11px] font-bold cursor-pointer"
             >
-              ตั้งค่าแนะนำ: 15:59 น. (ยอดวันนี้เฉพาะในเวลา)
+              ตั้งค่าแนะนำ 3 รอบ (15:55 / 20:00 / 12:30 น.)
             </button>
           </div>
 
-          <div className="md:col-span-3">
-            <label className="block text-[11px] font-bold text-gray-700 mb-1">
-              เวลาส่งอัตโนมัติ (เวลาไทย) *
-            </label>
-            <input
-              type="time"
-              value={lineAutoTime}
-              onChange={(e) => setLineAutoTime(e.target.value)}
-              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-mono font-bold text-emerald-950 bg-white"
-            />
-            <span className="text-[10px] text-gray-500">ค่าเริ่มต้น 15:59 น.</span>
-          </div>
-
-          <div className="md:col-span-5">
-            <label className="block text-[11px] font-bold text-gray-700 mb-1">
-              ช่วงข้อมูลวันที่ต้องการสรุปส่ง
-            </label>
-            <select
-              value={lineAutoReportDayMode}
-              onChange={(e) => setLineAutoReportDayMode(e.target.value as LineAutoReportDayMode)}
-              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-semibold text-gray-900 bg-white"
-            >
-              <option value="TODAY">
-                ข้อมูลของวันที่ตรงกับวันส่ง (วันนี้ — แนะนำสำหรับเวลา 15:59 น.)
-              </option>
-              <option value="YESTERDAY">ข้อมูลของเมื่อวาน</option>
-              <option value="LATEST_WITH_DATA">ข้อมูลวันล่าสุดที่มีการบันทึกในระบบ</option>
-            </select>
-          </div>
-
-          <div className="md:col-span-4">
-            <label className="block text-[11px] font-bold text-gray-700 mb-1">
-              กะเวลาที่สรุปส่ง
-            </label>
-            <select
-              value={lineAutoShift}
-              onChange={(e) => setLineAutoShift(e.target.value as 'ALL' | WorkShift)}
-              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-2.5 font-semibold text-gray-900 bg-white"
-            >
-              {WORKLOAD_SHIFTS.map((sh) => (
-                <option key={sh} value={sh}>
-                  {sh}
-                </option>
-              ))}
-              <option value="ALL">สรุปภาพรวมทุกกะ (ในเวลา + นอกเวลา)</option>
-            </select>
-          </div>
-
-          <div className="md:col-span-6">
-            <label className="block text-[11px] font-bold text-gray-700 mb-1">
-              LINE Group ID ปลายทาง (รหัสกลุ่ม C...) *
-            </label>
-            <input
-              type="text"
-              value={lineTargetId}
-              onChange={(e) => setLineTargetId(e.target.value)}
-              placeholder={DEFAULT_LINE_GROUP_ID}
-              className="w-full text-xs rounded-lg border border-gray-300 py-2 px-3 font-mono font-semibold text-gray-900 bg-white"
-            />
-            <span className="text-[10px] text-gray-500">
-              ค่าเริ่มต้นตั้งไว้ที่ <code className="bg-slate-100 px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> (กลุ่ม &quot;หัวหน้าห้องตรวจ OPD&quot; — ใช้ Push API ได้เลยไม่ต้องเปิด Webhook)
-            </span>
-          </div>
-
-          <div className="md:col-span-6">
-            <label className="block text-[11px] font-bold text-gray-700 mb-1">
-              LINE Messaging API Token Security
-            </label>
-            <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 flex items-center justify-between gap-2 text-xs">
-              <div className="flex items-center gap-2 min-w-0">
-                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span className="font-semibold text-emerald-900 truncate">
-                  {serverLineStatus?.hasServerToken && serverLineStatus.tokenVerified !== false
-                    ? 'จัดการ Token ปลอดภัยผ่านเซิร์ฟเวอร์ (.env) แล้ว'
-                    : serverLineStatus?.hasServerToken && serverLineStatus.tokenVerified === false
-                    ? 'Token บนเซิร์ฟเวอร์ถูกปฏิเสธ (401) — กรุณาอัปเดตใหม่'
-                    : lineStatusInfo?.hasToken || settings.lineChannelTokenSet
-                    ? 'จัดเก็บ Token บน Apps ScriptProperties แล้ว'
-                    : 'ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ในไฟล์ .env'}
-                </span>
+          {/* Multi-Schedule Rounds Editor */}
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>รอบเวลาในการส่งรายงานอัตโนมัติ (เวลาไทย Asia/Bangkok)</span>
+                </div>
+                <p className="text-[10.5px] text-gray-600">
+                  กำหนดได้หลายรอบ เช่น ในเวลา จ.–ศ. 15:55 น. • นอกเวลา จ.–ศ. 20:00 น. • นอกเวลา ส.–อา./นักขัตฤกษ์ 12:30 น.
+                </p>
               </div>
-              {lineStatusInfo?.hasToken && (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold shrink-0">
-                  GAS Synced
-                </span>
-              )}
+              <button
+                type="button"
+                onClick={() =>
+                  setLineSchedules((prev) => [
+                    ...prev,
+                    {
+                      id: `sch-${Date.now()}`,
+                      label: `รอบเพิ่มเติม ${prev.length + 1}`,
+                      enabled: true,
+                      time: '16:00',
+                      dayRule: 'ALL_DAYS',
+                      reportDayMode: 'TODAY',
+                      shift: 'ในเวลา 08:00-16:00',
+                      sendAsImage: lineSendAsImage,
+                    },
+                  ])
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <Plus className="w-3 h-3" />
+                <span>เพิ่มรอบเวลา</span>
+              </button>
             </div>
-            <span className="text-[10px] text-gray-500">
-              Token ถูกเก็บรักษาเฉพาะฝั่งเซิร์ฟเวอร์ (<code className="bg-slate-100 px-1 rounded">/api/line/*</code>) และ <code className="bg-slate-100 px-1 rounded">ScriptProperties</code> ไม่เปิดเผยในหน้าเว็บ
-            </span>
+
+            <div className="space-y-2">
+              {lineSchedules.map((sched, sIdx) => (
+                <div
+                  key={sched.id}
+                  className={`bg-white rounded-xl border p-2.5 grid grid-cols-1 md:grid-cols-12 gap-2 items-center ${
+                    sched.enabled ? 'border-emerald-200' : 'border-gray-200 opacity-70'
+                  }`}
+                >
+                  <div className="md:col-span-3 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={sched.enabled}
+                      onChange={(e) =>
+                        setLineSchedules((prev) =>
+                          prev.map((item, i) =>
+                            i === sIdx ? { ...item, enabled: e.target.checked } : item
+                          )
+                        )
+                      }
+                      className="w-4 h-4 rounded border-emerald-400 text-emerald-600 cursor-pointer shrink-0"
+                    />
+                    <input
+                      type="text"
+                      value={sched.label}
+                      onChange={(e) =>
+                        setLineSchedules((prev) =>
+                          prev.map((item, i) =>
+                            i === sIdx ? { ...item, label: e.target.value } : item
+                          )
+                        )
+                      }
+                      placeholder="ชื่อรอบเวลา"
+                      className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2 font-semibold text-gray-900 bg-white"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <input
+                      type="time"
+                      value={normalizeLineTimeString(sched.time, DEFAULT_LINE_AUTO_TIME)}
+                      onChange={(e) => {
+                        const val = normalizeLineTimeString(e.target.value, DEFAULT_LINE_AUTO_TIME);
+                        setLineSchedules((prev) =>
+                          prev.map((item, i) => (i === sIdx ? { ...item, time: val } : item))
+                        );
+                        if (sIdx === 0) setLineAutoTime(val);
+                      }}
+                      className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2 font-mono font-bold text-emerald-950 bg-white"
+                    />
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <select
+                      value={sched.dayRule}
+                      onChange={(e) =>
+                        setLineSchedules((prev) =>
+                          prev.map((item, i) =>
+                            i === sIdx
+                              ? { ...item, dayRule: e.target.value as LineReportDayRule }
+                              : item
+                          )
+                        )
+                      }
+                      className="w-full text-[11px] rounded-lg border border-gray-300 py-1.5 px-2 font-semibold text-gray-800 bg-white"
+                    >
+                      <option value="WORKDAYS_MON_FRI">วันราชการ (จันทร์–ศุกร์)</option>
+                      <option value="WEEKENDS_AND_HOLIDAYS">เสาร์–อาทิตย์ / นักขัตฤกษ์</option>
+                      <option value="ALL_DAYS">ทุกวัน (ไม่เว้นวันหยุด)</option>
+                    </select>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <select
+                      value={sched.shift}
+                      onChange={(e) => {
+                        const sh = e.target.value as 'ALL' | WorkShift;
+                        setLineSchedules((prev) =>
+                          prev.map((item, i) => (i === sIdx ? { ...item, shift: sh } : item))
+                        );
+                        if (sIdx === 0) setLineAutoShift(sh);
+                      }}
+                      className="w-full text-[11px] rounded-lg border border-gray-300 py-1.5 px-2 font-semibold text-gray-800 bg-white"
+                    >
+                      {WORKLOAD_SHIFTS.map((sh) => (
+                        <option key={sh} value={sh}>
+                          {sh}
+                        </option>
+                      ))}
+                      <option value="ALL">ทุกกะรวมกัน</option>
+                    </select>
+                  </div>
+
+                  <div className="md:col-span-2 flex items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleTestSendLineNow(sched)}
+                      disabled={isTestingLineSend}
+                      title={`ส่งทดสอบรอบ "${sched.label}" (${sched.time} น.) ทันที`}
+                      className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 text-[10.5px] font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span>ทดสอบ</span>
+                    </button>
+                    {lineSchedules.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLineSchedules((prev) => prev.filter((_, i) => i !== sIdx))
+                        }
+                        title="ลบรอบเวลานี้"
+                        className="p-1.5 rounded-lg text-red-600 hover:bg-red-50 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Multi-Group Target Manager */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 pt-2 border-t border-emerald-100">
+            <div className="md:col-span-7 space-y-2">
+              <label className="block text-[11px] font-bold text-gray-800">
+                กลุ่ม LINE ปลายทาง (ส่งพร้อมกันได้หลายกลุ่ม — เลือกติ๊กกลุ่มที่ต้องการส่ง) *
+              </label>
+
+              <div className="space-y-1.5">
+                {lineTargetGroups.map((grp, gIdx) => (
+                  <div
+                    key={`${grp.id}-${gIdx}`}
+                    className="flex items-center gap-2 bg-white rounded-lg border border-emerald-200/80 px-2.5 py-1.5"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={grp.enabled}
+                      onChange={(e) =>
+                        setLineTargetGroups((prev) =>
+                          prev.map((item, i) =>
+                            i === gIdx ? { ...item, enabled: e.target.checked } : item
+                          )
+                        )
+                      }
+                      className="w-4 h-4 rounded border-emerald-400 text-emerald-600 cursor-pointer shrink-0"
+                    />
+                    <input
+                      type="text"
+                      value={grp.name || ''}
+                      onChange={(e) =>
+                        setLineTargetGroups((prev) =>
+                          prev.map((item, i) =>
+                            i === gIdx ? { ...item, name: e.target.value } : item
+                          )
+                        )
+                      }
+                      placeholder="ชื่อเรียกกลุ่ม"
+                      className="w-36 sm:w-44 text-[11px] rounded border border-gray-200 px-2 py-1 font-semibold text-gray-900 bg-slate-50/70"
+                    />
+                    <input
+                      type="text"
+                      value={grp.id}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setLineTargetGroups((prev) =>
+                          prev.map((item, i) => (i === gIdx ? { ...item, id: val } : item))
+                        );
+                        if (gIdx === 0) setLineTargetId(val);
+                      }}
+                      placeholder="Group ID (C...)"
+                      className="flex-1 min-w-0 text-[11px] rounded border border-gray-200 px-2 py-1 font-mono text-gray-800 bg-white"
+                    />
+                    {lineTargetGroups.length > 1 && grp.id !== DEFAULT_LINE_GROUP_ID && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLineTargetGroups((prev) => prev.filter((_, i) => i !== gIdx))
+                        }
+                        title="นำกลุ่มนี้ออก"
+                        className="text-red-500 hover:text-red-700 p-1 cursor-pointer shrink-0"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <input
+                  type="text"
+                  value={newLineGroupName}
+                  onChange={(e) => setNewLineGroupName(e.target.value)}
+                  placeholder="ชื่อกลุ่มใหม่ (เช่น OPD All)"
+                  className="w-36 sm:w-44 text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 bg-white"
+                />
+                <input
+                  type="text"
+                  value={newLineGroupId}
+                  onChange={(e) => setNewLineGroupId(e.target.value)}
+                  placeholder="ใส่ Group ID (ขึ้นต้น C...)"
+                  className="flex-1 min-w-[160px] text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-mono bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const gid = newLineGroupId.trim();
+                    if (!gid) return;
+                    if (lineTargetGroups.some((g) => g.id.trim() === gid)) {
+                      setLineActionFeedback({
+                        type: 'info',
+                        text: `Group ID "${gid}" มีอยู่ในรายการแล้ว`,
+                      });
+                      return;
+                    }
+                    setLineTargetGroups((prev) => [
+                      ...prev,
+                      {
+                        id: gid,
+                        name: newLineGroupName.trim() || `กลุ่มที่ ${prev.length + 1}`,
+                        enabled: true,
+                      },
+                    ]);
+                    setNewLineGroupId('');
+                    setNewLineGroupName('');
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>เพิ่มกลุ่ม</span>
+                </button>
+              </div>
+              <span className="block text-[10px] text-gray-500">
+                กลุ่มหลัก: <code className="bg-slate-100 px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> (หัวหน้าห้องตรวจ OPD — อย่าลืมเชิญบอท &quot;บูบี้ ผู้ช่วย AI&quot; เข้ากลุ่มใหม่ด้วยก่อนส่ง)
+              </span>
+            </div>
+
+            <div className="md:col-span-5 space-y-2.5">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-800 mb-1">
+                  รูปแบบรายงานอัตโนมัติ (ข้อความ + ภาพตาราง .JPEG)
+                </label>
+                <label className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-white p-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={lineSendAsImage}
+                    onChange={(e) => setLineSendAsImage(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
+                  />
+                  <div className="text-xs leading-snug">
+                    <div className="font-bold text-emerald-950 flex items-center gap-1">
+                      <ImageDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      <span>ส่งรายงานตารางเป็นภาพ .JPEG เข้า LINE อัตโนมัติ</span>
+                    </div>
+                    <p className="text-[10.5px] text-gray-600 mt-0.5">
+                      สร้างภาพตารางสรุปยอดผู้ป่วย (Daily OPD Census) อัปโหลดขึ้น Google Drive และส่งภาพเข้ากลุ่ม LINE พร้อมข้อความสรุป
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  LINE Messaging API Token Security
+                </label>
+                <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span className="font-semibold text-emerald-900 truncate">
+                      {serverLineStatus?.hasServerToken && serverLineStatus.tokenVerified !== false
+                        ? 'จัดการ Token ปลอดภัยผ่านเซิร์ฟเวอร์ (.env) แล้ว'
+                        : serverLineStatus?.hasServerToken && serverLineStatus.tokenVerified === false
+                        ? 'Token บนเซิร์ฟเวอร์ถูกปฏิเสธ (401) — กรุณาอัปเดตใหม่'
+                        : lineStatusInfo?.hasToken || settings.lineChannelTokenSet
+                        ? 'จัดเก็บ Token บน Apps ScriptProperties แล้ว'
+                        : 'ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ในไฟล์ .env'}
+                    </span>
+                  </div>
+                  {lineStatusInfo?.hasToken && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold shrink-0">
+                      GAS Synced
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2897,7 +3331,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={handleTestSendLineNow}
+              onClick={() => handleTestSendLineNow()}
               disabled={isTestingLineSend}
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
             >
@@ -2906,7 +3340,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               ) : (
                 <Send className="w-4 h-4" />
               )}
-              <span>{isTestingLineSend ? 'กำลังส่ง...' : 'ทดสอบส่งเข้า LINE กลุ่มทันที'}</span>
+              <span>
+                {isTestingLineSend
+                  ? 'กำลังส่ง...'
+                  : `ทดสอบส่งเข้า LINE กลุ่มทันที${lineSendAsImage ? ' (.JPEG)' : ''}`}
+              </span>
             </button>
 
             <button
@@ -2923,7 +3361,12 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               <span>
                 {isSavingLineAuto
                   ? 'กำลังบันทึกและตั้ง Trigger...'
-                  : `บันทึกและตั้งเวลาอัตโนมัติ (${lineAutoTime || '15:59'} น.)`}
+                  : `บันทึกและตั้งเวลาอัตโนมัติ (${
+                      lineSchedules
+                        .filter((s) => s.enabled)
+                        .map((s) => `${normalizeLineTimeString(s.time, DEFAULT_LINE_AUTO_TIME)}`)
+                        .join(', ') || normalizeLineTimeString(lineAutoTime, DEFAULT_LINE_AUTO_TIME)
+                    } น.)`}
               </span>
             </button>
           </div>
@@ -2938,7 +3381,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         {showLineSetupGuide && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-2.5">
             <div className="font-bold text-slate-900">
-              วิธีแก้ปัญหา Webhook Verify (405 / 302) และขั้นตอนใช้งานส่งรายงานอัตโนมัติ 15:59 น. ให้เสถียร 100%
+              วิธีเชื่อมต่อ LINE Multi-Round + Auto .JPEG ผ่าน Google Apps Script ให้ทำงานเสถียร 100%
             </div>
             <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-[11px] leading-relaxed space-y-1">
               <div className="font-bold">
@@ -2946,41 +3389,19 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               </div>
               <div>
                 ระบบส่งรายงานเข้ากลุ่ม LINE ใช้ <span className="font-semibold">Push API (ส่งออกทางเดียว)</span>{' '}
-                โดยมี Group ID ปลายทาง (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code>)
-                และบอท <span className="font-semibold">&quot;บูบี้ ผู้ช่วย AI&quot;</span> อยู่ในกลุ่มแล้ว จึง{' '}
-                <span className="font-semibold">ไม่จำเป็นต้องเปิด Use webhook หรือใส่ Webhook URL ใน LINE Developers Console</span>{' '}
-                (การปิด <span className="font-semibold">Use webhook</span> และลบ URL ในช่อง Webhook ออก จะไม่กระทบการส่งรายงานใด ๆ ทั้งสิ้น และช่วยไม่ให้ LINE แจ้ง Error)
+                โดยรองรับการส่งหลายกลุ่มพร้อมกัน (<code className="bg-white border px-1 rounded font-mono">{DEFAULT_LINE_GROUP_ID}</code> และกลุ่มเพิ่มเติม) และรองรับการสร้างภาพ <span className="font-semibold">.jpeg</span> อัตโนมัติขึ้น Google Drive (โฟลเดอร์ <code className="bg-white border px-1 rounded font-mono">OPD_PCMC_LINE_Reports</code>)
               </div>
             </div>
-            <ol className="list-decimal list-inside space-y-2 text-[11px] leading-relaxed">
+            <ol className="list-decimal list-inside space-y-1.5 text-[11px] leading-relaxed">
               <li>
-                <span className="font-semibold text-red-800">
-                  สาเหตุที่ขึ้น 405 Method Not Allowed (เช่น ลิงก์ <code className="bg-white border px-1 rounded font-mono">*.github.io/api/line/webhook</code>):
-                </span>{' '}
-                GitHub Pages เป็นโฮสต์สำหรับไฟล์หน้าเว็บสถิต (Static HTML/JS) เท่านั้น ไม่มีเซิร์ฟเวอร์ Node.js จึง{' '}
-                <span className="font-semibold">ปฏิเสธคำขอ HTTP POST ทุกชนิดด้วย Error 405</span> — ห้ามนำโดเมน GitHub Pages ไปใส่ในช่อง Webhook URL
+                อัปเดตโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุด → กด{' '}
+                <span className="font-semibold">Deploy → New version</span> (Who has access: Anyone) และอนุญาตสิทธิ์ Google Drive (ใช้สำหรับเก็บรูป <code className="bg-white border px-1 rounded font-mono">.jpeg</code> ชั่วคราวเพื่อให้ LINE ดึงภาพแสดงผล)
               </li>
               <li>
-                <span className="font-semibold text-red-800">
-                  สาเหตุที่ขึ้น 302 Found (เช่น ลิงก์ <code className="bg-white border px-1 rounded font-mono">script.google.com/.../exec</code>):
-                </span>{' '}
-                Google Apps Script ตอบกลับทุก POST ด้วย HTTP <code className="bg-white border px-1 rounded font-mono">302 Redirect</code> เสมอ ทำให้ปุ่ม Verify ของ LINE ปฏิเสธเช่นกัน (Webhook ของ LINE ใช้ได้เฉพาะกรณีนำไฟล์เซิร์ฟเวอร์ <code className="bg-white border px-1 rounded font-mono">server.ts</code> ไป Deploy บนโฮสต์ Node.js สาธารณะที่เปิดสิทธิ์สาธารณะโดยไม่ติด Login เท่านั้น)
+                กำหนดรอบเวลาที่ต้องการในตารางด้านบน (ค่าแนะนำ: ในเวลา จ.–ศ. 15:55 น., นอกเวลา จ.–ศ. 20:00 น., วันหยุด 12:30 น.) แล้วกด <span className="font-semibold">บันทึกและตั้งเวลาอัตโนมัติ</span>
               </li>
               <li>
-                <span className="font-semibold text-emerald-900">วิธีใช้งานจริงให้เสถียร 100% (ทั้งปุ่มทดสอบส่งทันทีและส่งอัตโนมัติ 15:59 น.):</span>
-                <ul className="list-disc list-inside ml-4 mt-1 space-y-1 text-slate-700">
-                  <li>
-                    ในหน้า <span className="font-semibold">LINE Developers Console → Messaging API → Webhook settings</span>:{' '}
-                    กด <span className="font-semibold">Edit</span> เพื่อลบ URL ในช่อง Webhook ออก และปิดสวิตช์{' '}
-                    <span className="font-semibold">Use webhook</span> เป็น <span className="font-semibold">OFF</span>
-                  </li>
-                  <li>
-                    สำหรับการส่งอัตโนมัติ <span className="font-semibold">15:59 น.</span> ทุกวันผ่าน Google Cloud (แม้ปิดเบราว์เซอร์หรือเปิดจาก GitHub Pages):
-                    อัปเดตโค้ด <code className="bg-white border px-1 rounded font-mono">Code.gs</code> ล่าสุด → กด{' '}
-                    <span className="font-semibold">Deploy → New version</span> (Who has access: Anyone) → นำ URL มาวางในตั้งค่าเชื่อมต่อ Google Sheets → แล้วตั้งค่าผ่านเมนูใน Google Sheets:{' '}
-                    <code className="bg-white border px-1 rounded font-mono">🏥 ระบบ OPD รพ.ชลประทาน → ⏰ ตั้งเวลาส่งรายงานเข้า LINE อัตโนมัติ (15:59 น.)</code>
-                  </li>
-                </ul>
+                หากเปิดหน้าเว็บทิ้งไว้ตอนถึงเวลาส่ง ระบบจะเรนเดอร์ตารางเป็นภาพ <span className="font-semibold">.jpeg</span> ส่งเข้ากลุ่มอัตโนมัติทันที และหากปิดเบราว์เซอร์ไว้ Google Apps Script Trigger จะทำงานสำรองส่งข้อมูลให้ทุกวัน
               </li>
             </ol>
           </div>

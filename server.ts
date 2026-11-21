@@ -11,8 +11,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
-const DEFAULT_LINE_AUTO_TIME = '15:59';
+const DEFAULT_LINE_AUTO_TIME = '15:55';
 const DEFAULT_LINE_AUTO_SHIFT = 'ในเวลา 08:00-16:00';
+
+interface ServerLineSchedule {
+  id: string;
+  label?: string;
+  enabled: boolean;
+  time: string;
+  dayRule: 'ALL_DAYS' | 'WORKDAYS_MON_FRI' | 'WEEKENDS_AND_HOLIDAYS';
+  reportDayMode: 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
+  shift: string;
+  sendAsImage?: boolean;
+}
+
+interface ServerLineTargetGroup {
+  id: string;
+  name?: string;
+  enabled: boolean;
+}
 
 interface LineServerAutomationState {
   enabled: boolean;
@@ -20,11 +37,14 @@ interface LineServerAutomationState {
   reportDayMode: 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
   shift: string;
   targetId: string;
+  targetGroups: ServerLineTargetGroup[];
+  schedules: ServerLineSchedule[];
+  sendAsImage: boolean;
   gasUrl: string;
   gasAdminPin: string;
   lastSentAt: string;
   lastStatus: string;
-  lastTriggeredBangkokDay: string;
+  lastTriggeredBangkokKeys: Record<string, boolean>;
   detectedGroupId: string;
   detectedGroupName: string;
 }
@@ -46,11 +66,51 @@ const serverLineState: LineServerAutomationState = {
   reportDayMode: 'TODAY',
   shift: DEFAULT_LINE_AUTO_SHIFT,
   targetId: (process.env.LINE_GROUP_ID || DEFAULT_LINE_GROUP_ID).trim(),
+  targetGroups: [
+    {
+      id: (process.env.LINE_GROUP_ID || DEFAULT_LINE_GROUP_ID).trim(),
+      name: 'หัวหน้าห้องตรวจ OPD',
+      enabled: true,
+    },
+  ],
+  schedules: [
+    {
+      id: 'sch-regular',
+      label: 'ในเวลาราชการ (จันทร์–ศุกร์)',
+      enabled: true,
+      time: '15:55',
+      dayRule: 'WORKDAYS_MON_FRI',
+      reportDayMode: 'TODAY',
+      shift: 'ในเวลา 08:00-16:00',
+      sendAsImage: true,
+    },
+    {
+      id: 'sch-ot-weekday',
+      label: 'นอกเวลา (จันทร์–ศุกร์)',
+      enabled: true,
+      time: '20:00',
+      dayRule: 'WORKDAYS_MON_FRI',
+      reportDayMode: 'TODAY',
+      shift: 'นอกเวลาเย็น 16:00-20:00',
+      sendAsImage: true,
+    },
+    {
+      id: 'sch-ot-holiday',
+      label: 'นอกเวลา (เสาร์–อาทิตย์ / นักขัตฤกษ์)',
+      enabled: true,
+      time: '12:30',
+      dayRule: 'WEEKENDS_AND_HOLIDAYS',
+      reportDayMode: 'TODAY',
+      shift: 'นอกเวลาวันหยุด 08:00-12:00',
+      sendAsImage: true,
+    },
+  ],
+  sendAsImage: true,
   gasUrl: '',
   gasAdminPin: (process.env.ADMIN_PIN || '').trim(),
   lastSentAt: '',
   lastStatus: '',
-  lastTriggeredBangkokDay: '',
+  lastTriggeredBangkokKeys: {},
   detectedGroupId: '',
   detectedGroupName: '',
 };
@@ -205,73 +265,136 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
   return result;
 }
 
-async function pushLineTextMessage(
-  targetId: string,
-  text: string
-): Promise<{ ok: boolean; statusText: string; sentAt: string; error?: string }> {
+function normalizeTimeServer(raw?: string, fallback = DEFAULT_LINE_AUTO_TIME): string {
+  const s = String(raw || '').trim().replace(/^'+/, '');
+  if (!s) return fallback;
+  const m = s.match(/^(\d{1,2}):(\d{1,2})(?::\d{1,2})?$/);
+  if (m) {
+    const hh = Math.min(23, Math.max(0, Number(m[1])));
+    const mm = Math.min(59, Math.max(0, Number(m[2])));
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  return fallback;
+}
+
+const THAI_FIXED_HOLIDAYS_MD = new Set([
+  '01-01', '04-06', '04-13', '04-14', '04-15', '05-04', '06-03',
+  '07-28', '08-12', '10-13', '10-23', '12-05', '12-10', '12-31',
+]);
+const THAI_LUNAR_HOLIDAYS_YMD = new Set([
+  '2025-02-12', '2025-05-09', '2025-05-11', '2025-07-10', '2025-07-11',
+  '2026-03-03', '2026-05-13', '2026-05-31', '2026-07-29', '2026-07-30',
+  '2027-02-21', '2027-05-20', '2027-07-18', '2027-07-19',
+  '2028-02-10', '2028-05-08', '2028-07-06', '2028-07-07',
+]);
+
+function matchesDayRuleServer(
+  ymd: string,
+  dayRule: 'ALL_DAYS' | 'WORKDAYS_MON_FRI' | 'WEEKENDS_AND_HOLIDAYS'
+): boolean {
+  if (dayRule === 'ALL_DAYS') return true;
+  const parts = ymd.split('-').map(Number);
+  if (parts.length !== 3) return true;
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const dow = dt.getUTCDay();
+  const md = `${String(parts[1]).padStart(2, '0')}-${String(parts[2]).padStart(2, '0')}`;
+  const isWeekendOrHol =
+    dow === 0 || dow === 6 || THAI_FIXED_HOLIDAYS_MD.has(md) || THAI_LUNAR_HOLIDAYS_YMD.has(ymd);
+  return dayRule === 'WEEKENDS_AND_HOLIDAYS' ? isWeekendOrHol : !isWeekendOrHol;
+}
+
+async function pushLineMessages(params: {
+  targetIds: string[];
+  text?: string;
+  imageUrl?: string;
+  previewImageUrl?: string;
+}): Promise<{ ok: boolean; statusText: string; sentAt: string; sentCount: number; error?: string }> {
   const token = getLineAccessToken();
-  const to = (targetId || getDefaultGroupId()).trim();
   const sentAt = getBangkokDateParts().timestamp;
+  const targets = Array.from(
+    new Set(params.targetIds.map((id) => String(id || '').trim()).filter(Boolean))
+  );
+  if (targets.length === 0) targets.push(getDefaultGroupId());
 
   if (!token) {
     const err = 'เซิร์ฟเวอร์ยังไม่มี LINE_CHANNEL_ACCESS_TOKEN';
     serverLineState.lastSentAt = sentAt;
     serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${err}`;
-    return { ok: false, statusText: serverLineState.lastStatus, sentAt, error: err };
-  }
-  if (!to) {
-    const err = 'ยังไม่ได้ระบุ LINE Group ID';
-    serverLineState.lastSentAt = sentAt;
-    serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${err}`;
-    return { ok: false, statusText: serverLineState.lastStatus, sentAt, error: err };
-  }
-  const cleanText = String(text || '').trim();
-  if (!cleanText) {
-    return { ok: false, statusText: 'ไม่มีข้อความสำหรับส่ง', sentAt, error: 'ข้อความว่างเปล่า' };
+    return { ok: false, statusText: serverLineState.lastStatus, sentAt, sentCount: 0, error: err };
   }
 
-  const finalMessage =
-    cleanText.length > 4950 ? `${cleanText.slice(0, 4900)}\n...(ข้อความถูกย่อตามขีดจำกัด LINE)` : cleanText;
-
-  try {
-    const res = await fetch('https://api.line.me/v2/bot/message/push', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        to,
-        messages: [{ type: 'text', text: finalMessage }],
-      }),
+  const messages: Array<Record<string, unknown>> = [];
+  if (params.imageUrl && /^https:\/\//i.test(params.imageUrl.trim())) {
+    const cleanImg = params.imageUrl.trim();
+    const cleanPrev =
+      params.previewImageUrl && /^https:\/\//i.test(params.previewImageUrl.trim())
+        ? params.previewImageUrl.trim()
+        : cleanImg;
+    messages.push({
+      type: 'image',
+      originalContentUrl: cleanImg,
+      previewImageUrl: cleanPrev,
     });
-
-    if (res.ok) {
-      const okStatus = 'ส่งรายงานเข้ากลุ่ม LINE ผ่าน Server Proxy สำเร็จ';
-      serverLineState.lastSentAt = sentAt;
-      serverLineState.lastStatus = okStatus;
-      return { ok: true, statusText: okStatus, sentAt };
-    }
-
-    const errText = await res.text();
-    const errMsg =
-      res.status === 401
-        ? 'LINE API HTTP 401: Channel Access Token หมดอายุหรือถูกกด Reissue ใหม่ใน LINE Developers Console กรุณาอัปเดต Token ล่าสุดในเซิร์ฟเวอร์ (.env) และ Apps Script'
-        : `LINE API HTTP ${res.status}: ${errText}`;
-    serverLineState.lastSentAt = sentAt;
-    serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${errMsg}`;
-    return { ok: false, statusText: serverLineState.lastStatus, sentAt, error: errMsg };
-  } catch (err) {
-    const errMsg = String(err instanceof Error ? err.message : err);
-    serverLineState.lastSentAt = sentAt;
-    serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${errMsg}`;
-    return { ok: false, statusText: serverLineState.lastStatus, sentAt, error: errMsg };
   }
+  const cleanText = String(params.text || '').trim();
+  if (cleanText) {
+    const finalMessage =
+      cleanText.length > 4950
+        ? `${cleanText.slice(0, 4900)}\n...(ข้อความถูกย่อตามขีดจำกัด LINE)`
+        : cleanText;
+    messages.push({ type: 'text', text: finalMessage });
+  }
+  if (messages.length === 0) {
+    return { ok: false, statusText: 'ไม่มีข้อความหรือรูปภาพสำหรับส่ง', sentAt, sentCount: 0, error: 'ไม่มีข้อมูลส่ง' };
+  }
+
+  let successCount = 0;
+  const errors: string[] = [];
+
+  for (const to of targets) {
+    try {
+      const res = await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ to, messages }),
+      });
+      if (res.ok) {
+        successCount += 1;
+      } else {
+        const errText = await res.text();
+        const errMsg =
+          res.status === 401
+            ? 'LINE API HTTP 401: Channel Access Token หมดอายุหรือถูกกด Reissue ใหม่ใน LINE Developers Console กรุณาอัปเดต Token ล่าสุดในเซิร์ฟเวอร์ (.env) และ Apps Script'
+            : `LINE API HTTP ${res.status} (${to}): ${errText}`;
+        errors.push(errMsg);
+      }
+    } catch (err) {
+      errors.push(`${to}: ${String(err instanceof Error ? err.message : err)}`);
+    }
+  }
+
+  serverLineState.lastSentAt = sentAt;
+  if (successCount > 0 && errors.length === 0) {
+    const okStatus = `ส่งรายงานเข้า ${successCount} กลุ่ม LINE ผ่าน Server Proxy สำเร็จ`;
+    serverLineState.lastStatus = okStatus;
+    return { ok: true, statusText: okStatus, sentAt, sentCount: successCount };
+  }
+  if (successCount > 0) {
+    const partial = `ส่งสำเร็จ ${successCount}/${targets.length} กลุ่ม (${errors[0]})`;
+    serverLineState.lastStatus = partial;
+    return { ok: true, statusText: partial, sentAt, sentCount: successCount, error: errors.join('; ') };
+  }
+  const errMsg = errors[0] || 'ส่งเข้า LINE ไม่สำเร็จ';
+  serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${errMsg}`;
+  return { ok: false, statusText: serverLineState.lastStatus, sentAt, sentCount: 0, error: errMsg };
 }
 
 async function createAppServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '8mb' }));
 
   app.get('/api/line/status', async (req: Request, res: Response) => {
     const requestedTargetId =
@@ -400,15 +523,31 @@ async function createAppServer(): Promise<void> {
   });
 
   app.post('/api/line/send', async (req: Request, res: Response) => {
-    const body = (req.body || {}) as { targetId?: string; message?: string };
-    const targetId = String(body.targetId || serverLineState.targetId || getDefaultGroupId()).trim();
-    const result = await pushLineTextMessage(targetId, String(body.message || ''));
-    const meta = await fetchLineMetadata(targetId, false);
+    const body = (req.body || {}) as {
+      targetId?: string;
+      targetIds?: string[];
+      message?: string;
+      imageUrl?: string;
+      previewImageUrl?: string;
+    };
+    const primaryTarget = String(body.targetId || serverLineState.targetId || getDefaultGroupId()).trim();
+    const targetList =
+      Array.isArray(body.targetIds) && body.targetIds.length > 0
+        ? body.targetIds.map((t) => String(t || '').trim()).filter(Boolean)
+        : [primaryTarget];
+    const result = await pushLineMessages({
+      targetIds: targetList,
+      text: String(body.message || ''),
+      imageUrl: body.imageUrl,
+      previewImageUrl: body.previewImageUrl,
+    });
+    const meta = await fetchLineMetadata(targetList[0] || primaryTarget, false);
 
     res.status(result.ok ? 200 : 400).json({
       ok: result.ok,
-      targetId,
+      targetId: targetList[0] || primaryTarget,
       groupName: meta.groupName,
+      sentCount: result.sentCount,
       statusText: result.statusText,
       sentAt: result.sentAt,
       error: result.error,
@@ -422,15 +561,15 @@ async function createAppServer(): Promise<void> {
       reportDayMode?: 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
       shift?: string;
       targetId?: string;
+      targetGroups?: ServerLineTargetGroup[];
+      schedules?: ServerLineSchedule[];
+      sendAsImage?: boolean;
       gasUrl?: string;
       adminPin?: string;
     };
 
     const enabled = Boolean(body.enabled);
-    const timeMatch = String(body.time || DEFAULT_LINE_AUTO_TIME)
-      .trim()
-      .match(/^(\d{2}):(\d{2})$/);
-    const cleanTime = timeMatch ? `${timeMatch[1]}:${timeMatch[2]}` : DEFAULT_LINE_AUTO_TIME;
+    const cleanTime = normalizeTimeServer(body.time, DEFAULT_LINE_AUTO_TIME);
     const reportDayMode =
       body.reportDayMode === 'YESTERDAY' || body.reportDayMode === 'LATEST_WITH_DATA'
         ? body.reportDayMode
@@ -445,6 +584,18 @@ async function createAppServer(): Promise<void> {
     serverLineState.reportDayMode = reportDayMode;
     serverLineState.shift = shift;
     serverLineState.targetId = targetId;
+    if (Array.isArray(body.targetGroups) && body.targetGroups.length > 0) {
+      serverLineState.targetGroups = body.targetGroups;
+    }
+    if (Array.isArray(body.schedules) && body.schedules.length > 0) {
+      serverLineState.schedules = body.schedules.map((s) => ({
+        ...s,
+        time: normalizeTimeServer(s.time, DEFAULT_LINE_AUTO_TIME),
+      }));
+    }
+    if (typeof body.sendAsImage === 'boolean') {
+      serverLineState.sendAsImage = body.sendAsImage;
+    }
     if (gasUrl) serverLineState.gasUrl = gasUrl;
     if (adminPin) serverLineState.gasAdminPin = adminPin;
 
@@ -469,6 +620,9 @@ async function createAppServer(): Promise<void> {
               reportDayMode,
               shift,
               targetId,
+              targetGroups: serverLineState.targetGroups,
+              schedules: serverLineState.schedules,
+              sendAsImage: serverLineState.sendAsImage,
               ...(token ? { channelAccessToken: token } : {}),
             },
           }),
@@ -508,35 +662,68 @@ async function createAppServer(): Promise<void> {
     });
   });
 
-  // In-process Bangkok time scheduler backup (runs when Node server is active)
+  // In-process Bangkok time multi-schedule backup (runs when Node server is active)
   setInterval(async () => {
     if (!serverLineState.enabled || !serverLineState.gasUrl) return;
     const token = getLineAccessToken();
     if (!token) return;
     const bkk = getBangkokDateParts();
-    if (bkk.hm !== serverLineState.time) return;
-    if (serverLineState.lastTriggeredBangkokDay === bkk.ymd) return;
-    serverLineState.lastTriggeredBangkokDay = bkk.ymd;
-
     const pin = (serverLineState.gasAdminPin || process.env.ADMIN_PIN || '').trim();
     if (!pin) return;
-    try {
-      await fetch(serverLineState.gasUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'sendLineReportNow',
-          adminPin: pin,
-          payload: {
-            targetId: serverLineState.targetId || getDefaultGroupId(),
-            reportDayMode: serverLineState.reportDayMode,
-            shift: serverLineState.shift,
-            channelAccessToken: token,
-          },
-        }),
-      });
-    } catch {
-      // Best-effort backup trigger; primary 24/7 cron runs inside Google Apps Script
+
+    const activeSchedules =
+      serverLineState.schedules && serverLineState.schedules.length > 0
+        ? serverLineState.schedules.filter((s) => s.enabled)
+        : [
+            {
+              id: 'default',
+              enabled: true,
+              time: serverLineState.time,
+              dayRule: 'ALL_DAYS' as const,
+              reportDayMode: serverLineState.reportDayMode,
+              shift: serverLineState.shift,
+              sendAsImage: serverLineState.sendAsImage,
+            },
+          ];
+
+    const targetIds = Array.from(
+      new Set(
+        [
+          ...serverLineState.targetGroups.filter((g) => g.enabled).map((g) => g.id),
+          serverLineState.targetId || getDefaultGroupId(),
+        ]
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      )
+    );
+
+    for (const sch of activeSchedules) {
+      if (bkk.hm !== sch.time) continue;
+      if (!matchesDayRuleServer(bkk.ymd, sch.dayRule || 'ALL_DAYS')) continue;
+      const key = `${sch.id}|${bkk.ymd}`;
+      if (serverLineState.lastTriggeredBangkokKeys[key]) continue;
+      serverLineState.lastTriggeredBangkokKeys[key] = true;
+
+      try {
+        await fetch(serverLineState.gasUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'sendLineReportNow',
+            adminPin: pin,
+            payload: {
+              targetId: targetIds[0] || getDefaultGroupId(),
+              targetIds,
+              reportDayMode: sch.reportDayMode,
+              shift: sch.shift,
+              scheduleId: sch.id,
+              channelAccessToken: token,
+            },
+          }),
+        });
+      } catch {
+        // Best-effort backup trigger; primary 24/7 cron runs inside Google Apps Script
+      }
     }
   }, 30_000);
 

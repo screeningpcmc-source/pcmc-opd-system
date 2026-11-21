@@ -1,9 +1,6 @@
 import { toJpeg } from 'html-to-image';
 
-export async function exportElementAsJpeg(
-  element: HTMLElement,
-  filename: string
-): Promise<void> {
+export async function captureElementAsJpegDataUrl(element: HTMLElement): Promise<string> {
   const scrollContainers: Array<{ el: HTMLElement; prevOverflowX: string; prevOverflow: string }> = [];
   const collectScrollable = (el: HTMLElement) => {
     const cs = window.getComputedStyle(el);
@@ -31,7 +28,7 @@ export async function exportElementAsJpeg(
   const baseOptions = {
     backgroundColor: '#ffffff',
     pixelRatio: 2,
-    quality: 0.95,
+    quality: 0.94,
     width: captureWidth,
     height: captureHeight,
     style: {
@@ -46,13 +43,11 @@ export async function exportElementAsJpeg(
     },
   };
 
-  let dataUrl: string;
   try {
     try {
-      dataUrl = await toJpeg(element, baseOptions);
+      return await toJpeg(element, baseOptions);
     } catch {
-      // Fallback skipping remote Google Fonts CSS if CORS blocks font inlining
-      dataUrl = await toJpeg(element, {
+      return await toJpeg(element, {
         ...baseOptions,
         skipFonts: true,
       });
@@ -63,7 +58,13 @@ export async function exportElementAsJpeg(
       el.style.overflow = prevOverflow;
     });
   }
+}
 
+export async function exportElementAsJpeg(
+  element: HTMLElement,
+  filename: string
+): Promise<void> {
+  const dataUrl = await captureElementAsJpegDataUrl(element);
   const link = document.createElement('a');
   link.download = filename.endsWith('.jpeg') || filename.endsWith('.jpg') ? filename : `${filename}.jpeg`;
   link.href = dataUrl;
