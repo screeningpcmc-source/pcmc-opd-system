@@ -31,6 +31,8 @@ interface ServerLineTargetGroup {
   enabled: boolean;
 }
 
+type ServerLineSendFormat = 'BOTH' | 'IMAGE_ONLY' | 'TEXT_ONLY';
+
 interface LineServerAutomationState {
   enabled: boolean;
   time: string;
@@ -40,6 +42,7 @@ interface LineServerAutomationState {
   targetGroups: ServerLineTargetGroup[];
   schedules: ServerLineSchedule[];
   sendAsImage: boolean;
+  sendFormat: ServerLineSendFormat;
   gasUrl: string;
   gasAdminPin: string;
   lastSentAt: string;
@@ -106,6 +109,7 @@ const serverLineState: LineServerAutomationState = {
     },
   ],
   sendAsImage: true,
+  sendFormat: 'BOTH',
   gasUrl: '',
   gasAdminPin: (process.env.ADMIN_PIN || '').trim(),
   lastSentAt: '',
@@ -303,11 +307,21 @@ function matchesDayRuleServer(
   return dayRule === 'WEEKENDS_AND_HOLIDAYS' ? isWeekendOrHol : !isWeekendOrHol;
 }
 
+function normalizeSendFormatServer(raw?: string, legacySendAsImage?: boolean): ServerLineSendFormat {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === 'IMAGE_ONLY' || s === 'IMAGE') return 'IMAGE_ONLY';
+  if (s === 'TEXT_ONLY' || s === 'TEXT') return 'TEXT_ONLY';
+  if (s === 'BOTH') return 'BOTH';
+  if (legacySendAsImage === false) return 'TEXT_ONLY';
+  return 'BOTH';
+}
+
 async function pushLineMessages(params: {
   targetIds: string[];
   text?: string;
   imageUrl?: string;
   previewImageUrl?: string;
+  sendFormat?: ServerLineSendFormat;
 }): Promise<{ ok: boolean; statusText: string; sentAt: string; sentCount: number; error?: string }> {
   const token = getLineAccessToken();
   const sentAt = getBangkokDateParts().timestamp;
@@ -323,8 +337,9 @@ async function pushLineMessages(params: {
     return { ok: false, statusText: serverLineState.lastStatus, sentAt, sentCount: 0, error: err };
   }
 
+  const fmt = normalizeSendFormatServer(params.sendFormat, true);
   const messages: Array<Record<string, unknown>> = [];
-  if (params.imageUrl && /^https:\/\//i.test(params.imageUrl.trim())) {
+  if (fmt !== 'TEXT_ONLY' && params.imageUrl && /^https:\/\//i.test(params.imageUrl.trim())) {
     const cleanImg = params.imageUrl.trim();
     const cleanPrev =
       params.previewImageUrl && /^https:\/\//i.test(params.previewImageUrl.trim())
@@ -337,12 +352,21 @@ async function pushLineMessages(params: {
     });
   }
   const cleanText = String(params.text || '').trim();
-  if (cleanText) {
+  if (fmt !== 'IMAGE_ONLY' && cleanText) {
     const finalMessage =
       cleanText.length > 4950
         ? `${cleanText.slice(0, 4900)}\n...(ข้อความถูกย่อตามขีดจำกัด LINE)`
         : cleanText;
     messages.push({ type: 'text', text: finalMessage });
+  }
+  if (fmt === 'IMAGE_ONLY' && messages.length === 0) {
+    return {
+      ok: false,
+      statusText: 'ไม่สามารถอัปโหลดรูปภาพ .jpeg ได้',
+      sentAt,
+      sentCount: 0,
+      error: 'เลือกส่งเฉพาะรูปภาพ (.jpeg) แต่ไม่สามารถสร้าง/อัปโหลดภาพขึ้น Google Drive ได้ กรุณาตรวจสอบการเชื่อมต่อและ Deploy Code.gs ล่าสุด',
+    };
   }
   if (messages.length === 0) {
     return { ok: false, statusText: 'ไม่มีข้อความหรือรูปภาพสำหรับส่ง', sentAt, sentCount: 0, error: 'ไม่มีข้อมูลส่ง' };
@@ -529,17 +553,20 @@ async function createAppServer(): Promise<void> {
       message?: string;
       imageUrl?: string;
       previewImageUrl?: string;
+      sendFormat?: string;
     };
     const primaryTarget = String(body.targetId || serverLineState.targetId || getDefaultGroupId()).trim();
     const targetList =
       Array.isArray(body.targetIds) && body.targetIds.length > 0
         ? body.targetIds.map((t) => String(t || '').trim()).filter(Boolean)
         : [primaryTarget];
+    const resolvedFmt = normalizeSendFormatServer(body.sendFormat, body.imageUrl ? true : undefined);
     const result = await pushLineMessages({
       targetIds: targetList,
       text: String(body.message || ''),
       imageUrl: body.imageUrl,
       previewImageUrl: body.previewImageUrl,
+      sendFormat: resolvedFmt,
     });
     const meta = await fetchLineMetadata(targetList[0] || primaryTarget, false);
 
@@ -564,6 +591,7 @@ async function createAppServer(): Promise<void> {
       targetGroups?: ServerLineTargetGroup[];
       schedules?: ServerLineSchedule[];
       sendAsImage?: boolean;
+      sendFormat?: string;
       gasUrl?: string;
       adminPin?: string;
     };
@@ -593,9 +621,9 @@ async function createAppServer(): Promise<void> {
         time: normalizeTimeServer(s.time, DEFAULT_LINE_AUTO_TIME),
       }));
     }
-    if (typeof body.sendAsImage === 'boolean') {
-      serverLineState.sendAsImage = body.sendAsImage;
-    }
+    const resolvedSendFormat = normalizeSendFormatServer(body.sendFormat, body.sendAsImage);
+    serverLineState.sendFormat = resolvedSendFormat;
+    serverLineState.sendAsImage = resolvedSendFormat !== 'TEXT_ONLY';
     if (gasUrl) serverLineState.gasUrl = gasUrl;
     if (adminPin) serverLineState.gasAdminPin = adminPin;
 
@@ -623,6 +651,7 @@ async function createAppServer(): Promise<void> {
               targetGroups: serverLineState.targetGroups,
               schedules: serverLineState.schedules,
               sendAsImage: serverLineState.sendAsImage,
+              sendFormat: serverLineState.sendFormat,
               ...(token ? { channelAccessToken: token } : {}),
             },
           }),

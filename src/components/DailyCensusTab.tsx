@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   DailyWorkload,
   StaffMember,
@@ -17,6 +17,9 @@ import {
   isReferralWorkload,
   normalizeReferralData,
   SystemSettings,
+  CustomHoliday,
+  LineSendFormat,
+  resolveLineSendFormat,
   isDailyWagePosition,
   formatPositionLabel,
   isOffDutyWorkload,
@@ -26,6 +29,7 @@ import {
   OFF_DUTY_STAFF_REASON_PRESETS,
 } from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
+import { isWeekendOrThaiHoliday } from '../utils/thaiHolidays';
 import { buildDailyCensusLineMessage } from '../utils/lineReport';
 import { exportElementAsJpeg, captureElementAsJpegDataUrl } from '../utils/exportImage';
 import { ThaiDateInput } from './ThaiDateInput';
@@ -68,8 +72,17 @@ interface DailyCensusTabProps {
     message: string;
     imageDataUrl?: string;
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   }) => Promise<{ ok: boolean; error?: string }>;
 }
+
+const getDefaultShiftForCensusDate = (
+  isoDate: string,
+  customHolidays: CustomHoliday[] = []
+): WorkShift =>
+  isWeekendOrThaiHoliday(isoDate, customHolidays)
+    ? 'นอกเวลาวันหยุด 08:00-12:00'
+    : 'ในเวลา 08:00-16:00';
 
 interface PremiumCensusGroup {
   key: string;
@@ -105,10 +118,19 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   const todayStr = getLocalTodayIso();
 
   const [date, setDate] = useState<string>(todayStr);
-  const [shiftFilter, setShiftFilter] = useState<string>('ALL');
+  const [shiftFilter, setShiftFilter] = useState<string>(() =>
+    getDefaultShiftForCensusDate(todayStr, settings?.customHolidays || [])
+  );
+  const [lineSendFormat, setLineSendFormat] = useState<LineSendFormat>(() =>
+    resolveLineSendFormat(settings?.lineSendFormat, settings?.lineSendAsImage)
+  );
   const [copied, setCopied] = useState<boolean>(false);
   const [isSendingLine, setIsSendingLine] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
+
+  useEffect(() => {
+    setLineSendFormat(resolveLineSendFormat(settings?.lineSendFormat, settings?.lineSendAsImage));
+  }, [settings?.lineSendFormat, settings?.lineSendAsImage]);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
   const [adminAddOffDutyStaffId, setAdminAddOffDutyStaffId] = useState<string>('');
   const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
@@ -442,7 +464,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
     if (!onSendLineReportNow || isSendingLine) return;
     setIsSendingLine(true);
     try {
-      const wantImage = settings?.lineSendAsImage ?? true;
+      const wantImage = lineSendFormat !== 'TEXT_ONLY';
       let imageDataUrl: string | undefined;
       if (wantImage && reportSheetRef.current) {
         try {
@@ -457,6 +479,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
         message: currentLineMessage,
         imageDataUrl,
         sendAsImage: wantImage,
+        sendFormat: lineSendFormat,
       });
     } finally {
       setIsSendingLine(false);
@@ -492,30 +515,48 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <span>{copied ? 'คัดลอกข้อความแล้ว!' : 'คัดลอกสรุปส่ง LINE'}</span>
           </button>
           {isAdmin && onSendLineReportNow && (
-            <button
-              type="button"
-              onClick={handleSendLineNowClick}
-              disabled={isSendingLine}
-              title={`ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้ากลุ่ม LINE (${
-                (settings?.lineTargetGroups || []).filter((g) => g.enabled).length > 1
-                  ? `${(settings?.lineTargetGroups || []).filter((g) => g.enabled).length} กลุ่ม`
-                  : settings?.lineTargetId || 'กลุ่มหลัก OPD'
-              }) ทันที`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white rounded-lg shadow-xs transition-colors cursor-pointer"
-            >
-              {isSendingLine ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Send className="w-3.5 h-3.5" />
-              )}
-              <span>
-                {isSendingLine
-                  ? 'กำลังสร้างภาพและส่ง...'
-                  : settings?.lineSendAsImage === false
-                  ? 'ส่งเข้า LINE กลุ่มทันที'
-                  : 'ส่งเข้า LINE กลุ่มทันที (.JPEG)'}
-              </span>
-            </button>
+            <div className="inline-flex items-center rounded-lg border border-emerald-600 bg-white overflow-hidden shadow-xs">
+              <select
+                value={lineSendFormat}
+                onChange={(e) => setLineSendFormat(e.target.value as LineSendFormat)}
+                disabled={isSendingLine}
+                title="เลือกรูปแบบรายงานที่ส่งเข้ากลุ่ม LINE"
+                aria-label="รูปแบบส่ง LINE"
+                className="text-[11px] font-semibold text-emerald-900 bg-emerald-50 border-r border-emerald-200 py-1.5 pl-2 pr-1.5 outline-none cursor-pointer disabled:opacity-60"
+              >
+                <option value="BOTH">ภาพ + ข้อความ</option>
+                <option value="IMAGE_ONLY">เฉพาะภาพ .JPEG</option>
+                <option value="TEXT_ONLY">เฉพาะข้อความ</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleSendLineNowClick}
+                disabled={isSendingLine}
+                title={`ส่งรายงานวันที่ ${formatThaiShortDate(date)} เข้ากลุ่ม LINE (${
+                  (settings?.lineTargetGroups || []).filter((g) => g.enabled).length > 1
+                    ? `${(settings?.lineTargetGroups || []).filter((g) => g.enabled).length} กลุ่ม`
+                    : settings?.lineTargetId || 'กลุ่มหลัก OPD'
+                }) ทันที`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white transition-colors cursor-pointer"
+              >
+                {isSendingLine ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {isSendingLine
+                    ? lineSendFormat === 'TEXT_ONLY'
+                      ? 'กำลังส่งข้อความ...'
+                      : 'กำลังสร้างภาพและส่ง...'
+                    : lineSendFormat === 'IMAGE_ONLY'
+                    ? 'ส่ง LINE (เฉพาะภาพ .JPEG)'
+                    : lineSendFormat === 'TEXT_ONLY'
+                    ? 'ส่ง LINE (เฉพาะข้อความ)'
+                    : 'ส่ง LINE (ภาพ + ข้อความ)'}
+                </span>
+              </button>
+            </div>
           )}
           <button
             type="button"
@@ -553,7 +594,10 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
             <label className="text-xs font-bold text-gray-700 whitespace-nowrap">วันที่ (พ.ศ.):</label>
             <ThaiDateInput
               value={date}
-              onChange={setDate}
+              onChange={(newDate) => {
+                setDate(newDate);
+                setShiftFilter(getDefaultShiftForCensusDate(newDate, settings?.customHolidays || []));
+              }}
               className="w-40"
               selectClassName="w-full text-xs rounded-lg border border-gray-300 py-1.5 pl-2.5 pr-8 bg-white font-medium text-gray-900 outline-none focus:border-blue-500"
             />

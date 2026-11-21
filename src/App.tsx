@@ -40,6 +40,8 @@ import {
   LineAutoReportDayMode,
   LineTargetGroup,
   LineReportSchedule,
+  LineSendFormat,
+  resolveLineSendFormat,
   normalizeLineTimeString,
   isOffDutyWorkload,
   getWorkloadOffDutyReason,
@@ -2563,6 +2565,7 @@ export default function App() {
     targetGroups?: LineTargetGroup[];
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   }): Promise<{
     ok: boolean;
     error?: string;
@@ -2606,10 +2609,12 @@ export default function App() {
       config.time || cleanSchedules[0]?.time || DEFAULT_LINE_AUTO_TIME,
       DEFAULT_LINE_AUTO_TIME
     );
-    const resolvedSendAsImage =
-      typeof config.sendAsImage === 'boolean'
-        ? config.sendAsImage
-        : baseDb.settings.lineSendAsImage ?? true;
+    const resolvedSendFormat: LineSendFormat = config.sendFormat
+      ? resolveLineSendFormat(config.sendFormat, config.sendAsImage)
+      : typeof config.sendAsImage === 'boolean'
+      ? resolveLineSendFormat(undefined, config.sendAsImage)
+      : resolveLineSendFormat(baseDb.settings.lineSendFormat, baseDb.settings.lineSendAsImage);
+    const resolvedSendAsImage = resolvedSendFormat !== 'TEXT_ONLY';
 
     const dirtyVer = markSettingsDirty();
     const optimisticSettings: SystemSettings = {
@@ -2622,6 +2627,7 @@ export default function App() {
       lineTargetGroups: cleanTargetGroups,
       lineSchedules: cleanSchedules,
       lineSendAsImage: resolvedSendAsImage,
+      lineSendFormat: resolvedSendFormat,
     };
     const optimisticDb: AppDatabase = { ...baseDb, settings: optimisticSettings };
     dbRef.current = optimisticDb;
@@ -2637,6 +2643,7 @@ export default function App() {
       targetGroups: cleanTargetGroups,
       schedules: cleanSchedules,
       sendAsImage: resolvedSendAsImage,
+      sendFormat: resolvedSendFormat,
       ...(gasUrl ? { gasUrl } : {}),
       ...(adminPin ? { adminPin } : {}),
     });
@@ -2679,6 +2686,7 @@ export default function App() {
         lineTargetGroups: cleanTargetGroups,
         lineSchedules: cleanSchedules,
         lineSendAsImage: resolvedSendAsImage,
+        lineSendFormat: resolvedSendFormat,
         lineChannelTokenSet: Boolean(lineAutomation.hasToken || proxyRes.hasServerToken),
         ...(proxyRes.groupName ? { lineDetectedGroupName: proxyRes.groupName } : {}),
       };
@@ -2720,6 +2728,7 @@ export default function App() {
         targetGroups: cleanTargetGroups,
         schedules: cleanSchedules,
         sendAsImage: resolvedSendAsImage,
+        sendFormat: resolvedSendFormat,
       },
       db: optimisticDb,
       expectedDirtyVersion: dirtyVer,
@@ -2741,6 +2750,7 @@ export default function App() {
         lineTargetGroups: cleanTargetGroups,
         lineSchedules: cleanSchedules,
         lineSendAsImage: resolvedSendAsImage,
+        lineSendFormat: resolvedSendFormat,
         lineChannelTokenSet:
           res.lineAutomation?.hasToken ?? Boolean(res.syncedDb.settings.lineChannelTokenSet),
       };
@@ -2768,6 +2778,7 @@ export default function App() {
     message?: string;
     imageDataUrl?: string;
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   }): Promise<{ ok: boolean; error?: string }> => {
     if (!isAdmin) {
       const err = 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น';
@@ -2810,7 +2821,12 @@ export default function App() {
         includeClinicBreakdown: true,
       });
 
-    const wantImage = params.sendAsImage ?? baseDb.settings.lineSendAsImage ?? true;
+    const resolvedSendFormat: LineSendFormat = params.sendFormat
+      ? resolveLineSendFormat(params.sendFormat, params.sendAsImage)
+      : typeof params.sendAsImage === 'boolean'
+      ? resolveLineSendFormat(undefined, params.sendAsImage)
+      : resolveLineSendFormat(baseDb.settings.lineSendFormat, baseDb.settings.lineSendAsImage);
+    const wantImage = resolvedSendFormat !== 'TEXT_ONLY';
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     let uploadedImageUrl = '';
     let uploadedPreviewUrl = '';
@@ -2843,11 +2859,19 @@ export default function App() {
             imageUploadNote = upRes.error || 'ยังไม่อัปเดต Code.gs สำหรับฝากไฟล์ภาพ .jpeg บน Google Drive';
           }
         } else if (!gasUrl) {
-          imageUploadNote = 'ยังไม่ได้เชื่อม Google Apps Script URL จึงส่งเฉพาะข้อความ';
+          imageUploadNote = 'ยังไม่ได้เชื่อม Google Apps Script URL จึงไม่สามารถฝากไฟล์ภาพ .jpeg บน Google Drive ได้';
         }
       } catch (imgErr) {
         imageUploadNote = String(imgErr instanceof Error ? imgErr.message : imgErr);
       }
+    }
+
+    if (resolvedSendFormat === 'IMAGE_ONLY' && !uploadedImageUrl) {
+      const err =
+        imageUploadNote ||
+        'เลือกส่งเฉพาะรูปภาพ (.jpeg) แต่ไม่สามารถสร้าง/อัปโหลดภาพขึ้น Google Drive ได้ กรุณาเชื่อมต่อ Google Apps Script ล่าสุด';
+      showToast(err, 'error');
+      return { ok: false, error: err };
     }
 
     // 1. Try server-side LINE Messaging API proxy first (uses .env token securely)
@@ -2855,6 +2879,7 @@ export default function App() {
       targetId: resolvedTargetId,
       targetIds: resolvedTargetIds,
       message: messageToSend,
+      sendFormat: resolvedSendFormat,
       ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl, previewImageUrl: uploadedPreviewUrl } : {}),
     });
 
@@ -2876,13 +2901,18 @@ export default function App() {
       setDb(updatedDb);
 
       if (proxyRes.ok) {
-        const imgSuffix = uploadedImageUrl
-          ? ' (แนบภาพตาราง .JPEG แล้ว)'
-          : imageUploadNote
-          ? ` (ส่งข้อความสำเร็จ — หมายเหตุรูปภาพ: ${imageUploadNote})`
-          : '';
+        const formatSuffix =
+          resolvedSendFormat === 'IMAGE_ONLY'
+            ? ' (เฉพาะภาพตาราง .JPEG)'
+            : resolvedSendFormat === 'TEXT_ONLY'
+            ? ' (เฉพาะข้อความ)'
+            : uploadedImageUrl
+            ? ' (ภาพตาราง .JPEG + ข้อความ)'
+            : imageUploadNote
+            ? ` (ส่งข้อความสำเร็จ — หมายเหตุรูปภาพ: ${imageUploadNote})`
+            : '';
         showToast(
-          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${imgSuffix} เรียบร้อยแล้ว!`,
+          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${formatSuffix} เรียบร้อยแล้ว!`,
           'success'
         );
         return { ok: true };
@@ -2909,6 +2939,7 @@ export default function App() {
       shift: resolvedShift,
       reportDayMode: params.reportDayMode,
       message: messageToSend,
+      sendFormat: resolvedSendFormat,
       ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl, previewImageUrl: uploadedPreviewUrl } : {}),
       db: baseDb,
     });
@@ -2919,9 +2950,17 @@ export default function App() {
     }
 
     if (res.ok) {
+      const gasSuffix =
+        resolvedSendFormat === 'IMAGE_ONLY'
+          ? ' (เฉพาะภาพตาราง .JPEG)'
+          : resolvedSendFormat === 'TEXT_ONLY'
+          ? ' (เฉพาะข้อความ)'
+          : uploadedImageUrl
+          ? ' (ภาพ .JPEG + ข้อความ)'
+          : '';
       showToast(
         res.statusText ||
-          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${uploadedImageUrl ? ' (พร้อมภาพ .JPEG)' : ''} เรียบร้อยแล้ว!`,
+          `ส่งรายงานเข้ากลุ่ม LINE ${resolvedTargetIds.length} กลุ่ม${gasSuffix} เรียบร้อยแล้ว!`,
         'success'
       );
       return { ok: true };
@@ -3002,10 +3041,11 @@ export default function App() {
           )
         );
         const gasUrl = (st.gasUrl || '').trim();
+        const schedSendFormat = resolveLineSendFormat(st.lineSendFormat, st.lineSendAsImage);
         let imageUrl = '';
         let previewImageUrl = '';
 
-        if (st.lineSendAsImage !== false && gasUrl) {
+        if (schedSendFormat !== 'TEXT_ONLY' && gasUrl) {
           try {
             const rendered = renderDailyCensusReportJpegDataUrl({
               workloads: curDb.workloads,
@@ -3044,6 +3084,7 @@ export default function App() {
                   shift: sch.shift,
                   reportDayMode: sch.reportDayMode,
                   message: msg,
+                  sendFormat: schedSendFormat,
                   ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
                 },
               }),
@@ -3062,6 +3103,7 @@ export default function App() {
             targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
             targetIds,
             message: msg,
+            sendFormat: schedSendFormat,
             ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
           });
         }

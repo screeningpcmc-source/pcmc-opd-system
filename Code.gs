@@ -170,7 +170,8 @@ function setupOpdDatabase() {
         ['Line_Target_Id', DEFAULT_LINE_GROUP_ID],
         ['Line_Target_Groups', JSON.stringify([{ id: DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true }])],
         ['Line_Schedules', JSON.stringify(DEFAULT_LINE_SCHEDULES)],
-        ['Line_Send_As_Image', 'true']
+        ['Line_Send_As_Image', 'true'],
+        ['Line_Send_Format', 'BOTH']
       ]
     }
   ];
@@ -1015,6 +1016,10 @@ function writeSettingsToSheet_(settings) {
   var lineSendAsImageVal = settings.lineSendAsImage !== undefined
     ? (settings.lineSendAsImage ? 'true' : 'false')
     : (existingMap['Line_Send_As_Image'] || 'true');
+  var lineSendFormatVal = normalizeLineSendFormatGas_(
+    settings.lineSendFormat || existingMap['Line_Send_Format'],
+    lineSendAsImageVal !== 'false'
+  );
 
   var entries = [
     ['NHPPD', String(settings.nhppd || 0.4)],
@@ -1041,7 +1046,8 @@ function writeSettingsToSheet_(settings) {
     ['Line_Target_Id', lineTargetIdVal],
     ['Line_Target_Groups', lineTargetGroupsVal],
     ['Line_Schedules', lineSchedulesVal],
-    ['Line_Send_As_Image', lineSendAsImageVal],
+    ['Line_Send_As_Image', lineSendFormatVal !== 'TEXT_ONLY' ? 'true' : 'false'],
+    ['Line_Send_Format', lineSendFormatVal],
     ['Line_Channel_Token_Set', hasLineTokenProp ? 'true' : 'false']
   ];
   if (existingMap['Line_Last_Sent_At']) entries.push(['Line_Last_Sent_At', existingMap['Line_Last_Sent_At']]);
@@ -2506,7 +2512,16 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
   return { text: msg, clinicCount: clinicCount, totalPt: totals.totalPt };
 }
 
-function pushLineMessageGas_(channelAccessToken, targetIdsInput, text, imageUrl, previewImageUrl) {
+function normalizeLineSendFormatGas_(rawFmt, legacySendAsImage) {
+  var s = String(rawFmt || '').trim().toUpperCase();
+  if (s === 'IMAGE_ONLY' || s === 'IMAGE') return 'IMAGE_ONLY';
+  if (s === 'TEXT_ONLY' || s === 'TEXT') return 'TEXT_ONLY';
+  if (s === 'BOTH') return 'BOTH';
+  if (legacySendAsImage === false) return 'TEXT_ONLY';
+  return 'BOTH';
+}
+
+function pushLineMessageGas_(channelAccessToken, targetIdsInput, text, imageUrl, previewImageUrl, sendFormat, allowTextFallbackOnMissingImg) {
   var token = String(channelAccessToken || '').trim();
   var targetList = Array.isArray(targetIdsInput)
     ? targetIdsInput
@@ -2516,18 +2531,22 @@ function pushLineMessageGas_(channelAccessToken, targetIdsInput, text, imageUrl,
   if (!token) return { ok: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token' };
   if (targetList.length === 0) return { ok: false, error: 'ยังไม่ได้ระบุ LINE Group ID / Target ID' };
 
+  var fmt = normalizeLineSendFormatGas_(sendFormat, true);
   var messages = [];
   var cleanImageUrl = String(imageUrl || '').trim();
   var cleanPreviewUrl = String(previewImageUrl || cleanImageUrl).trim();
-  if (cleanImageUrl.indexOf('https://') === 0) {
+  if (fmt !== 'TEXT_ONLY' && cleanImageUrl.indexOf('https://') === 0) {
     messages.push({
       type: 'image',
       originalContentUrl: cleanImageUrl,
       previewImageUrl: cleanPreviewUrl.indexOf('https://') === 0 ? cleanPreviewUrl : cleanImageUrl
     });
   }
-  if (String(text || '').trim()) {
+  if ((fmt !== 'IMAGE_ONLY' || (allowTextFallbackOnMissingImg && messages.length === 0)) && String(text || '').trim()) {
     messages.push({ type: 'text', text: String(text || '') });
+  }
+  if (fmt === 'IMAGE_ONLY' && messages.length === 0) {
+    return { ok: false, error: 'เลือกส่งเฉพาะรูปภาพ (.jpeg) แต่ไม่สามารถสร้างหรืออัปโหลดภาพขึ้น Google Drive ได้' };
   }
   if (messages.length === 0) {
     return { ok: false, error: 'ไม่มีข้อความหรือรูปภาพที่จะส่ง' };
@@ -2740,9 +2759,15 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
     }
   }
 
+  var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
+  var resolvedSendFormat = normalizeLineSendFormatGas_(
+    (extraPayload && extraPayload.sendFormat) || settingsMap['Line_Send_Format'],
+    legacyImgPref
+  );
+
   var imageUrl = String((extraPayload && extraPayload.imageUrl) || '').trim();
   var previewImageUrl = String((extraPayload && extraPayload.previewImageUrl) || imageUrl).trim();
-  if (!imageUrl && extraPayload && extraPayload.imageBase64) {
+  if (resolvedSendFormat !== 'TEXT_ONLY' && !imageUrl && extraPayload && extraPayload.imageBase64) {
     var upRes = uploadLineReportJpegFromApi_({
       base64Jpeg: extraPayload.imageBase64,
       filename: 'OPD_Census_' + targetDate + '.jpeg'
@@ -2755,7 +2780,16 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
 
   var report = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
   var textToSend = String((extraPayload && extraPayload.message) || '').trim() || report.text;
-  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl);
+  var allowFallbackText = sourceTag === 'AUTO_TRIGGER' || sourceTag === 'AUTO_BACKUP';
+  var pushRes = pushLineMessageGas_(
+    token,
+    targetIds,
+    textToSend,
+    imageUrl,
+    previewImageUrl,
+    resolvedSendFormat,
+    allowFallbackText
+  );
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
 
   if (pushRes.ok) {
@@ -2889,7 +2923,11 @@ function configureLineAutomationFromApi_(payload) {
   var schedules = Array.isArray(payload.schedules) && payload.schedules.length > 0
     ? payload.schedules
     : DEFAULT_LINE_SCHEDULES;
-  var sendAsImage = payload.sendAsImage !== undefined ? Boolean(payload.sendAsImage) : true;
+  var sendFormat = normalizeLineSendFormatGas_(
+    payload.sendFormat,
+    payload.sendAsImage !== undefined ? Boolean(payload.sendAsImage) : true
+  );
+  var sendAsImage = sendFormat !== 'TEXT_ONLY';
   var incomingToken = String(payload.channelAccessToken || '').trim();
 
   if (payload.clearToken) {
@@ -2909,6 +2947,7 @@ function configureLineAutomationFromApi_(payload) {
     ['Line_Target_Groups', JSON.stringify(targetGroups)],
     ['Line_Schedules', JSON.stringify(schedules)],
     ['Line_Send_As_Image', sendAsImage ? 'true' : 'false'],
+    ['Line_Send_Format', sendFormat],
     ['Line_Channel_Token_Set', hasToken ? 'true' : 'false']
   ]);
 
@@ -2970,9 +3009,15 @@ function sendDailyCensusToLineNowFromApi_(payload) {
     metaTotalPt = built.totalPt;
   }
 
+  var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
+  var sendFormat = normalizeLineSendFormatGas_(
+    payload.sendFormat || settingsMap['Line_Send_Format'],
+    legacyImgPref
+  );
+
   var imageUrl = String(payload.imageUrl || '').trim();
   var previewImageUrl = String(payload.previewImageUrl || imageUrl).trim();
-  if (!imageUrl && payload.imageBase64) {
+  if (sendFormat !== 'TEXT_ONLY' && !imageUrl && payload.imageBase64) {
     var upRes = uploadLineReportJpegFromApi_({
       base64Jpeg: payload.imageBase64,
       filename: 'OPD_Census_' + targetDate + '.jpeg'
@@ -2983,9 +3028,13 @@ function sendDailyCensusToLineNowFromApi_(payload) {
     }
   }
 
-  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl);
+  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl, sendFormat, false);
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
-  var imgTag = imageUrl ? ' (พร้อมภาพ .jpeg)' : '';
+  var imgTag = sendFormat === 'IMAGE_ONLY'
+    ? ' (เฉพาะภาพ .jpeg)'
+    : sendFormat === 'TEXT_ONLY'
+    ? ' (เฉพาะข้อความ)'
+    : (imageUrl ? ' (ภาพ .jpeg + ข้อความ)' : '');
   var statusText = pushRes.ok
     ? (metaClinicCount > 0 ? 'ส่งทันทีสำเร็จ' + imgTag + ' (' + targetIds.length + ' กลุ่ม • ' + metaClinicCount + ' คลินิก, ' + metaTotalPt + ' ราย)' : 'ส่งรายงานเข้า LINE สำเร็จ' + imgTag + ' (' + targetIds.length + ' กลุ่ม)')
     : 'ส่งไม่สำเร็จ: ' + pushRes.error;
@@ -3132,6 +3181,7 @@ function setupLineDailyTrigger0359Ui() {
     ['Line_Target_Id', targetId],
     ['Line_Schedules', schedulesJson],
     ['Line_Send_As_Image', 'true'],
+    ['Line_Send_Format', settingsMap['Line_Send_Format'] || 'BOTH'],
     ['Line_Channel_Token_Set', 'true']
   ]);
   var updatedMap = readSettingsMapGas_();

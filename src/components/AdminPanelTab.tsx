@@ -35,6 +35,8 @@ import {
   LineTargetGroup,
   LineReportSchedule,
   LineReportDayRule,
+  LineSendFormat,
+  resolveLineSendFormat,
   normalizeLineTimeString
 } from '../types';
 import {
@@ -132,6 +134,7 @@ interface AdminPanelTabProps {
     targetGroups?: LineTargetGroup[];
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   }) => Promise<{
     ok: boolean;
     error?: string;
@@ -148,6 +151,7 @@ interface AdminPanelTabProps {
     message?: string;
     imageDataUrl?: string;
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   }) => Promise<{ ok: boolean; error?: string }>;
   onFetchLineStatus?: () => Promise<LineAutomationStatusInfo | null>;
 }
@@ -317,9 +321,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         }))
       : DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s }))
   );
-  const [lineSendAsImage, setLineSendAsImage] = useState<boolean>(
-    settings.lineSendAsImage ?? true
+  const [lineSendFormat, setLineSendFormat] = useState<LineSendFormat>(() =>
+    resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage)
   );
+  const lineSendAsImage = lineSendFormat !== 'TEXT_ONLY';
   const [isSavingLineAuto, setIsSavingLineAuto] = useState<boolean>(false);
   const [isTestingLineSend, setIsTestingLineSend] = useState<boolean>(false);
   const [isCheckingLineStatus, setIsCheckingLineStatus] = useState<boolean>(false);
@@ -378,7 +383,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     } else {
       setLineSchedules(DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s })));
     }
-    setLineSendAsImage(settings.lineSendAsImage ?? true);
+    setLineSendFormat(resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage));
   }, [settings]);
 
   useEffect(() => {
@@ -507,6 +512,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         targetGroups: cleanedGroups,
         schedules: cleanedSchedules,
         sendAsImage: lineSendAsImage,
+        sendFormat: lineSendFormat,
       });
       if (res.ok) {
         setLineAutoTime(cleanTime);
@@ -520,12 +526,16 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           .filter((s) => s.enabled)
           .map((s) => `${s.time} น.`)
           .join(', ');
+        const formatLabel =
+          lineSendFormat === 'IMAGE_ONLY'
+            ? 'เฉพาะภาพ .jpeg'
+            : lineSendFormat === 'TEXT_ONLY'
+            ? 'เฉพาะข้อความ'
+            : 'ภาพ .jpeg + ข้อความ';
         if (lineAutoEnabled && res.gasSynced === false) {
           setLineActionFeedback({
             type: 'info',
-            text: `บันทึกตั้งค่า (${activeSchedSummary || cleanTime + ' น.'} • ${enabledIds.length} กลุ่ม${
-              lineSendAsImage ? ' • ภาพ .jpeg' : ''
-            }) แล้ว แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
+            text: `บันทึกตั้งค่า (${activeSchedSummary || cleanTime + ' น.'} • ${enabledIds.length} กลุ่ม • ${formatLabel}) แล้ว แต่ซิงค์ไปยัง Google Apps Script ไม่สำเร็จ${
               res.gasError ? `: ${res.gasError}` : ''
             } — กรุณาอัปเดตและ Deploy Code.gs ล่าสุดใน Google Sheets`,
           });
@@ -535,9 +545,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             text: lineAutoEnabled
               ? `บันทึกและตั้งเวลาส่งอัตโนมัติ ${cleanedSchedules.filter((s) => s.enabled).length} รอบ (${
                   activeSchedSummary || `${cleanTime} น.`
-                }) เข้า ${enabledIds.length} กลุ่ม LINE${
-                  lineSendAsImage ? ' (พร้อมภาพ .jpeg)' : ''
-                } สำเร็จ${
+                }) เข้า ${enabledIds.length} กลุ่ม LINE (${formatLabel}) สำเร็จ${
                   res.lineAutomation?.nextRunAt ? ` • รอบถัดไป: ${res.lineAutomation.nextRunAt}` : ''
                 }`
               : 'บันทึกการตั้งค่าและปิดการส่งอัตโนมัติเรียบร้อยแล้ว',
@@ -610,11 +618,18 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         reportDayMode: targetDayMode,
         message: msgText,
         sendAsImage: lineSendAsImage,
+        sendFormat: lineSendFormat,
       });
       if (sendRes.ok) {
+        const formatSuffix =
+          lineSendFormat === 'IMAGE_ONLY'
+            ? ' (เฉพาะภาพ .jpeg)'
+            : lineSendFormat === 'TEXT_ONLY'
+            ? ' (เฉพาะข้อความ)'
+            : ' (ภาพ .jpeg + ข้อความ)';
         setLineActionFeedback({
           type: 'success',
-          text: `ส่งรายงาน${lineSendAsImage ? ' (.jpeg + ข้อความ)' : ''} วันที่ ${formatThaiShortDate(
+          text: `ส่งรายงาน${formatSuffix} วันที่ ${formatThaiShortDate(
             targetDate
           )} เข้า ${targetIds.length} กลุ่ม LINE สำเร็จ!`,
         });
@@ -2974,7 +2989,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                 setLineAutoTime('15:55');
                 setLineAutoReportDayMode('TODAY');
                 setLineAutoShift('ในเวลา 08:00-16:00');
-                setLineSendAsImage(true);
+                setLineSendFormat('BOTH');
               }}
               className="px-3 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-50 text-[11px] font-bold cursor-pointer"
             >
@@ -3257,26 +3272,60 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
             <div className="md:col-span-5 space-y-2.5">
               <div>
-                <label className="block text-[11px] font-bold text-gray-800 mb-1">
-                  รูปแบบรายงานอัตโนมัติ (ข้อความ + ภาพตาราง .JPEG)
+                <label className="block text-[11px] font-bold text-gray-800 mb-1.5">
+                  เลือกรูปแบบการส่งรายงานเข้า LINE *
                 </label>
-                <label className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-white p-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={lineSendAsImage}
-                    onChange={(e) => setLineSendAsImage(e.target.checked)}
-                    className="w-4 h-4 mt-0.5 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
-                  />
-                  <div className="text-xs leading-snug">
-                    <div className="font-bold text-emerald-950 flex items-center gap-1">
-                      <ImageDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                      <span>ส่งรายงานตารางเป็นภาพ .JPEG เข้า LINE อัตโนมัติ</span>
-                    </div>
-                    <p className="text-[10.5px] text-gray-600 mt-0.5">
-                      สร้างภาพตารางสรุปยอดผู้ป่วย (Daily OPD Census) อัปโหลดขึ้น Google Drive และส่งภาพเข้ากลุ่ม LINE พร้อมข้อความสรุป
-                    </p>
-                  </div>
-                </label>
+                <div className="space-y-1.5">
+                  {[
+                    {
+                      value: 'BOTH' as LineSendFormat,
+                      title: 'ส่งทั้งรูปภาพ .JPEG + ข้อความ (แนะนำ)',
+                      desc: 'ส่งภาพตารางสรุปผู้ป่วย (.jpeg) คู่กับข้อความสรุปแยกคลินิก',
+                    },
+                    {
+                      value: 'IMAGE_ONLY' as LineSendFormat,
+                      title: 'ส่งเฉพาะรูปภาพ (.JPEG เท่านั้น)',
+                      desc: 'ส่งเฉพาะภาพตารางสรุป Daily OPD Census ไม่มีข้อความยาวต่อท้าย',
+                    },
+                    {
+                      value: 'TEXT_ONLY' as LineSendFormat,
+                      title: 'ส่งเฉพาะข้อความ (Text เท่านั้น)',
+                      desc: 'ส่งเฉพาะข้อความสรุปยอดผู้ป่วยและกำลังคน (ไม่สร้างและไม่ส่งรูปภาพ)',
+                    },
+                  ].map((opt) => {
+                    const active = lineSendFormat === opt.value;
+                    return (
+                      <label
+                        key={opt.value}
+                        className={`flex items-start gap-2.5 rounded-lg border px-2.5 py-2 cursor-pointer select-none transition-colors ${
+                          active
+                            ? 'border-emerald-500 bg-emerald-50/70'
+                            : 'border-gray-200 bg-white hover:border-emerald-200'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="adminLineSendFormat"
+                          value={opt.value}
+                          checked={active}
+                          onChange={() => setLineSendFormat(opt.value)}
+                          className="w-4 h-4 mt-0.5 text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
+                        />
+                        <div className="text-xs leading-snug">
+                          <div className={`font-bold flex items-center gap-1 ${active ? 'text-emerald-950' : 'text-gray-800'}`}>
+                            {opt.value !== 'TEXT_ONLY' ? (
+                              <ImageDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                            ) : (
+                              <MessageSquare className="w-3.5 h-3.5 text-blue-700 shrink-0" />
+                            )}
+                            <span>{opt.title}</span>
+                          </div>
+                          <p className="text-[10.5px] text-gray-600 mt-0.5">{opt.desc}</p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
               <div>
@@ -3343,7 +3392,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               <span>
                 {isTestingLineSend
                   ? 'กำลังส่ง...'
-                  : `ทดสอบส่งเข้า LINE กลุ่มทันที${lineSendAsImage ? ' (.JPEG)' : ''}`}
+                  : lineSendFormat === 'IMAGE_ONLY'
+                  ? 'ทดสอบส่งเข้า LINE ทันที (เฉพาะภาพ .JPEG)'
+                  : lineSendFormat === 'TEXT_ONLY'
+                  ? 'ทดสอบส่งเข้า LINE ทันที (เฉพาะข้อความ)'
+                  : 'ทดสอบส่งเข้า LINE ทันที (ภาพ .JPEG + ข้อความ)'}
               </span>
             </button>
 

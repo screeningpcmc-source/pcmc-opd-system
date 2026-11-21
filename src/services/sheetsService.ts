@@ -43,6 +43,8 @@ import {
   DEFAULT_LINE_TARGET_GROUPS,
   DEFAULT_LINE_SCHEDULES,
   normalizeLineTimeString,
+  LineSendFormat,
+  resolveLineSendFormat,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -329,6 +331,7 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['Line_Target_Groups', JSON.stringify(settings.lineTargetGroups || DEFAULT_LINE_TARGET_GROUPS)],
     ['Line_Schedules', JSON.stringify(settings.lineSchedules || DEFAULT_LINE_SCHEDULES)],
     ['Line_Send_As_Image', settings.lineSendAsImage !== false ? 'true' : 'false'],
+    ['Line_Send_Format', resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage)],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
   if (Object.keys(codeMap).length > 0) {
@@ -1865,6 +1868,14 @@ export const syncAllWithGoogleSheet = async (
       : settingsMap['Line_Send_As_Image'] !== undefined
       ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
       : db.settings.lineSendAsImage !== false,
+    lineSendFormat: settingsDirty
+      ? resolveLineSendFormat(db.settings.lineSendFormat, db.settings.lineSendAsImage)
+      : resolveLineSendFormat(
+          settingsMap['Line_Send_Format'],
+          settingsMap['Line_Send_As_Image'] !== undefined
+            ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
+            : db.settings.lineSendAsImage
+        ),
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -2948,6 +2959,14 @@ function mergeRemoteDataRows(
       : settingsMap['Line_Send_As_Image'] !== undefined
       ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
       : db.settings.lineSendAsImage !== false,
+    lineSendFormat: settingsDirty
+      ? resolveLineSendFormat(db.settings.lineSendFormat, db.settings.lineSendAsImage)
+      : resolveLineSendFormat(
+          settingsMap['Line_Send_Format'],
+          settingsMap['Line_Send_As_Image'] !== undefined
+            ? settingsMap['Line_Send_As_Image'].toLowerCase() !== 'false'
+            : db.settings.lineSendAsImage
+        ),
     lineChannelTokenSet:
       settingsMap['Line_Channel_Token_Set'] !== undefined
         ? settingsMap['Line_Channel_Token_Set'].toLowerCase() === 'true'
@@ -4926,6 +4945,7 @@ export const sendLineMessageViaServerProxy = async (params: {
   message: string;
   imageUrl?: string;
   previewImageUrl?: string;
+  sendFormat?: LineSendFormat;
 }): Promise<{
   available: boolean;
   ok: boolean;
@@ -4945,6 +4965,7 @@ export const sendLineMessageViaServerProxy = async (params: {
         message: params.message,
         ...(params.imageUrl ? { imageUrl: params.imageUrl } : {}),
         ...(params.previewImageUrl ? { previewImageUrl: params.previewImageUrl } : {}),
+        ...(params.sendFormat ? { sendFormat: params.sendFormat } : {}),
       }),
     });
     const contentType = res.headers.get('content-type') || '';
@@ -4975,6 +4996,7 @@ export const configureLineViaServerProxy = async (params: {
   targetGroups?: LineTargetGroup[];
   schedules?: LineReportSchedule[];
   sendAsImage?: boolean;
+  sendFormat?: LineSendFormat;
   gasUrl?: string;
   adminPin?: string;
 }): Promise<{
@@ -5031,6 +5053,7 @@ export const configureLineAutomationViaAppsScript = async (params: {
     targetGroups?: LineTargetGroup[];
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
+    sendFormat?: LineSendFormat;
   };
   db: AppDatabase;
   expectedDirtyVersion?: number;
@@ -5175,6 +5198,7 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
   imageUrl?: string;
   previewImageUrl?: string;
   imageBase64?: string;
+  sendFormat?: LineSendFormat;
   scheduleId?: string;
   db: AppDatabase;
 }): Promise<{
@@ -5197,6 +5221,7 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
     imageUrl,
     previewImageUrl,
     imageBase64,
+    sendFormat,
     scheduleId,
     db,
   } = params;
@@ -5220,6 +5245,7 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
           ...(imageUrl ? { imageUrl } : {}),
           ...(previewImageUrl ? { previewImageUrl } : {}),
           ...(imageBase64 ? { imageBase64 } : {}),
+          ...(sendFormat ? { sendFormat } : {}),
           ...(scheduleId ? { scheduleId } : {}),
         },
       }),

@@ -636,6 +636,7 @@ export interface SystemSettings {
   lineTargetGroups?: LineTargetGroup[];
   lineSchedules?: LineReportSchedule[];
   lineSendAsImage?: boolean;
+  lineSendFormat?: LineSendFormat;
   lineChannelTokenSet?: boolean;
   lineLastSentAt?: string;
   lineLastSentReportDate?: string;
@@ -648,6 +649,19 @@ export const DEFAULT_LINE_AUTO_TIME = '15:55';
 export const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
 export type LineAutoReportDayMode = 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
 export type LineReportDayRule = 'ALL_DAYS' | 'WORKDAYS_MON_FRI' | 'WEEKENDS_AND_HOLIDAYS';
+export type LineSendFormat = 'BOTH' | 'IMAGE_ONLY' | 'TEXT_ONLY';
+
+export function resolveLineSendFormat(
+  rawFormat?: string | null,
+  legacySendAsImage?: boolean
+): LineSendFormat {
+  const norm = String(rawFormat || '').trim().toUpperCase();
+  if (norm === 'IMAGE_ONLY' || norm === 'IMAGE') return 'IMAGE_ONLY';
+  if (norm === 'TEXT_ONLY' || norm === 'TEXT') return 'TEXT_ONLY';
+  if (norm === 'BOTH') return 'BOTH';
+  if (legacySendAsImage === false) return 'TEXT_ONLY';
+  return 'BOTH';
+}
 
 export interface LineTargetGroup {
   id: string;
