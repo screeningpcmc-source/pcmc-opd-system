@@ -1057,6 +1057,16 @@ export const saveLocalDatabase = (db: AppDatabase): void => {
     void syncDatabaseToServer(db);
   } catch (err) {
     console.error('Error saving local DB:', err);
+    try {
+      const trimmedDb: AppDatabase = {
+        ...db,
+        auditLogs: (db.auditLogs || []).slice(0, 150),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmedDb));
+      void syncDatabaseToServer(trimmedDb);
+    } catch (retryErr) {
+      console.error('Retry saving trimmed local DB failed:', retryErr);
+    }
   }
 };
 
@@ -3162,9 +3172,21 @@ export const appendViaAppsScript = async (
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(bodyObj),
     });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return Boolean(data?.success);
+    const rawText = await res.text();
+    if (!res.ok) {
+      console.error(`Apps Script HTTP ${res.status} for ${action}:`, rawText.slice(0, 300));
+      return false;
+    }
+    try {
+      const data = JSON.parse(rawText);
+      if (!data?.success) {
+        console.error(`Apps Script rejected ${action}:`, data);
+      }
+      return Boolean(data?.success);
+    } catch {
+      console.error(`Non-JSON response from Apps Script for ${action} (check Web App permission = Anyone):`, rawText.slice(0, 300));
+      return false;
+    }
   } catch (err) {
     console.error(`Failed to ${action} via Apps Script:`, err);
     return false;

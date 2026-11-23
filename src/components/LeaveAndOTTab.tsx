@@ -547,7 +547,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
   }, [otWorkClinicOptions, workClinic]);
 
-  const totalOtSelectedCount = selectedStaffIds.length + externalOtStaff.length;
+  const hasFilledExternalDraft = Boolean(extName.trim() || extAffiliation.trim());
+  const readyExtDraft = Boolean(extName.trim() && extAffiliation.trim());
+  const totalOtSelectedCount = selectedStaffIds.length + externalOtStaff.length + (readyExtDraft ? 1 : 0);
+  const leaveFormErrorRef = useRef<HTMLDivElement | null>(null);
+  const otFormErrorRef = useRef<HTMLDivElement | null>(null);
 
   const findOtConflictForName = (name: string, dateIso: string, shiftVal: WorkShift, targetClinic: string, excludeId?: string) => {
     return otRecords.find((o) =>
@@ -659,9 +663,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   // Handle Save Leave
   const handleSaveLeaveSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const scrollLeaveErr = () => {
+      setTimeout(() => leaveFormErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 30);
+    };
     const staff = staffList.find((s) => s.staffId === leaveStaffId);
     if (!staff) {
       setLeaveFormError('กรุณาพิมพ์ค้นหาและเลือกเจ้าหน้าที่จากรายการ');
+      scrollLeaveErr();
       return;
     }
     const conflict = findOverlappingLeaveConflict(
@@ -677,11 +685,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       setLeaveFormError(
         `ไม่สามารถบันทึกซ้ำได้: ${staff.name} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
       );
+      scrollLeaveErr();
       return;
     }
     const numericDays = Number(leaveDays) || 0;
     if (numericDays <= 0) {
       setLeaveFormError('ช่วงวันที่เลือกตรงกับวันหยุดราชการทั้งหมด (0 วัน) กรุณาเลือกวันทำการ หรือระบุจำนวนวันลาด้วยตนเอง');
+      scrollLeaveErr();
       return;
     }
     setLeaveFormError('');
@@ -797,8 +807,70 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   // Handle Save Batch OT
   const handleSaveBatchOTSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (totalOtSelectedCount === 0) {
+    const scrollOtErr = () => {
+      setTimeout(() => otFormErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 30);
+    };
+
+    const trimmedDraftName = extName.trim();
+    const trimmedDraftAff = extAffiliation.trim();
+    const trimmedDraftCode = extEmployeeCode.trim();
+    const draftHours = Number.isFinite(extOtHours) && extOtHours > 0 ? Math.min(24, extOtHours) : otHours;
+
+    if ((trimmedDraftName && !trimmedDraftAff) || (!trimmedDraftName && trimmedDraftAff)) {
+      const msg = 'กรุณากรอกทั้ง ชื่อ-สกุล และ สังกัด ของเจ้าหน้าที่เฉพาะกิจให้ครบก่อนบันทึก';
+      setExtError(msg);
+      setOtFormError(msg);
+      scrollOtErr();
+      return;
+    }
+
+    let draftExternalItem: {
+      tempId: string;
+      employeeCode?: string;
+      name: string;
+      position: StaffPosition;
+      affiliation: string;
+      hours: number;
+    } | null = null;
+
+    if (trimmedDraftName && trimmedDraftAff) {
+      const normExtName = trimmedDraftName.replace(/\s+/g, ' ');
+      const dupInBatch =
+        externalOtStaff.some((x) => x.name.trim().replace(/\s+/g, ' ') === normExtName) ||
+        selectedStaffIds.some((id) => {
+          const st = staffList.find((s) => s.staffId === id);
+          return (st?.name || '').trim().replace(/\s+/g, ' ') === normExtName;
+        });
+      if (dupInBatch) {
+        const msg = `ไม่สามารถเพิ่มซ้ำได้: ${trimmedDraftName} ถูกเลือกอยู่ในรายการบันทึกชุดนี้แล้ว`;
+        setExtError(msg);
+        setOtFormError(msg);
+        scrollOtErr();
+        return;
+      }
+      const dupInDb = findOtConflictForName(trimmedDraftName, otDate, otShift, workClinic);
+      if (dupInDb) {
+        const exClinic = parseOtWorkClinic(dupInDb.workClinic).clinic || dupInDb.workClinic;
+        const msg = `ไม่สามารถบันทึกซ้ำได้: ${trimmedDraftName} มีประวัติขึ้นเวร (${exClinic}) วันที่ ${formatThaiShortDate(otDate)} กะ "${otShift}" อยู่ในฐานข้อมูลแล้ว`;
+        setExtError(msg);
+        setOtFormError(msg);
+        scrollOtErr();
+        return;
+      }
+      draftExternalItem = {
+        tempId: `EXT-${Date.now()}-DRAFT`,
+        ...(trimmedDraftCode ? { employeeCode: trimmedDraftCode } : {}),
+        name: trimmedDraftName,
+        position: extPosition,
+        affiliation: trimmedDraftAff,
+        hours: draftHours,
+      };
+    }
+
+    const effectiveExtList = draftExternalItem ? [...externalOtStaff, draftExternalItem] : externalOtStaff;
+    if (selectedStaffIds.length + effectiveExtList.length === 0) {
       setOtFormError('กรุณาเลือกเจ้าหน้าที่ OPD หรือเพิ่มเจ้าหน้าที่เฉพาะกิจอย่างน้อย 1 คน');
+      scrollOtErr();
       return;
     }
     if (conflictingSelectedOtList.length > 0) {
@@ -808,8 +880,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       setOtFormError(
         `ไม่สามารถบันทึกซ้ำได้: พบรายชื่อที่มีบันทึกเวรในวันที่ ${formatThaiShortDate(otDate)} กะ "${otShift}" แล้ว ได้แก่ ${summary}`
       );
+      scrollOtErr();
       return;
     }
+    setExtError('');
     setOtFormError('');
 
     const opdRecords: OTAttendance[] = selectedStaffIds.map((id) => {
@@ -834,7 +908,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       };
     });
 
-    const extRecords: OTAttendance[] = externalOtStaff.map((ext, idx) => ({
+    const extRecords: OTAttendance[] = effectiveExtList.map((ext, idx) => ({
       id: `OT-EXT-${Date.now()}-${idx}`,
       date: otDate,
       shift: otShift,
@@ -853,6 +927,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     setSelectedStaffIds([]);
     setSelectedOtHoursByStaffId({});
     setExternalOtStaff([]);
+    if (draftExternalItem) {
+      setExtEmployeeCode('');
+      setExtName('');
+      setExtAffiliation('');
+      setExtOtHours(otHours);
+    }
   };
 
   const toggleSelectStaff = (id: string) => {
@@ -1815,6 +1895,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
           <div className="lg:col-span-3 flex flex-col min-w-0">
             <form
               onSubmit={handleSaveLeaveSubmit}
+              noValidate
               className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-4 sm:p-5 space-y-4 flex-1 flex flex-col justify-between"
             >
               <div className="space-y-4">
@@ -2109,6 +2190,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                       {formatThaiLeaveRange(overlappingLeaveInDb.startDate, overlappingLeaveInDb.endDate)} ({overlappingLeaveInDb.days} วัน) ในฐานข้อมูลแล้ว จึงไม่สามารถบันทึกซ้ำได้
                     </div>
                   </div>
+                </div>
+              )}
+              {leaveFormError && (
+                <div
+                  ref={leaveFormErrorRef}
+                  className="p-2.5 rounded-xl bg-red-50 border border-red-300 text-xs text-red-700 font-medium flex items-center gap-1.5"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{leaveFormError}</span>
                 </div>
               )}
               </div>
@@ -2897,6 +2987,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
             <div className="flex flex-col min-w-0">
               <form
                 onSubmit={handleSaveBatchOTSubmit}
+                noValidate
                 className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-4 flex-1 flex flex-col justify-between"
               >
                 <div className="space-y-4">
@@ -3127,7 +3218,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     <span className="text-sm font-bold text-teal-700">
                       {totalOtSelectedCount} คน{' '}
                       <span className="text-[11px] font-normal text-teal-600">
-                        (OPD {selectedStaffIds.length} + เฉพาะกิจ {externalOtStaff.length})
+                        (OPD {selectedStaffIds.length} + เฉพาะกิจ {externalOtStaff.length + (readyExtDraft ? 1 : 0)})
                       </span>
                     </span>
                   </div>
@@ -3156,8 +3247,8 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 )}
 
                 {otFormError && (
-                  <p className="text-[11px] text-red-600 flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <p ref={otFormErrorRef} className="text-[11px] text-red-600 font-medium bg-red-50 border border-red-200 rounded-lg px-2.5 py-2 flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{otFormError}</span>
                   </p>
                 )}
@@ -3165,7 +3256,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </div>
                 <button
                   type="submit"
-                  disabled={totalOtSelectedCount === 0 || conflictingSelectedOtList.length > 0}
+                  disabled={(totalOtSelectedCount === 0 && !hasFilledExternalDraft) || conflictingSelectedOtList.length > 0}
                   className="w-full py-2.5 bg-teal-700 hover:bg-teal-600 active:bg-teal-800 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <FileCheck2 className="w-4 h-4" />

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   DailyWorkload, 
   StaffMember, 
@@ -1175,6 +1175,20 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     setter(prev => Math.max(0, Math.round((prev + delta) * 10) / 10));
   };
 
+  const formErrorRef = useRef<HTMLDivElement | null>(null);
+  const reporterInputRef = useRef<HTMLInputElement | null>(null);
+
+  const scrollToFormError = (focusReporter = false) => {
+    setTimeout(() => {
+      if (focusReporter) {
+        reporterInputRef.current?.focus();
+        reporterInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        formErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 30);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -1183,11 +1197,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setFormError(
         `ไม่สามารถบันทึกซ้ำได้: แผนก ${clinic} วันที่ ${formatThaiShortDate(date)} กะเวลา "${shift}" มีข้อมูลอยู่ในระบบแล้ว (รายงานโดย ${existingDuplicateWorkload.reporter || '-'})`
       );
+      scrollToFormError();
       return;
     }
 
     if (!reporter.trim()) {
       setFormError('กรุณาระบุชื่อผู้รายงานก่อนบันทึก');
+      scrollToFormError(true);
       return;
     }
 
@@ -1195,6 +1211,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setFormError(
         'กรุณาเลือกเจ้าหน้าที่ตำแหน่งงาน "รายวัน" อย่างน้อย 1 คนสำหรับ Off เวร (หรือปิดหัวข้อ Off เวร)'
       );
+      scrollToFormError();
       return;
     }
 
@@ -1202,6 +1219,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       setFormError(
         `ไม่สามารถบันทึกภาระงานได้ — ข้อมูล 3 จุด (ปฏิบัติงานจริง + วันลา/อบรม/Off เวรรายวัน/ช่วยงานในแผนก + จำนวนเต็มประจำแผนก) ไม่ตรงกัน: ${dayStaffingCheck.validationErrors.join(' | ')}`
       );
+      scrollToFormError();
       return;
     }
 
@@ -1517,7 +1535,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:items-stretch">
         {/* Left Form: 7 cols */}
         <div className="lg:col-span-7 flex flex-col min-w-0">
-          <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 sm:p-6 space-y-5 flex-1 flex flex-col">
+          <form onSubmit={handleSubmit} noValidate className="bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 sm:p-6 space-y-5 flex-1 flex flex-col">
             <div className="flex items-center justify-between border-b border-gray-100 pb-3">
               <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
@@ -3523,6 +3541,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   ผู้บันทึกรายงาน <span className="text-red-500">*</span>
                 </label>
                 <input
+                  ref={reporterInputRef}
                   type="text"
                   value={reporter}
                   onChange={(e) => {
@@ -3531,15 +3550,31 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                   }}
                   placeholder="ระบุชื่อ-สกุล และตำแหน่ง"
                   required
-                  className="w-full text-xs rounded-lg border-gray-300 shadow-2xs py-2 px-3 border font-medium"
+                  className={`w-full text-xs rounded-lg shadow-2xs py-2 px-3 border font-medium ${
+                    formError && !reporter.trim() ? 'border-red-400 ring-1 ring-red-400 bg-red-50/30' : 'border-gray-300'
+                  }`}
                 />
               </div>
             </div>
 
             {formError && (
-              <div className="flex items-center gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-medium">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{formError}</span>
+              <div
+                ref={formErrorRef}
+                className="flex flex-wrap items-center justify-between gap-2 text-xs text-red-700 bg-red-50 border border-red-300 rounded-lg px-3 py-2.5 font-medium"
+              >
+                <div className="flex items-start gap-1.5 min-w-0 flex-1">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{formError}</span>
+                </div>
+                {!dayStaffingCheck.canSave3Points && (
+                  <button
+                    type="button"
+                    onClick={applyExpectedAllPositions}
+                    className="px-2.5 py-1 rounded-md bg-red-700 hover:bg-red-800 text-white text-[11px] font-bold shrink-0 cursor-pointer transition-colors"
+                  >
+                    ปรับกำลังคนให้ตรงอัตโนมัติ
+                  </button>
+                )}
               </div>
             )}
 

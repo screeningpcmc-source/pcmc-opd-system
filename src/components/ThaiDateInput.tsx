@@ -43,15 +43,40 @@ function formatIsoToBeSlash(iso: string): string {
 }
 
 function parseBeSlashToIso(raw: string, minBeYear: number, maxBeYear: number): string | null {
-  const cleaned = raw.trim().replace(/[-.\s]+/g, '/');
-  const m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const trimmed = raw.trim();
+  const isoDirect = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoDirect) {
+    const rawY = Number(isoDirect[1]);
+    const month = Number(isoDirect[2]);
+    const day = Number(isoDirect[3]);
+    if (month < 1 || month > 12 || day < 1) return null;
+    const ceYear = rawY >= 2400 ? rawY - 543 : rawY;
+    const beYear = ceYear + 543;
+    if (beYear < minBeYear || beYear > maxBeYear) return null;
+    if (day > daysInGregorianMonth(ceYear, month)) return null;
+    return toIsoString(ceYear, month, day);
+  }
+
+  const cleaned = trimmed.replace(/[-.\s]+/g, '/');
+  const m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (!m) return null;
   const day = Number(m[1]);
   const month = Number(m[2]);
   const rawYear = Number(m[3]);
   if (month < 1 || month > 12 || day < 1) return null;
 
-  const beYear = rawYear >= 2400 ? rawYear : rawYear + 543;
+  let beYear: number;
+  if (rawYear < 100) {
+    if (rawYear >= 55) {
+      beYear = 2500 + rawYear;
+    } else if (rawYear >= 20 && rawYear <= 49) {
+      beYear = 2000 + rawYear + 543;
+    } else {
+      beYear = 2500 + rawYear;
+    }
+  } else {
+    beYear = rawYear >= 2400 ? rawYear : rawYear + 543;
+  }
   if (beYear < minBeYear || beYear > maxBeYear) return null;
   const ceYear = beYear - 543;
   const maxD = daysInGregorianMonth(ceYear, month);
@@ -95,9 +120,12 @@ export const ThaiDateInput: React.FC<ThaiDateInputProps> = ({
 
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  const isFocusedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    setTextVal(formatIsoToBeSlash(value));
+    if (!isFocusedRef.current || parseBeSlashToIso(textVal, minBeYear, maxBeYear) !== value) {
+      setTextVal(formatIsoToBeSlash(value));
+    }
     if (parsed) {
       setViewCeYear(parsed.ceYear);
       setViewMonth(parsed.month);
@@ -259,11 +287,26 @@ export const ThaiDateInput: React.FC<ThaiDateInputProps> = ({
         required={required && !allowClear}
         value={textVal}
         placeholder={placeholder}
-        onChange={(e) => setTextVal(e.target.value)}
+        onChange={(e) => {
+          const nextVal = e.target.value;
+          setTextVal(nextVal);
+          if (!nextVal.trim()) {
+            if (allowClear && value !== '') onChange('');
+            return;
+          }
+          const nextIso = parseBeSlashToIso(nextVal, minBeYear, maxBeYear);
+          if (nextIso && nextIso !== value) {
+            onChange(nextIso);
+          }
+        }}
         onFocus={() => {
+          isFocusedRef.current = true;
           if (!isOpen) openCalendar();
         }}
-        onBlur={commitTypedText}
+        onBlur={() => {
+          isFocusedRef.current = false;
+          commitTypedText();
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();

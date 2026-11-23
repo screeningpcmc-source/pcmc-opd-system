@@ -1006,16 +1006,194 @@ async function createAppServer(): Promise<void> {
         return cand;
       };
 
+      const DEFAULT_IN_CLINICS_SERVER = [
+        'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'เวชศาสตร์ฟื้นฟู', 'ศัลยกรรม',
+        'จักษุวิทยา', 'ศูนย์เลสิก', 'โสต ศอ นาสิก', 'อายุรกรรม', 'ตรวจโรคทั่วไป',
+        'Echo', 'AAIRC', 'ODS', 'ประกันสังคม', 'หน่วยคัดกรอง', 'ศูนย์รับ - ส่งต่อผู้ป่วย',
+      ];
+      const DEFAULT_OUT_CLINICS_SERVER = [
+        'ตรวจโรคทั่วไป', 'กุมารเวชกรรม', 'สูติ-นรีเวชกรรม', 'ศัลยกรรมกระดูก', 'ศัลยกรรม',
+        'จักษุวิทยา', 'โสต ศอ นาสิก', 'อายุรกรรม', 'คลินิกหัวใจ', 'หน่วยคัดกรอง',
+      ];
+
+      const getHolidaysMapServer = (
+        ceYear: number,
+        customHolidays: Array<{ date?: string; name?: string }> = []
+      ): Map<string, { name: string; isCustom: boolean }> => {
+        const fixed: Array<[string, string]> = [
+          ['01-01', 'วันขึ้นปีใหม่'],
+          ['04-06', 'วันจักรี'],
+          ['04-13', 'วันสงกรานต์'],
+          ['04-14', 'วันสงกรานต์'],
+          ['04-15', 'วันสงกรานต์'],
+          ['05-04', 'วันฉัตรมงคล'],
+          ['06-03', 'วันเฉลิมพระชนมพรรษา พระบรมราชินี'],
+          ['07-28', 'วันเฉลิมพระชนมพรรษา ในหลวง ร.10'],
+          ['08-12', 'วันแม่แห่งชาติ'],
+          ['10-13', 'วันนวมินทรมหาราช'],
+          ['10-23', 'วันปิยมหาราช'],
+          ['12-05', 'วันพ่อแห่งชาติ / วันชาติ'],
+          ['12-10', 'วันรัฐธรรมนูญ'],
+          ['12-31', 'วันสิ้นปี'],
+        ];
+        const lunarByYear: Record<number, Array<{ date: string; name: string; noSub?: boolean }>> = {
+          2024: [
+            { date: '2024-02-24', name: 'วันมาฆบูชา' },
+            { date: '2024-05-10', name: 'วันพืชมงคล', noSub: true },
+            { date: '2024-05-22', name: 'วันวิสาขบูชา' },
+            { date: '2024-07-20', name: 'วันอาสาฬหบูชา' },
+            { date: '2024-07-21', name: 'วันเข้าพรรษา' },
+          ],
+          2025: [
+            { date: '2025-02-12', name: 'วันมาฆบูชา' },
+            { date: '2025-05-09', name: 'วันพืชมงคล', noSub: true },
+            { date: '2025-05-11', name: 'วันวิสาขบูชา' },
+            { date: '2025-07-10', name: 'วันอาสาฬหบูชา' },
+            { date: '2025-07-11', name: 'วันเข้าพรรษา' },
+          ],
+          2026: [
+            { date: '2026-03-03', name: 'วันมาฆบูชา' },
+            { date: '2026-05-13', name: 'วันพืชมงคล', noSub: true },
+            { date: '2026-05-31', name: 'วันวิสาขบูชา' },
+            { date: '2026-07-29', name: 'วันอาสาฬหบูชา' },
+            { date: '2026-07-30', name: 'วันเข้าพรรษา' },
+          ],
+          2027: [
+            { date: '2027-02-21', name: 'วันมาฆบูชา' },
+            { date: '2027-05-20', name: 'วันวิสาขบูชา' },
+            { date: '2027-07-18', name: 'วันอาสาฬหบูชา' },
+            { date: '2027-07-19', name: 'วันเข้าพรรษา' },
+          ],
+          2028: [
+            { date: '2028-02-10', name: 'วันมาฆบูชา' },
+            { date: '2028-05-08', name: 'วันวิสาขบูชา' },
+            { date: '2028-07-06', name: 'วันอาสาฬหบูชา' },
+            { date: '2028-07-07', name: 'วันเข้าพรรษา' },
+          ],
+        };
+        const map = new Map<string, { name: string; isCustom: boolean }>();
+        const pendingSubs: Array<{ iso: string; name: string }> = [];
+        for (const [md, name] of fixed) {
+          const iso = `${ceYear}-${md}`;
+          const p = iso.split('-').map(Number);
+          const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+          map.set(iso, { name, isCustom: false });
+          if (dow === 0 || dow === 6) pendingSubs.push({ iso, name: `วันหยุดชดเชย${name}` });
+        }
+        const prevDecDow = new Date(Date.UTC(ceYear - 1, 11, 31)).getUTCDay();
+        if (prevDecDow === 0 || prevDecDow === 6) {
+          pendingSubs.push({ iso: `${ceYear - 1}-12-31`, name: 'วันหยุดชดเชยวันสิ้นปี' });
+        }
+        for (const item of lunarByYear[ceYear] || []) {
+          const p = item.date.split('-').map(Number);
+          const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+          map.set(item.date, { name: item.name, isCustom: false });
+          if (!item.noSub && (dow === 0 || dow === 6)) {
+            pendingSubs.push({ iso: item.date, name: `วันหยุดชดเชย${item.name}` });
+          }
+        }
+        for (const sub of pendingSubs) {
+          let cursor = addDaysBangkokYmd(sub.iso, 1);
+          for (let g = 0; g < 14; g++) {
+            const p = cursor.split('-').map(Number);
+            const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+            if (dow !== 0 && dow !== 6 && !map.has(cursor)) {
+              if (p[0] === ceYear) map.set(cursor, { name: sub.name, isCustom: false });
+              break;
+            }
+            cursor = addDaysBangkokYmd(cursor, 1);
+          }
+        }
+        for (const ch of customHolidays || []) {
+          const dNorm = normalizeDbDateServer(ch?.date);
+          if (dNorm && dNorm.startsWith(`${ceYear}-`)) {
+            map.set(dNorm, { name: String(ch?.name || 'วันหยุดพิเศษ รพ.').trim(), isCustom: true });
+          }
+        }
+        return map;
+      };
+
+      const isWeekendOrHolidayServer = (
+        ymd: string,
+        customHolidays: Array<{ date?: string; name?: string }> = []
+      ): boolean => {
+        const p = ymd.split('-').map(Number);
+        if (p.length !== 3) return false;
+        const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+        if (dow === 0 || dow === 6) return true;
+        return getHolidaysMapServer(p[0], customHolidays).has(ymd);
+      };
+
+      const parseWorkloadMetaServer = (w: any) => {
+        const rawNote = String(w?.note || '').trim();
+        let referralData = w?.referralData && typeof w.referralData === 'object' ? w.referralData : null;
+        if (!referralData) {
+          const refM = rawNote.match(/\[\[REFERRAL_JSON:([\s\S]*?)\]\]/);
+          if (refM) {
+            try {
+              referralData = JSON.parse(refM[1]);
+            } catch {
+              referralData = null;
+            }
+          }
+        }
+        let isOffDuty = Boolean(w?.isOffDuty);
+        let offDutyReason = String(w?.offDutyReason || '').trim();
+        const offM = rawNote.match(/\[\[OFF_DUTY_JSON:([\s\S]*?)\]\]/);
+        if (offM) {
+          isOffDuty = true;
+          try {
+            const po = JSON.parse(offM[1]);
+            if (!offDutyReason && (po?.r || po?.reason)) offDutyReason = String(po.r || po.reason).trim();
+          } catch {
+            // keep isOffDuty
+          }
+        }
+        let offDutyStaff: Array<{ staffName: string; position: string; amount: number; periodLabel?: string; reason?: string }> =
+          Array.isArray(w?.offDutyStaff) ? w.offDutyStaff : [];
+        if (offDutyStaff.length === 0) {
+          const osM = rawNote.match(/\[\[OFF_STAFF_JSON:([\s\S]*?)\]\]/);
+          if (osM) {
+            try {
+              const arr = JSON.parse(osM[1]);
+              if (Array.isArray(arr)) {
+                offDutyStaff = arr
+                  .filter((it: any) => it && (it.staffName || it.n))
+                  .map((it: any) => ({
+                    staffName: String(it.staffName || it.n || '').trim(),
+                    position: String(it.position || it.p || 'RN').trim(),
+                    amount: Number(it.amount ?? it.a) === 0.5 ? 0.5 : 1,
+                    periodLabel: String(it.periodLabel || it.l || '').trim(),
+                    reason: String(it.reason || it.r || '').trim(),
+                  }));
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+        const cleanNote = rawNote
+          .replace(/\[\[REFERRAL_JSON:[\s\S]*?\]\]/g, '')
+          .replace(/\[\[OFF_DUTY_JSON:[\s\S]*?\]\]/g, '')
+          .replace(/\[\[OFF_STAFF_JSON:[\s\S]*?\]\]/g, '')
+          .trim();
+        return { referralData, isOffDuty, offDutyReason, offDutyStaff, cleanNote };
+      };
+
       const extractClinicMatchServer = (q: string, settingsObj: any): string => {
         const aliases: Array<{ kw: string; target: string }> = [
           { kw: 'ศูนย์ปัญญาภิรมย์', target: 'ศูนย์ปัญญาภิรมย์' },
           { kw: 'ปัญญาภิรมย์', target: 'ศูนย์ปัญญาภิรมย์' },
           { kw: 'พรีเมียม', target: 'ศูนย์ปัญญาภิรมย์' },
           { kw: 'premium', target: 'ศูนย์ปัญญาภิรมย์' },
-          { kw: 'ห้องรับ-ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
-          { kw: 'รับ-ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
-          { kw: 'ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
-          { kw: 'refer', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
+          { kw: 'ศูนย์รับ - ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'ศูนย์รับ-ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'ห้องรับ-ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'รับ - ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'รับ-ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'ศูนย์รับส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'ส่งต่อ', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
+          { kw: 'refer', target: 'ศูนย์รับ - ส่งต่อผู้ป่วย' },
           { kw: 'ศัลยกรรมกระดูก', target: 'ศัลยกรรมกระดูก' },
           { kw: 'ออร์โธ', target: 'ศัลยกรรมกระดูก' },
           { kw: 'ortho', target: 'ศัลยกรรมกระดูก' },
@@ -1623,29 +1801,55 @@ async function createAppServer(): Promise<void> {
                       txtNoTimeWord
                     );
 
+                  const asksOtPayment = /(?:เบิก\s*ot|เบิกค่า|หลักฐานจ่าย|หักภาษี|ภาษี\s*5%|เรท\s*ot|อัตราค่าตอบแทน|ค่าตอบแทนรายชั่วโมง|เงินสุทธิ|ยอดเบิก|สรุปเงิน\s*ot|ยอดค่าตอบแทน|ค่าเวรรวม)/.test(
+                    txt
+                  );
+                  const asksFiscalSummary = /(?:ปีงบ|ปีงบประมาณ|12\s*เดือน|สรุปทั้งปี|สรุปรายปี)/.test(txt);
                   const asksOt =
-                    txt.includes('ot') ||
-                    txt.includes('โอที') ||
-                    txt.includes('นอกเวลา') ||
-                    txt.includes('อยู่เวร') ||
-                    txt.includes('ขึ้นเวร') ||
-                    txt.includes('ค่าตอบแทน') ||
-                    txt.includes('ค่าเวร') ||
-                    txt.includes('เวร');
+                    !asksOtPayment &&
+                    !asksFiscalSummary &&
+                    (txt.includes('ot') ||
+                      txt.includes('โอที') ||
+                      txt.includes('นอกเวลา') ||
+                      txt.includes('อยู่เวร') ||
+                      txt.includes('ขึ้นเวร') ||
+                      txt.includes('ค่าตอบแทน') ||
+                      txt.includes('ค่าเวร') ||
+                      txt.includes('เวร')) &&
+                    !/(?:off\s*เวร|ออฟเวร)/.test(txt);
 
+                  const asksUnreportedClinics = /(?:ยังไม่ได้รายงาน|ยังไม่รายงาน|ไม่ได้รายงาน|ยังไม่ส่ง|ไม่ได้ส่ง|ขาดรายงาน|ขาดส่ง|รายงานครบ|ส่งครบ|เหลือคลินิก|เหลือหน่วย|คลินิกไหนยัง|หน่วยงานไหนยัง|แผนกไหนยัง)/.test(
+                    txt
+                  );
+                  const asksReferral = /(?:ส่งต่อ|refer|รับย้าย|ห้องพิเศษ|จองห้อง|ยกเลิกห้อง|ศูนย์รับ)/.test(txt) && !asksUnreportedClinics;
+                  const asksOffDuty = /(?:off\s*เวร|ออฟเวร|ปิดคลินิก|ไม่ได้เปิดตรวจ|หยุดบริการ|งดตรวจ|รายวัน\s*off)/.test(txt);
+                  const asksCensusMeta = /(?:admit\s*rate|อัตรา\s*admit|สัดส่วนผู้ป่วยต่อพยาบาล|pt\/nurse|ส่งไลน์ล่าสุด|ส่งรายงานล่าสุด)/.test(txt);
                   const asksProductivity = /(?:productivity|โปรดัก|ประสิทธิผล|nhppd|\bftc\b|skill\s*mix|สกิลมิกซ์|\boutput\b|\binput\b|กำลังคน|อัตรากำลัง|ขาดคน|เกินเกณฑ์|ภาระงานหนัก|โหลดสุด)/.test(
                     txt
                   );
-                  const asksWorkload = /(?:ยอดผู้ป่วย|ผู้ป่วย|คนไข้|ยอดคนไข้|ยอดตรวจ|ยอดรวม|สรุปยอด|census|admit|แอดมิท|รับไว้|ส่งต่อ|refer|off\s*เวร|ปิดคลินิก|กี่ราย|เยอะสุด|มากสุด)/.test(
-                    txt
-                  );
-                  const asksCostCenter = /(?:cost\s*center|คอสเซ็นเตอร์|คอลเซ็นเตอร์|รหัสศูนย์ต้นทุน)/.test(txt);
-                  const asksScheduleInfo = /(?:ตั้งเวลา|ตารางส่ง|รอบส่งรายงาน|ส่งรายงานกี่โมง|ออโต้ส่งกี่โมง)/.test(txt);
-                  const asksStaffInfo =
-                    /(?:อยู่คลินิกไหน|อยู่หน่วยไหน|ตำแหน่งอะไร|รหัสพนักงาน|รหัสประจำตัว|กี่คนในหน่วย|มีพยาบาลกี่คน|มีบุคลากรกี่คน|รายชื่อเจ้าหน้าที่|รายชื่อบุคลากร|staff|อัตรากำลังประจำ)/.test(
+                  const asksWorkload =
+                    !asksUnreportedClinics &&
+                    !asksFiscalSummary &&
+                    (/(?:ภาระงาน|ยอดภาระงาน|จำนวนผู้ป่วย|ยอดบริการ|เปิดตรวจ|ปิดตรวจ|ศูนย์ปัญญาภิรมย์|อัตราส่วน|ยอดผู้ป่วย|ผู้ป่วย|คนไข้|ยอดคนไข้|ยอดตรวจ|ยอดรวม|สรุปยอด|census|admit|แอดมิท|รับไว้|กี่ราย|เยอะสุด|มากสุด)/.test(
                       txt
                     ) ||
-                    (isPersonQuery && !asksLeave && !asksOt && !asksWorkload && !asksProductivity && !asksRecallNotes);
+                      asksCensusMeta);
+                  const asksCostCenter = /(?:cost\s*center|คอสเซ็นเตอร์|คอลเซ็นเตอร์|รหัสศูนย์ต้นทุน)/.test(txt);
+                  const asksScheduleInfo = /(?:ตั้งเวลา|ตารางส่ง|รอบส่งรายงาน|ส่งรายงานกี่โมง|ออโต้ส่งกี่โมง|ส่งไลน์ล่าสุด|ส่งรายงานล่าสุด)/.test(txt);
+                  const asksHolidays = /(?:วันหยุด|นักขัตฤกษ์|วันหยุดพิเศษ|วันหยุดราชการ)/.test(txt) && !/นอกเวลาวันหยุด/.test(txt);
+                  const asksAuditLogs = /(?:ประวัติแก้ไข|ประวัติลบ|audit|แก้ไขล่าสุด|ลบล่าสุด|ใครแก้|ใครลบ)/.test(txt);
+                  const asksStaffInfo =
+                    /(?:อยู่คลินิกไหน|อยู่หน่วยไหน|ตำแหน่งอะไร|รหัสพนักงาน|รหัสประจำตัว|กี่คนในหน่วย|มีพยาบาลกี่คน|มีบุคลากรกี่คน|รายชื่อเจ้าหน้าที่|รายชื่อบุคลากร|staff|อัตรากำลังประจำ|ลาออก|เกษียณ|รายวัน)/.test(
+                      txt
+                    ) ||
+                    (isPersonQuery &&
+                      !asksLeave &&
+                      !asksOt &&
+                      !asksOtPayment &&
+                      !asksFiscalSummary &&
+                      !asksWorkload &&
+                      !asksProductivity &&
+                      !asksRecallNotes);
 
                   const sections: string[] = [];
 
@@ -1713,9 +1917,189 @@ async function createAppServer(): Promise<void> {
                   (s: ServerLineSchedule, idx: number) =>
                     `${idx + 1}. ${s.enabled === false ? '⏸️ ' : '✅ '}${s.label || s.shift} — เวลา ${s.time} น. [${s.shift}]`
                 );
+                const lastPushInfo =
+                  settingsObj?.lineLastSentAt || serverLineState.lastSentAt
+                    ? `\n📤 ส่งไลน์ล่าสุด: ${settingsObj?.lineLastSentAt || serverLineState.lastSentAt} (${settingsObj?.lineLastStatus || serverLineState.lastStatus || 'สำเร็จ'})`
+                    : '';
                 sections.push(
-                  `⏰ ตารางส่งรายงานอัตโนมัติเข้า LINE: ${serverLineState.enabled ? 'เปิดใช้งานอยู่' : 'ปิดอยู่'}\n${schedLines.join('\n')}`
+                  `⏰ ตารางส่งรายงานอัตโนมัติเข้า LINE: ${serverLineState.enabled ? 'เปิดใช้งานอยู่' : 'ปิดอยู่'}\n${schedLines.join('\n')}${lastPushInfo}`
                 );
+              }
+
+              if (asksHolidays) {
+                const customHols: Array<{ date?: string; name?: string }> = Array.isArray(settingsObj?.customHolidays)
+                  ? settingsObj.customHolidays
+                  : [];
+                const targetYr = Number(startYmd.slice(0, 4)) || Number(todayYmd.slice(0, 4));
+                const hMap = getHolidaysMapServer(targetYr, customHols);
+                const filterMonth = hasExplicitDate && isRange && startYmd.slice(0, 7) === endYmd.slice(0, 7) ? startYmd.slice(0, 7) : '';
+                const holEntries = Array.from(hMap.entries())
+                  .filter(([d]) => (filterMonth ? d.startsWith(filterMonth) : d >= todayYmd))
+                  .sort((a, b) => a[0].localeCompare(b[0]));
+                const allYearEntries = Array.from(hMap.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+                const showList = holEntries.length > 0 ? holEntries : allYearEntries;
+                if (showList.length > 0) {
+                  const hLines = showList
+                    .slice(0, 15)
+                    .map(([d, info], idx) => `${idx + 1}. ${formatThaiShortServer(d)} — ${info.name}${info.isCustom ? ' (วันหยุดพิเศษ รพ.)' : ''}`);
+                  sections.push(
+                    `📅 วันหยุดราชการและวันหยุดพิเศษ รพ.${filterMonth ? ` เดือน ${thaiShortMonths[Number(filterMonth.slice(5, 7)) - 1]} ${targetYr + 543}` : ` ปี พ.ศ. ${targetYr + 543}`} (${showList.length} วัน):\n${hLines.join('\n')}`
+                  );
+                } else {
+                  sections.push(`📅 ไม่พบวันหยุดในช่วงที่สอบถามของปี พ.ศ. ${targetYr + 543} ครับ`);
+                }
+              }
+
+              if (asksAuditLogs) {
+                const audits: any[] = Array.isArray(sdb?.auditLogs) ? sdb.auditLogs : [];
+                if (audits.length === 0) {
+                  sections.push(`🛡️ ยังไม่พบประวัติการแก้ไขหรือลบข้อมูล (Audit_Logs) ในระบบครับ`);
+                } else {
+                  const aLines = audits.slice(0, 10).map((a: any, idx: number) => {
+                    const ts = String(a.timestamp || '').replace('T', ' ').slice(0, 16);
+                    return `${idx + 1}. [${ts}] ${a.action || 'แก้ไข'} — ${a.targetName || '-'} (${a.summary || ''}) | เหตุผล: ${a.reason || '-'} • โดย ${a.editedBy || 'Admin'}`;
+                  });
+                  sections.push(`🛡️ ประวัติการแก้ไข/ลบข้อมูลล่าสุด (Audit Logs ${audits.length} รายการ):\n${aLines.join('\n')}`);
+                }
+              }
+
+              if (asksUnreportedClinics) {
+                const targetCheckDate = hasExplicitDate ? startYmd : todayYmd;
+                const customHols: Array<{ date?: string; name?: string }> = Array.isArray(settingsObj?.customHolidays)
+                  ? settingsObj.customHolidays
+                  : [];
+                const isHolDay = isWeekendOrHolidayServer(targetCheckDate, customHols);
+                let effShift = shiftFilter && shiftFilter !== 'OUT_TIME_ALL' ? shiftFilter : '';
+                if (!effShift) {
+                  if (shiftFilter === 'OUT_TIME_ALL') {
+                    effShift = isHolDay ? 'นอกเวลาวันหยุด 08:00-12:00' : 'นอกเวลาเย็น 16:00-20:00';
+                  } else if (isHolDay) {
+                    effShift = 'นอกเวลาวันหยุด 08:00-12:00';
+                  } else {
+                    const bkkHr = Number(bkk.hm.slice(0, 2)) || 12;
+                    effShift = targetCheckDate === todayYmd && bkkHr >= 16 ? 'นอกเวลาเย็น 16:00-20:00' : 'ในเวลา 08:00-16:00';
+                  }
+                }
+                const inClinicsCfg: string[] = Array.isArray(settingsObj?.inTimeClinics) && settingsObj.inTimeClinics.length > 0
+                  ? [...settingsObj.inTimeClinics]
+                  : [...DEFAULT_IN_CLINICS_SERVER];
+                if (!inClinicsCfg.includes('ศูนย์ปัญญาภิรมย์')) inClinicsCfg.push('ศูนย์ปัญญาภิรมย์');
+                if (!inClinicsCfg.includes('ศูนย์รับ - ส่งต่อผู้ป่วย')) inClinicsCfg.push('ศูนย์รับ - ส่งต่อผู้ป่วย');
+                const outClinicsCfg: string[] = Array.isArray(settingsObj?.outTimeClinics) && settingsObj.outTimeClinics.length > 0
+                  ? [...settingsObj.outTimeClinics]
+                  : [...DEFAULT_OUT_CLINICS_SERVER];
+                const expectedClinics = effShift === 'ในเวลา 08:00-16:00' ? inClinicsCfg : outClinicsCfg;
+
+                const dayShiftRows = workloadsArr.filter((w: any) => {
+                  const wd = normalizeDbDateServer(w.date);
+                  const wSh = String(w.shift || '').replace(/\s+/g, ' ').trim();
+                  return wd === targetCheckDate && wSh === effShift;
+                });
+                const reportedActiveSet = new Set<string>();
+                const reportedOffDutySet = new Set<string>();
+                dayShiftRows.forEach((w: any) => {
+                  const wc = String(w.clinic || '').trim();
+                  const rt = String(w.recordType || '').toUpperCase();
+                  const isPrem = wc.includes('ปัญญาภิรมย์') || /-Premium$/i.test(wc) || rt === 'PREMIUM_SUB' || rt === 'PREMIUM_POOL';
+                  const mapped = isPrem ? 'ศูนย์ปัญญาภิรมย์' : wc;
+                  const meta = parseWorkloadMetaServer(w);
+                  if (meta.isOffDuty) reportedOffDutySet.add(mapped);
+                  else reportedActiveSet.add(mapped);
+                });
+                const missingClinics = expectedClinics.filter((c) => !reportedActiveSet.has(c) && !reportedOffDutySet.has(c));
+                const reportedTotal = expectedClinics.length - missingClinics.length;
+                const missingLines = missingClinics.map((c, idx) => `${idx + 1}. ${c}`);
+                const offDutyList = Array.from(reportedOffDutySet);
+                sections.push(
+                  `📋 ตรวจสอบความครบถ้วนการรายงานภาระงาน ประจำ${formatThaiShortServer(targetCheckDate)} (${effShift}):\n` +
+                    `• รายงานแล้ว: ${reportedTotal}/${expectedClinics.length} หน่วยงาน` +
+                    (reportedActiveSet.size > 0 ? ` (เปิดตรวจ ${reportedActiveSet.size}` : '') +
+                    (offDutyList.length > 0 ? `${reportedActiveSet.size > 0 ? ', ' : ' ('}Off เวร ${offDutyList.length}` : '') +
+                    (reportedActiveSet.size > 0 || offDutyList.length > 0 ? ')' : '') +
+                    `\n` +
+                    (missingClinics.length === 0
+                      ? `✅ ส่งข้อมูลครบทุกหน่วยงานแล้วครับ!`
+                      : `⏳ ยังไม่ได้รายงาน (${missingClinics.length} หน่วยงาน):\n${missingLines.join('\n')}`) +
+                    (offDutyList.length > 0 ? `\n🏖️ แจ้ง Off เวร/ปิดคลินิก: ${offDutyList.join(', ')}` : '')
+                );
+              }
+
+              if (asksReferral) {
+                const refRows = workloadsArr
+                  .map((w: any) => ({ w, wd: normalizeDbDateServer(w.date), meta: parseWorkloadMetaServer(w) }))
+                  .filter(({ w, wd, meta }) => {
+                    if (!wd || wd < startYmd || wd > endYmd) return false;
+                    const wc = String(w.clinic || '').trim();
+                    return wc.includes('ส่งต่อ') || Boolean(meta.referralData);
+                  });
+                if (refRows.length === 0) {
+                  sections.push(`🚑 ไม่พบข้อมูลบันทึกของ "ศูนย์รับ - ส่งต่อผู้ป่วย" ประจำ${dateHeader} ครับ`);
+                } else {
+                  const refTotals = {
+                    admitPrivate: 0,
+                    admitGeneral: 0,
+                    referIn: 0,
+                    referOut: 0,
+                    reservePrivateRoom: 0,
+                    cancelPrivateRoom: 0,
+                  };
+                  const refReasons: string[] = [];
+                  refRows.forEach(({ meta }) => {
+                    const rd = meta.referralData || {};
+                    (Object.keys(refTotals) as Array<keyof typeof refTotals>).forEach((k) => {
+                      const c = Number(rd[k]?.count || 0) || 0;
+                      refTotals[k] += c;
+                      if (rd[k]?.reason) refReasons.push(`• ${k}: ${rd[k].reason}`);
+                    });
+                  });
+                  const grandRef =
+                    refTotals.admitPrivate +
+                    refTotals.admitGeneral +
+                    refTotals.referIn +
+                    refTotals.referOut +
+                    refTotals.reservePrivateRoom +
+                    refTotals.cancelPrivateRoom;
+                  sections.push(
+                    `🚑 สรุปข้อมูลศูนย์รับ - ส่งต่อผู้ป่วย ประจำ${dateHeader} (รวม ${grandRef} รายการ จาก ${refRows.length} บันทึก):\n` +
+                      `• Admit พิเศษ: ${refTotals.admitPrivate} ราย\n` +
+                      `• Admit สามัญ: ${refTotals.admitGeneral} ราย\n` +
+                      `• Refer in (รับเข้า): ${refTotals.referIn} ราย\n` +
+                      `• Refer out (ส่งต่อ): ${refTotals.referOut} ราย\n` +
+                      `• จองห้องพิเศษ: ${refTotals.reservePrivateRoom} ราย\n` +
+                      `• ยกเลิกห้องพิเศษ: ${refTotals.cancelPrivateRoom} ราย` +
+                      (refReasons.length > 0 ? `\n📝 เหตุผล/หมายเหตุ:\n${refReasons.slice(0, 6).join('\n')}` : '')
+                  );
+                }
+              }
+
+              if (asksOffDuty) {
+                const offClinics: string[] = [];
+                const offStaffList: string[] = [];
+                workloadsArr.forEach((w: any) => {
+                  const wd = normalizeDbDateServer(w.date);
+                  if (!wd || wd < startYmd || wd > endYmd) return;
+                  const meta = parseWorkloadMetaServer(w);
+                  const dTag = isRange ? `[${formatCompactThaiServer(wd)}] ` : '';
+                  if (meta.isOffDuty) {
+                    offClinics.push(`• ${dTag}${w.clinic} (${w.shift})${meta.offDutyReason ? ` — ${meta.offDutyReason}` : ''}`);
+                  }
+                  if (meta.offDutyStaff.length > 0) {
+                    meta.offDutyStaff.forEach((os) => {
+                      offStaffList.push(
+                        `• ${dTag}${os.staffName} (${os.position} • ${w.clinic}) — ${os.amount === 0.5 ? `0.5 แรง [${os.periodLabel || 'ครึ่งเวร'}]` : '1 แรง'}${os.reason ? ` (${os.reason})` : ''}`
+                      );
+                    });
+                  }
+                });
+                if (offClinics.length === 0 && offStaffList.length === 0) {
+                  sections.push(`✅ ไม่พบรายการ Off เวรห้องตรวจหรือ Off เวรพนักงานรายวัน ประจำ${dateHeader} ครับ`);
+                } else {
+                  sections.push(
+                    `🏖️ รายการ Off เวร ประจำ${dateHeader}:\n` +
+                      (offClinics.length > 0 ? `🏥 ปิดคลินิก/Off เวร (${offClinics.length}):\n${offClinics.slice(0, 15).join('\n')}\n` : '') +
+                      (offStaffList.length > 0 ? `👤 พนักงานรายวัน Off เวร (${offStaffList.length} คน):\n${offStaffList.slice(0, 15).join('\n')}` : '')
+                  );
+                }
               }
 
               if (asksStaffInfo) {
@@ -1729,10 +2113,36 @@ async function createAppServer(): Promise<void> {
                       (st.status ? `\n• สถานะ: ${st.status}` : '')
                   );
                   sections.push(pLines.join('\n\n'));
+                } else if (txt.includes('ลาออก') || txt.includes('เกษียณ')) {
+                  const wantStatus = txt.includes('เกษียณ') ? 'Retired' : 'Resigned';
+                  const stMatched = staffArr.filter((s: any) => String(s.status || '') === wantStatus);
+                  const stLabel = wantStatus === 'Retired' ? 'เกษียณอายุ (Retired)' : 'ลาออก/ย้าย (Resigned)';
+                  if (stMatched.length > 0) {
+                    sections.push(
+                      `📋 รายชื่อบุคลากรสถานะ ${stLabel} (${stMatched.length} คน):\n` +
+                        stMatched.slice(0, 25).map((s: any, idx: number) => `${idx + 1}. ${s.name} (${s.position} • ${s.homeClinic})`).join('\n')
+                    );
+                  } else {
+                    sections.push(`✅ ไม่มีบุคลากรสถานะ ${stLabel} ใน Staff_Master ครับ`);
+                  }
+                } else if (txt.includes('รายวัน')) {
+                  const dwStaff = staffArr.filter((s: any) => String(s.status || 'Active') === 'Active' && String(s.position || '').includes('รายวัน'));
+                  if (dwStaff.length > 0) {
+                    sections.push(
+                      `👥 บุคลากรตำแหน่งจ้างรายวัน (Active ${dwStaff.length} คน):\n` +
+                        dwStaff.slice(0, 30).map((s: any, idx: number) => `${idx + 1}. ${s.name} (${s.position} • ${s.homeClinic})`).join('\n')
+                    );
+                  } else {
+                    sections.push(`✅ ไม่พบรายชื่อตำแหน่งจ้างรายวันใน Staff_Master ครับ`);
+                  }
                 } else if (matchedClinic) {
                   const cStaff = Array.from(dirMap.values()).filter(
                     (st: PersonDirEntry) =>
-                      st.status !== 'Inactive' && st.clinic && st.clinic.toLowerCase().includes(matchedClinic.toLowerCase())
+                      st.status !== 'Inactive' &&
+                      st.status !== 'Resigned' &&
+                      st.status !== 'Retired' &&
+                      st.clinic &&
+                      st.clinic.toLowerCase().includes(matchedClinic.toLowerCase())
                   );
                   if (cStaff.length > 0) {
                     const csLines = cStaff
@@ -1743,14 +2153,138 @@ async function createAppServer(): Promise<void> {
                     sections.push(`🔍 ไม่พบรายชื่อบุคลากรประจำ "${matchedClinic}" ใน Staff_Master ครับ`);
                   }
                 } else {
-                  const activeStaff = Array.from(dirMap.values()).filter((st: PersonDirEntry) => st.status !== 'Inactive');
+                  const activeStaff = staffArr.filter((st: any) => String(st.status || 'Active') === 'Active');
+                  const resignedCnt = staffArr.filter((st: any) => st.status === 'Resigned').length;
+                  const retiredCnt = staffArr.filter((st: any) => st.status === 'Retired').length;
                   const posCounts: Record<string, number> = {};
-                  activeStaff.forEach((st: PersonDirEntry) => {
-                    const pKey = st.pos || 'ไม่ระบุ';
+                  activeStaff.forEach((st: any) => {
+                    const pKey = String(st.position || 'ไม่ระบุ');
                     posCounts[pKey] = (posCounts[pKey] || 0) + 1;
                   });
                   const posSummary = Object.keys(posCounts).map((k: string) => `• ${k}: ${posCounts[k]} คน`);
-                  sections.push(`👩‍⚕️ สรุปบุคลากร OPD ที่ปฏิบัติงาน (Active):\nรวมทั้งหมด ${activeStaff.length} คน\n${posSummary.join('\n')}`);
+                  sections.push(
+                    `👩‍⚕️ สรุปบุคลากร OPD (Staff_Master ทั้งหมด ${staffArr.length} คน):\n` +
+                      `• ปฏิบัติงาน (Active): ${activeStaff.length} คน | ลาออก/ย้าย: ${resignedCnt} | เกษียณ: ${retiredCnt}\n` +
+                      posSummary.join('\n')
+                  );
+                }
+              }
+
+              if (asksFiscalSummary) {
+                const fyYearMatch = txt.match(/(?:ปีงบ(?:ประมาณ)?\s*)(25\d{2}|20\d{2})/);
+                const curCeY = Number(todayYmd.slice(0, 4));
+                const curCeM = Number(todayYmd.slice(5, 7));
+                const defaultBeFy = curCeM >= 10 ? curCeY + 544 : curCeY + 543;
+                let fyBe = defaultBeFy;
+                if (fyYearMatch) {
+                  const rawFy = Number(fyYearMatch[1]);
+                  fyBe = rawFy >= 2400 ? rawFy : rawFy + 543;
+                }
+                const fyStartCe = fyBe - 543 - 1;
+                const fyStartYmd = `${fyStartCe}-10-01`;
+                const fyEndYmd = `${fyStartCe + 1}-09-30`;
+                const personToksFy = matchedStaff.length > 0 ? matchedStaff.map((s) => stripThaiHonorificsServer(s.name)) : [];
+
+                const fyLeaves = leavesArr.filter((l: any) => {
+                  const ls = normalizeDbDateServer(l.startDate);
+                  if (!ls || ls < fyStartYmd || ls > fyEndYmd) return false;
+                  if (matchedClinic && !String(l.clinic || '').toLowerCase().includes(matchedClinic.toLowerCase())) return false;
+                  if (personToksFy.length > 0) {
+                    const nm = stripThaiHonorificsServer(l.staffName);
+                    return personToksFy.some((pt) => pt && (nm.includes(pt) || pt.includes(nm)));
+                  }
+                  return true;
+                });
+                let fyLeaveDays = 0;
+                let fyTrainingCount = 0;
+                let fyTrainingDays = 0;
+                fyLeaves.forEach((l: any) => {
+                  const dVal = Number(l.days || 1) || 1;
+                  if (String(l.leaveType || '').includes('อบรม') || String(l.leaveType || '').includes('ประชุม')) {
+                    fyTrainingCount += 1;
+                    fyTrainingDays += dVal;
+                  } else {
+                    fyLeaveDays += dVal;
+                  }
+                });
+                const fyOt = otArr.filter((o: any) => {
+                  const od = normalizeDbDateServer(o.date);
+                  if (!od || od < fyStartYmd || od > fyEndYmd) return false;
+                  if (matchedClinic && !String(o.workClinic || '').toLowerCase().includes(matchedClinic.toLowerCase())) return false;
+                  if (personToksFy.length > 0) {
+                    const nm = stripThaiHonorificsServer(o.staffName);
+                    return personToksFy.some((pt) => pt && (nm.includes(pt) || pt.includes(nm)));
+                  }
+                  return true;
+                });
+                const fyOtHrs = fyOt.reduce((s: number, o: any) => s + (Number(o.hours) > 0 ? Number(o.hours) : 4), 0);
+                const fyOtPeople = new Set(fyOt.map((o: any) => String(o.staffName || '').trim())).size;
+                sections.push(
+                  `📊 สรุปวันลา/อบรม & OT ปีงบประมาณ ${fyBe} (ต.ค. ${fyBe - 1 - 2500} – ก.ย. ${fyBe - 2500})` +
+                    `${matchedStaff.length > 0 ? ` — ${matchedStaff[0].name}` : matchedClinic ? ` — ${matchedClinic}` : ''}:\n` +
+                    `• วันลาจริง (ไม่รวมอบรม): ${fyLeaveDays} วันทำการ (${fyLeaves.length - fyTrainingCount} รายการ)\n` +
+                    `• ไปอบรม/ประชุม: ${fyTrainingCount} ครั้ง (${fyTrainingDays} วัน)\n` +
+                    `• เวรนอกเวลา (OT): ${fyOt.length} เวร (${fyOtPeople} คน) • รวม ${fyOtHrs} ชม.`
+                );
+              }
+
+              if (asksOtPayment) {
+                let payStart = startYmd;
+                let payEnd = endYmd;
+                let payHeader = dateHeader;
+                if (!hasExplicitDate) {
+                  const bp = todayYmd.split('-').map(Number);
+                  const mLast = new Date(Date.UTC(bp[0], bp[1], 0)).getUTCDate();
+                  payStart = `${bp[0]}-${String(bp[1]).padStart(2, '0')}-01`;
+                  payEnd = `${bp[0]}-${String(bp[1]).padStart(2, '0')}-${String(mLast).padStart(2, '0')}`;
+                  payHeader = `เดือนนี้ (${thaiShortMonths[bp[1] - 1]} ${bp[0] + 543})`;
+                }
+                const otRatesMap: Record<string, number> = settingsObj?.otHourlyRates || {};
+                const matchedPayOt = otArr.filter((o: any) => {
+                  const od = normalizeDbDateServer(o.date);
+                  if (!od || od < payStart || od > payEnd) return false;
+                  if (matchedClinic && !String(o.workClinic || '').toLowerCase().includes(matchedClinic.toLowerCase())) return false;
+                  if (shiftFilter === 'OUT_TIME_ALL' && String(o.shift || '').startsWith('ในเวลา 08:00')) return false;
+                  if (shiftFilter && shiftFilter !== 'OUT_TIME_ALL' && o.shift !== shiftFilter) return false;
+                  return true;
+                });
+                if (matchedPayOt.length === 0) {
+                  sections.push(`💰 ไม่พบข้อมูลเวร OT สำหรับคำนวณหลักฐานจ่ายประจำ${payHeader} ครับ`);
+                } else {
+                  let totalHrs = 0;
+                  let totalGross = 0;
+                  let opdCount = 0;
+                  let extCount = 0;
+                  const peopleSet = new Set<string>();
+                  const posHrs: Record<string, { hrs: number; gross: number }> = {};
+                  matchedPayOt.forEach((o: any) => {
+                    const sh = String(o.shift || '');
+                    const hrs = Number(o.hours) > 0 ? Number(o.hours) : sh.includes('ในเวลาราชการ') ? 7 : 4;
+                    const pos = String(o.position || 'RN').trim();
+                    const rate = getOtHourlyRateServer(pos, otRatesMap);
+                    const gross = hrs * rate;
+                    totalHrs += hrs;
+                    totalGross += gross;
+                    peopleSet.add(String(o.staffName || '').trim());
+                    if (o.isExternal) extCount += 1;
+                    else opdCount += 1;
+                    if (!posHrs[pos]) posHrs[pos] = { hrs: 0, gross: 0 };
+                    posHrs[pos].hrs += hrs;
+                    posHrs[pos].gross += gross;
+                  });
+                  const tax5 = Math.round(totalGross * 0.05 * 100) / 100;
+                  const netPay = totalGross - tax5;
+                  const posLines = Object.keys(posHrs).map(
+                    (p) => `• ${p} (${getOtHourlyRateServer(p, otRatesMap)} บ./ชม.): ${posHrs[p].hrs} ชม. = ${posHrs[p].gross.toLocaleString()} บ.`
+                  );
+                  sections.push(
+                    `💰 สรุปหลักฐานจ่ายค่าตอบแทน OT${matchedClinic ? ` (${matchedClinic})` : ''} ประจำ${payHeader}:\n` +
+                      `• จำนวน ${peopleSet.size} คน (${matchedPayOt.length} เวร: OPD ${opdCount} / เฉพาะกิจ ${extCount}) • ${totalHrs} ชม.\n` +
+                      `• ยอดเบิกก่อนหักภาษี: ${totalGross.toLocaleString()} บาท\n` +
+                      `• หักภาษี ณ ที่จ่าย 5%: ${tax5.toLocaleString()} บาท\n` +
+                      `• รับสุทธิทั้งหมด: ${netPay.toLocaleString()} บาท\n` +
+                      posLines.slice(0, 6).join('\n')
+                  );
                 }
               }
 
@@ -1944,6 +2478,10 @@ async function createAppServer(): Promise<void> {
                   wlHeader = `เดือนนี้ (${thaiShortMonths[bp[1] - 1]} ${bp[0] + 543})`;
                 }
 
+                const excludeLasik = /(?:ไม่รวมเลสิก|คัดเลสิก|ไม่นับเลสิก|ยกเว้นเลสิก)/.test(txt);
+                const excludeReferral = /(?:ไม่รวมศูนย์รับ|คัดศูนย์รับ|ไม่นับศูนย์รับ)/.test(txt);
+                const asksLowest = /(?:ต่ำสุด|น้อยสุด)/.test(txt);
+
                 const generalNhppd = Number(settingsObj?.nhppd) > 0 ? Number(settingsObj.nhppd) : 0.4;
                 const screeningNhppd = Number(settingsObj?.screeningNhppd) > 0 ? Number(settingsObj.screeningNhppd) : 0.1;
                 const stdHr = Number(settingsObj?.stdHr) > 0 ? Number(settingsObj.stdHr) : 7;
@@ -1972,6 +2510,8 @@ async function createAppServer(): Promise<void> {
                     if (r.wd < wlStart || r.wd > wlEnd) return false;
                     if (shiftFilter === 'OUT_TIME_ALL' && r.wShift === 'ในเวลา 08:00-16:00') return false;
                     else if (shiftFilter && shiftFilter !== 'OUT_TIME_ALL' && r.wShift !== shiftFilter) return false;
+                    if (excludeLasik && r.groupClinic.includes('เลสิก')) return false;
+                    if (excludeReferral && r.groupClinic.includes('ส่งต่อ')) return false;
                     if (
                       matchedClinic &&
                       !r.groupClinic.toLowerCase().includes(matchedClinic.toLowerCase()) &&
@@ -1986,15 +2526,18 @@ async function createAppServer(): Promise<void> {
                   const latestSorted = Array.from(allWlDates).sort();
                   const latestHint =
                     latestSorted.length > 0 ? `\n💡 ล่าสุดที่มีข้อมูลในระบบคือ ${formatThaiShortServer(latestSorted[latestSorted.length - 1])}` : '';
-                  sections.push(`✅ ไม่พบข้อมูลภาระงานผู้ป่วย${matchedClinic ? ` (${matchedClinic})` : ''} ประจำ${wlHeader} ครับ${latestHint}`);
+                  sections.push(`✅ ไม่พบข้อมูลภาระงานผู้ป่วย${matchedClinic ? ` (${matchedClinic})` : ''}${shiftFilter && shiftFilter !== 'OUT_TIME_ALL' ? ` [${shiftFilter}]` : ''} ประจำ${wlHeader} ครับ${latestHint}`);
                 } else {
                   let sumPt = 0,
                     sumAdult = 0,
                     sumChild = 0,
                     sumAdmit = 0,
+                    sumHN = 0,
                     sumRN = 0,
                     sumPN = 0,
-                    sumNA = 0;
+                    sumNA = 0,
+                    sumClerk = 0,
+                    sumSW = 0;
                   const activeDaysSet = new Set<string>();
                   const byClinicMap = new Map<
                     string,
@@ -2004,16 +2547,22 @@ async function createAppServer(): Promise<void> {
                     const adult = Number(r.w.adultPt || 0);
                     const child = Number(r.w.childPt || 0);
                     const admit = Number(r.w.admit || 0);
+                    const hn = Number(r.w.hn || 0);
                     const rn = Number(r.w.rn || 0);
                     const pn = Number(r.w.pn || 0);
                     const na = Number(r.w.na || 0);
+                    const clk = Number(r.w.clerk || 0);
+                    const sw = Number(r.w.serviceWorker || 0);
                     sumPt += r.pt;
                     sumAdult += adult;
                     sumChild += child;
                     sumAdmit += admit;
+                    sumHN += hn;
                     sumRN += rn;
                     sumPN += pn;
                     sumNA += na;
+                    sumClerk += clk;
+                    sumSW += sw;
                     if (r.pt > 0 || rn + pn + na > 0) activeDaysSet.add(r.wd);
                     let bc = byClinicMap.get(r.groupClinic);
                     if (!bc) {
@@ -2031,6 +2580,8 @@ async function createAppServer(): Promise<void> {
                   const wDaysCount = activeDaysSet.size || 1;
                   const totalNursing = sumRN + sumPN + sumNA;
                   const avgPtPerDay = sumPt / wDaysCount;
+                  const admitRatePct = sumPt > 0 ? (sumAdmit / sumPt) * 100 : 0;
+                  const ptPerNurse = totalNursing > 0 ? sumPt / totalNursing : 0;
                   const clinicArr = Array.from(byClinicMap.values()).map((c) => {
                     const cd = c.days.size || 1;
                     const cNhppd = c.name === 'หน่วยคัดกรอง' ? screeningNhppd : generalNhppd;
@@ -2056,57 +2607,51 @@ async function createAppServer(): Promise<void> {
 
                   if (asksWorkload) {
                     const topClinics = [...clinicArr]
-                      .sort((a, b) => b.pt - a.pt)
+                      .sort((a, b) => (asksLowest ? a.pt - b.pt : b.pt - a.pt))
                       .slice(0, 6)
                       .map((c, idx: number) => `${idx + 1}. ${c.name}: ${c.pt.toLocaleString()} ราย${c.admit > 0 ? ` (Admit ${c.admit})` : ''}`);
+                    const shiftTag = shiftFilter && shiftFilter !== 'OUT_TIME_ALL' ? ` [${shiftFilter}]` : shiftFilter === 'OUT_TIME_ALL' ? ' [นอกเวลา]' : '';
                     sections.push(
-                      `📊 สรุปภาระงานผู้ป่วยนอก${matchedClinic ? ` (${matchedClinic})` : ''} ประจำ${wlHeader}:\n` +
+                      `📊 สรุปภาระงานผู้ป่วยนอก${matchedClinic ? ` (${matchedClinic})` : ''}${shiftTag} ประจำ${wlHeader} (${clinicArr.length} หน่วย):\n` +
                         `👥 ผู้ป่วยรวม: ${sumPt.toLocaleString()} ราย (ผู้ใหญ่ ${sumAdult.toLocaleString()} • เด็ก ${sumChild.toLocaleString()})\n` +
-                        `🛌 Admit: ${sumAdmit.toLocaleString()} ราย | เฉลี่ย ${avgPtPerDay.toFixed(1)} ราย/วัน (${wDaysCount} วัน)\n` +
-                        `👩‍⚕️ กำลังคนพยาบาล (RN+PN+NA): ${totalNursing.toFixed(1)} แรง (RN ${sumRN.toFixed(1)} / PN ${sumPN.toFixed(1)} / NA ${sumNA.toFixed(1)})` +
-                        (!matchedClinic && topClinics.length > 0 ? `\n🏆 อันดับคลินิกยอดสูงสุด:\n${topClinics.join('\n')}` : '')
+                        `🛌 Admit: ${sumAdmit.toLocaleString()} ราย (Admit Rate ${admitRatePct.toFixed(2)}%) | สัดส่วน Pt/Nurse: ${ptPerNurse.toFixed(1)} คน/แรง\n` +
+                        `👩‍⚕️ กำลังคนพยาบาล: ${totalNursing.toFixed(1)} แรง (RN ${sumRN.toFixed(1)} / PN ${sumPN.toFixed(1)} / NA ${sumNA.toFixed(1)})${sumHN + sumClerk + sumSW > 0 ? ` • HN ${sumHN.toFixed(1)} / ทั่วไป ${sumClerk.toFixed(1)} / บริการ ${sumSW.toFixed(1)}` : ''}` +
+                        (wDaysCount > 1 ? `\n📆 เฉลี่ย ${avgPtPerDay.toFixed(1)} ราย/วัน (${wDaysCount} วัน)` : '') +
+                        (!matchedClinic && topClinics.length > 0 ? `\n🏆 ${asksLowest ? 'อันดับคลินิกยอดน้อยสุด' : 'อันดับคลินิกยอดสูงสุด'}:\n${topClinics.join('\n')}` : '')
                     );
                   }
 
                   if (asksProductivity) {
-                    const highLoadClinics = clinicArr
-                      .filter((c) => c.prod > 0)
-                      .sort((a, b) => b.prod - a.prod)
-                      .slice(0, 3)
-                      .map((c) => `• ${c.name}: ${c.prod.toFixed(1)}% (${c.pt.toLocaleString()} ราย)`);
+                    const sortedLoad = clinicArr.filter((c) => c.prod > 0).sort((a, b) => (asksLowest ? a.prod - b.prod : b.prod - a.prod));
+                    const loadLines = sortedLoad.slice(0, 4).map((c) => `• ${c.name}: ${c.prod.toFixed(1)}% (${c.pt.toLocaleString()} ราย)`);
                     sections.push(
-                      `📈 วิเคราะห์ Productivity & กำลังคน${matchedClinic ? ` (${matchedClinic})` : ''} ประจำ${wlHeader}:\n` +
+                      `📈 วิเคราะห์ Productivity & กำลังคน${matchedClinic ? ` (${matchedClinic})` : ''}${excludeLasik ? ' [ไม่รวมเลสิก]' : ''} ประจำ${wlHeader}:\n` +
                         `• Productivity: ${prodPct.toFixed(1)}% — ${prodStatusTxt}\n` +
                         `• Skill Mix (สัดส่วน RN): ${skillMixPct.toFixed(1)}%\n` +
                         `• Output ต้องการ: ${outputVal.toFixed(2)} แรง/วัน | Input จัดจริง: ${inputVal.toFixed(2)} แรง/วัน (FTC ${ftcSum.toFixed(2)})\n` +
                         `• เกณฑ์ NHPPD: ทั่วไป ${generalNhppd} / คัดกรอง ${screeningNhppd} (Std ${stdHr} ชม.)` +
-                        (!matchedClinic && highLoadClinics.length > 0 ? `\n🔥 คลินิกภาระงานสูงสุด:\n${highLoadClinics.join('\n')}` : '')
+                        (!matchedClinic && loadLines.length > 0 ? `\n${asksLowest ? '📉 คลินิกภาระงานต่ำสุด' : '🔥 คลินิกภาระงานสูงสุด'}:\n${loadLines.join('\n')}` : '')
                     );
                   }
                 }
               }
 
+                  const isPureHelpOrGreeting =
+                    cmdLower === '' ||
+                    /(?:วิธีใช้|คู่มือ|คำสั่ง|เมนู|ทำอะไรได้|ความสามารถ|แนะนำตัว|\bbot\b|\bhelp\b)/.test(cmdLower) ||
+                    (cmdLower.length <= 22 && /^(?:สวัสดี|หวัดดี|ดีครับ|ฮัลโหล|hello|hi|hey)/.test(cmdLower));
+
                   if (sections.length > 0) {
                     replyText = sections.join('\n\n');
                     addClosingWit = sections.length >= 2;
-                  } else if (
-                    txt.includes('ช่วย') ||
-                    txt.includes('คำสั่ง') ||
-                    txt.includes('เมนู') ||
-                    txt.includes('ทำอะไรได้') ||
-                    txt.includes('bot') ||
-                    txt.includes('help') ||
-                    txt.includes('สวัสดี') ||
-                    txt.includes('บูบี้')
-                  ) {
+                  } else if (isPureHelpOrGreeting) {
                     replyText =
-                      `🎩 สวัสดีครับ ${speakerCall} ผม "บูบี้" (Booby) เลขานุการส่วนตัวและผู้ช่วย AI ระบบ OPD รพ.ชลประทาน พร้อมรับคำสั่งครับ:\n\n` +
-                      `1️⃣ ข้อมูล OPD: ถามวันลา / เวร OT / ยอดผู้ป่วย / Productivity / Cost Center / บุคลากรได้ทันที\n` +
-                      `2️⃣ นัดหมาย & เตือนความจำ: "ลงนัด <วันที่> <เวลา> เรื่อง <หัวข้อ>", "ดูตารางนัด", "ยกเลิกนัด #ID"\n` +
-                      `3️⃣ สรุปแชต & แยกงาน (To-Do): "สรุปแชต: <วางข้อความ>", "สั่งงาน: <ชื่องาน>", "งานค้าง", "ปิดงาน #ID"\n` +
-                      `4️⃣ ร่างข้อความ (2 สไตล์): "ร่างประกาศ: <เรื่องที่จะแจ้ง>"\n` +
-                      `5️⃣ สรุปผู้บริหาร: "สรุปผู้บริหาร" หรือ "ภาพรวมวันนี้"\n` +
-                      `6️⃣ จดจำข้อตกลงกลุ่ม: "จำไว้ว่า <ข้อความ>", "สรุปข้อตกลง", "ลบข้อตกลง <คำค้น>"\n` +
+                      `🎩 สวัสดีครับ ${speakerCall} ผม "บูบี้" (Booby) เลขานุการส่วนตัวและผู้ช่วย AI ระบบ OPD รพ.ชลประทาน พร้อมดูแลครบทั้ง 5 เมนูบนเว็บแอปครับ:\n\n` +
+                      `1️⃣ ภาระงาน & ส่งต่อ/Off เวร: "ยอดภาระงานในเวลาวันนี้", "หน่วยงานไหนยังไม่ได้รายงานบ้าง", "ยอดศูนย์รับ-ส่งต่อ", "ใคร Off เวร"\n` +
+                      `2️⃣ วันลา อบรม OT & เบิกเงิน: "วันนี้ใครลาบ้าง", "วันศุกร์มี OT กี่คน", "สรุปเงิน OT เดือนนี้", "สรุปปีงบประมาณ"\n` +
+                      `3️⃣ Productivity & กำลังคน: "Productivity เดือนนี้", "คลินิกไหนโหลดสุด", "Admit Rate วันนี้"\n` +
+                      `4️⃣ ทะเบียนบุคลากร วันหยุด Cost Center & Audit: "วันหยุดเดือนนี้", "ประวัติแก้ไขล่าสุด", "รายชื่อบุคลากรรายวัน", "Cost Center"\n` +
+                      `5️⃣ เลขาส่วนตัว & ความจำกลุ่ม: "สรุปผู้บริหาร", "ลงนัด ...", "สั่งงาน: ...", "สรุปแชต: ...", "ร่างประกาศ: ...", "จำไว้ว่า ..."\n` +
                       `• "/id" (ดูรหัสห้อง/User ID)`;
                     addClosingWit = true;
                   } else {
@@ -2127,24 +2672,49 @@ async function createAppServer(): Promise<void> {
                     }
 
                     if (!replyText && (!isGroupChat || isMentioned || isReplyToQuote)) {
-                      const todayWlCount = workloadsArr.filter((w: any) => normalizeDbDateServer(w.date) === todayYmd).length;
-                      const todayLeaveCount = leavesArr.filter((l: any) => {
+                      const todayWlRows = workloadsArr.filter((w: any) => normalizeDbDateServer(w.date) === todayYmd);
+                      const todayPtSum = todayWlRows.reduce(
+                        (s: number, w: any) => s + Math.max(Number(w.totalPt || 0), Number(w.adultPt || 0) + Number(w.childPt || 0)),
+                        0
+                      );
+                      const todayAdmitSum = todayWlRows.reduce((s: number, w: any) => s + Number(w.admit || 0), 0);
+                      const inClinicsSnap: string[] = Array.isArray(settingsObj?.inTimeClinics) && settingsObj.inTimeClinics.length > 0
+                        ? settingsObj.inTimeClinics
+                        : DEFAULT_IN_CLINICS_SERVER;
+                      const reportedInSet = new Set(
+                        todayWlRows
+                          .filter((w: any) => String(w.shift || '').trim() === 'ในเวลา 08:00-16:00')
+                          .map((w: any) => (String(w.clinic || '').includes('ปัญญาภิรมย์') ? 'ศูนย์ปัญญาภิรมย์' : String(w.clinic || '').trim()))
+                      );
+                      const missingTodayIn = inClinicsSnap.filter((c: string) => !reportedInSet.has(c));
+                      const todayLeaves = leavesArr.filter((l: any) => {
                         const ls = normalizeDbDateServer(l.startDate);
                         const le = normalizeDbDateServer(l.endDate) || ls;
                         return ls && ls <= todayYmd && le >= todayYmd;
-                      }).length;
-                      const todayOtCount = otArr.filter((o: any) => normalizeDbDateServer(o.date) === todayYmd).length;
+                      });
+                      const todayOt = otArr.filter((o: any) => normalizeDbDateServer(o.date) === todayYmd);
+                      const curMonthYm = todayYmd.slice(0, 7);
+                      const monthOtRows = otArr.filter((o: any) => normalizeDbDateServer(o.date).startsWith(curMonthYm));
+                      const monthOtHrs = monthOtRows.reduce((s: number, o: any) => s + (Number(o.hours) > 0 ? Number(o.hours) : 4), 0);
+                      const auditsSnap: any[] = Array.isArray(sdb?.auditLogs) ? sdb.auditLogs : [];
+
+                      const snapshotSummary =
+                        `สรุปข้อมูลสดจากทั้ง 5 เมนูในระบบ ณ ${formatThaiShortServer(todayYmd)}:\n` +
+                        `[เมนู 1&3 ภาระงาน/Census วันนี้] บันทึก ${todayWlRows.length} รายการ • ผู้ป่วยรวม ${todayPtSum} ราย • Admit ${todayAdmitSum} • คลินิกในเวลาที่ยังไม่ได้ส่งรายงาน (${missingTodayIn.length}): ${missingTodayIn.slice(0, 10).join(', ') || 'ครบแล้ว'}\n` +
+                        `[เมนู 2 ลา/อบรม/OT] วันนี้ลา ${todayLeaves.length} คน (${todayLeaves.slice(0, 5).map((l: any) => l.staffName).join(', ')}) • วันนี้มี OT ${todayOt.length} คน • เดือนนี้มี OT ${monthOtRows.length} เวร (${monthOtHrs} ชม.)\n` +
+                        `[เมนู 4&5 บุคลากร/ระบบ] Staff_Master ${staffArr.length} คน (Active ${staffArr.filter((s: any) => String(s.status || 'Active') === 'Active').length}) • Audit Logs ${auditsSnap.length} รายการ • บันทึกกลุ่มที่มองเห็น ${visibleNotes.length} รายการ`;
+
                       const aiGeneral = await generateBoobyAiText(
                         `คุณคือ "บูบี้" (Booby) เลขานุการส่วนตัวและผู้ช่วย AI ระบบ OPD รพ.ชลประทาน\n` +
                           `บุคลิก: สุภาพ สุขุม ฉลาด แฝงอารมณ์ขันแบบผู้ดีอังกฤษเล็กน้อย ลงท้ายด้วย "ครับ" เสมอ\n` +
                           `เรียกเจ้าของระบบว่า "${ownerCallName}" และผู้พูดปัจจุบันว่า "${speakerCall}"\n` +
-                          `กฎเหล็ก: ห้ามใช้ตาราง Markdown (|---|) ใช้ย่อหน้าสั้น 3-4 บรรทัด อ่านง่ายบนมือถือ LINE ตอบตรงประเด็น\n` +
-                          `บริบทวันนี้ (${formatThaiShortServer(todayYmd)}): มีบันทึกภาระงาน ${todayWlCount} รายการ, ผู้ลา ${todayLeaveCount} รายการ, เวร OT ${todayOtCount} รายการ, บันทึกที่มองเห็นได้ในห้องนี้ ${visibleNotes.length} รายการ`,
+                          `กฎเหล็ก: ห้ามใช้ตาราง Markdown (|---|) ใช้ย่อหน้าสั้น 3-4 บรรทัด อ่านง่ายบนมือถือ LINE ตอบตรงประเด็นโดยอ้างอิงเฉพาะข้อมูลจริงด้านล่าง (ห้ามแต่งตัวเลขเอง)\n` +
+                          snapshotSummary,
                         `${speakerCall} ถาม/สั่งงานว่า: ${cmdText || rawText}`
                       );
                       replyText =
                         aiGeneral ||
-                        `🎩 ${speakerCall} ครับ บูบี้พร้อมช่วยจัดระเบียบงานครับ ลองระบุคำสั่งสั้นๆ เช่น "สรุปผู้บริหาร", "ใครลาวันนี้", "ลงนัด ...", หรือพิมพ์ "เมนู" เพื่อดูความสามารถทั้งหมดได้เลยครับ`;
+                        `🎩 ${speakerCall} ครับ บูบี้พร้อมช่วยจัดระเบียบงานครับ ลองระบุคำสั่งสั้นๆ เช่น "ยอดภาระงานในเวลาวันนี้", "หน่วยงานไหนยังไม่ได้รายงานบ้าง", "ใครลาวันนี้", หรือพิมพ์ "เมนู" เพื่อดูความสามารถทั้งหมดได้เลยครับ`;
                     }
                   }
                 }

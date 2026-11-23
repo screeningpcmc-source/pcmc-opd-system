@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { User } from 'firebase/auth';
 import { 
   StaffMember, 
@@ -810,6 +810,16 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const resignedCount = staffList.filter(s => s.status === 'Resigned').length;
   const retiredCount = staffList.filter(s => s.status === 'Retired').length;
 
+  const inlineErrorRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (inlineError) {
+      setTimeout(() => {
+        inlineErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 30);
+    }
+  }, [inlineError]);
+
   // Handle Add Staff (use employee code as canonical Staff_ID)
   const handleAddStaffSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1496,7 +1506,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       </div>
 
       {inlineError && (
-        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between gap-2">
+        <div
+          ref={inlineErrorRef}
+          className="bg-red-50 border border-red-200 text-red-800 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between gap-2 shadow-xs"
+        >
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
             <span>{inlineError}</span>
@@ -1569,7 +1582,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
 
         {/* Add Staff Form (Collapsible — No Staff ID input) */}
         {showAddForm && (
-          <form onSubmit={handleAddStaffSubmit} className="bg-red-50/50 border border-red-200 rounded-xl p-4 space-y-3">
+          <form onSubmit={handleAddStaffSubmit} noValidate className="bg-red-50/50 border border-red-200 rounded-xl p-4 space-y-3">
             <h4 className="text-xs font-bold text-red-950 flex items-center gap-1.5">
               <UserPlus className="w-4 h-4 text-red-600" />
               กรอกข้อมูลบุคลากรใหม่

@@ -1013,10 +1013,10 @@ export default function App() {
       if (wOk && lOk && oOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       } else {
-        showToast('บันทึกในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
+        showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
       }
-      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
@@ -1038,7 +1038,11 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
+      } else {
+        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
       }
+    } else {
+      showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
     }
   };
 
@@ -1232,10 +1236,10 @@ export default function App() {
       if (wOk && lOk && oOk) {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       } else {
-        showToast('บันทึกในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
+        showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
       }
-      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
@@ -1257,7 +1261,11 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
+      } else {
+        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
       }
+    } else {
+      showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
     }
   };
 
@@ -1353,7 +1361,12 @@ export default function App() {
                 expectedDirtyVersion,
               });
 
-              if (targetRes.syncedDb && mutationSeqRef.current === targetedRow.opSeq) {
+              const isDeleteAction = targetedRow.action.startsWith('delete');
+              if (
+                targetRes.syncedDb &&
+                mutationSeqRef.current === targetedRow.opSeq &&
+                (targetRes.ok || isDeleteAction)
+              ) {
                 dbRef.current = targetRes.syncedDb;
                 setDb(targetRes.syncedDb);
                 lastSyncEpochRef.current = Date.now();
@@ -1366,7 +1379,7 @@ export default function App() {
                 return;
               }
 
-              if (targetRes.notFound) {
+              if (targetRes.notFound && isDeleteAction) {
                 showToast(
                   targetRes.error ||
                     'รายการนี้ถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
@@ -1716,7 +1729,7 @@ export default function App() {
             action: 'updateWorkload',
             target: prevItem,
             updated: stamped,
-            insertIfMissing: prevWasInOutbox,
+            insertIfMissing: true,
             opSeq,
           }
         : undefined
@@ -1838,10 +1851,10 @@ export default function App() {
         markLeaveOutboxSynced([leave]);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       } else {
-        showToast('บันทึกวันลาในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
+        showToast('บันทึกวันลาในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
       }
-      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
@@ -1850,7 +1863,11 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
+      } else {
+        showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
       }
+    } else {
+      showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
     }
   };
 
@@ -1931,7 +1948,7 @@ export default function App() {
             action: 'updateLeave',
             target: prevItem,
             updated: stamped,
-            insertIfMissing: prevWasInOutbox,
+            insertIfMissing: true,
             opSeq,
           }
         : undefined
@@ -2039,10 +2056,10 @@ export default function App() {
         markOtOutboxSynced(validRecords);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void performBackgroundSync('edit');
       } else {
-        showToast('บันทึกเวร OT ในเครื่องแล้ว (กำลังรอซิงค์เข้า Google Sheet อัตโนมัติ)', 'error');
+        showToast('บันทึกเวร OT ในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
       }
-      void performBackgroundSync('edit');
     } else if (targetSheetId) {
       const token = await getAccessToken();
       if (token) {
@@ -2056,7 +2073,11 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
         void performBackgroundSync('edit');
+      } else {
+        showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
       }
+    } else {
+      showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
     }
   };
 
@@ -2170,7 +2191,7 @@ export default function App() {
             action: 'updateOT',
             target: prevItem,
             updated: stamped,
-            insertIfMissing: prevWasInOutbox,
+            insertIfMissing: true,
             opSeq,
           }
         : undefined
