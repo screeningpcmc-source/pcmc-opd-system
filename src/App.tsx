@@ -45,7 +45,10 @@ import {
   normalizeLineTimeString,
   isOffDutyWorkload,
   getWorkloadOffDutyReason,
-  getWorkloadOffDutyStaff
+  getWorkloadOffDutyStaff,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
+  DEFAULT_BOOBY_OWNER_NAME
 } from './types';
 import { 
   loadLocalDatabase, 
@@ -555,7 +558,7 @@ export default function App() {
     }
   }, []);
 
-  // Auto-Sync: initial load / when user or spreadsheetId/gasUrl changes (no background interval polling)
+  // Auto-Sync: initial load / when user or spreadsheetId/gasUrl changes
   useEffect(() => {
     const sheetId = (db.settings.spreadsheetId || '').trim();
     const gasUrl = (db.settings.gasUrl || '').trim();
@@ -568,6 +571,29 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [user, db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
+
+  // Background periodic polling (every 90s when tab visible) & focus catch-up so open tabs never go stale
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void performBackgroundSync('interval');
+    }, 90_000);
+
+    const handleWakeSync = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (Date.now() - lastSyncEpochRef.current > 30_000) {
+        void performBackgroundSync('focus');
+      }
+    };
+    window.addEventListener('focus', handleWakeSync);
+    document.addEventListener('visibilitychange', handleWakeSync);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleWakeSync);
+      document.removeEventListener('visibilitychange', handleWakeSync);
+    };
+  }, [performBackgroundSync]);
 
   // Manual Sync with linked Google Spreadsheet — works completely WITHOUT Google Sign-In
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
@@ -2568,6 +2594,9 @@ export default function App() {
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
     sendFormat?: LineSendFormat;
+    boobyOwnerName?: string;
+    boobyOwnerUserId?: string;
+    boobyGroupMentionOnly?: boolean;
   }): Promise<{
     ok: boolean;
     error?: string;
@@ -2618,6 +2647,21 @@ export default function App() {
       : resolveLineSendFormat(baseDb.settings.lineSendFormat, baseDb.settings.lineSendAsImage);
     const resolvedSendAsImage = resolvedSendFormat !== 'TEXT_ONLY';
 
+    const resolvedBoobyOwnerName =
+      (config.boobyOwnerName !== undefined
+        ? config.boobyOwnerName
+        : baseDb.settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME
+      ).trim() || DEFAULT_BOOBY_OWNER_NAME;
+    const resolvedBoobyOwnerUserId = (
+      config.boobyOwnerUserId !== undefined
+        ? config.boobyOwnerUserId
+        : baseDb.settings.boobyOwnerUserId || ''
+    ).trim();
+    const resolvedBoobyGroupMentionOnly =
+      typeof config.boobyGroupMentionOnly === 'boolean'
+        ? config.boobyGroupMentionOnly
+        : baseDb.settings.boobyGroupMentionOnly !== false;
+
     const dirtyVer = markSettingsDirty();
     const optimisticSettings: SystemSettings = {
       ...baseDb.settings,
@@ -2630,6 +2674,9 @@ export default function App() {
       lineSchedules: cleanSchedules,
       lineSendAsImage: resolvedSendAsImage,
       lineSendFormat: resolvedSendFormat,
+      boobyOwnerName: resolvedBoobyOwnerName,
+      boobyOwnerUserId: resolvedBoobyOwnerUserId,
+      boobyGroupMentionOnly: resolvedBoobyGroupMentionOnly,
     };
     const optimisticDb: AppDatabase = { ...baseDb, settings: optimisticSettings };
     dbRef.current = optimisticDb;
@@ -2646,6 +2693,9 @@ export default function App() {
       schedules: cleanSchedules,
       sendAsImage: resolvedSendAsImage,
       sendFormat: resolvedSendFormat,
+      boobyOwnerName: resolvedBoobyOwnerName,
+      boobyOwnerUserId: resolvedBoobyOwnerUserId,
+      boobyGroupMentionOnly: resolvedBoobyGroupMentionOnly,
       ...(gasUrl ? { gasUrl } : {}),
       ...(adminPin ? { adminPin } : {}),
     });
@@ -2689,6 +2739,9 @@ export default function App() {
         lineSchedules: cleanSchedules,
         lineSendAsImage: resolvedSendAsImage,
         lineSendFormat: resolvedSendFormat,
+        boobyOwnerName: resolvedBoobyOwnerName,
+        boobyOwnerUserId: resolvedBoobyOwnerUserId,
+        boobyGroupMentionOnly: resolvedBoobyGroupMentionOnly,
         lineChannelTokenSet: Boolean(lineAutomation.hasToken || proxyRes.hasServerToken),
         ...(proxyRes.groupName ? { lineDetectedGroupName: proxyRes.groupName } : {}),
       };
@@ -2731,6 +2784,9 @@ export default function App() {
         schedules: cleanSchedules,
         sendAsImage: resolvedSendAsImage,
         sendFormat: resolvedSendFormat,
+        boobyOwnerName: resolvedBoobyOwnerName,
+        boobyOwnerUserId: resolvedBoobyOwnerUserId,
+        boobyGroupMentionOnly: resolvedBoobyGroupMentionOnly,
       },
       db: optimisticDb,
       expectedDirtyVersion: dirtyVer,
@@ -2753,6 +2809,9 @@ export default function App() {
         lineSchedules: cleanSchedules,
         lineSendAsImage: resolvedSendAsImage,
         lineSendFormat: resolvedSendFormat,
+        boobyOwnerName: resolvedBoobyOwnerName,
+        boobyOwnerUserId: resolvedBoobyOwnerUserId,
+        boobyGroupMentionOnly: resolvedBoobyGroupMentionOnly,
         lineChannelTokenSet:
           res.lineAutomation?.hasToken ?? Boolean(res.syncedDb.settings.lineChannelTokenSet),
       };
@@ -2769,6 +2828,46 @@ export default function App() {
     );
     return { ok: true, lineAutomation: res.lineAutomation };
   };
+
+  // Helper: Always fetch latest Google Sheets state before automated/manual LINE push so .jpeg matches Web App 100%
+  const fetchLatestDbForLineSend = useCallback(async (seedDb: AppDatabase): Promise<AppDatabase> => {
+    const gasUrl = (seedDb.settings.gasUrl || '').trim();
+    const sheetId = (seedDb.settings.spreadsheetId || '').trim();
+    const startSeq = mutationSeqRef.current;
+    let latestDb = seedDb;
+    try {
+      if (gasUrl) {
+        const useAdmin = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
+        const gasRes = useAdmin
+          ? await syncAdminViaAppsScript(gasUrl, unlockedAdminPinRef.current, seedDb)
+          : await syncPublicViaAppsScript(gasUrl, seedDb);
+        if (gasRes.accessible && gasRes.mergedDb) {
+          latestDb = {
+            ...gasRes.mergedDb,
+            settings: {
+              ...gasRes.mergedDb.settings,
+              gasUrl,
+              spreadsheetId: sheetId || gasRes.mergedDb.settings.spreadsheetId,
+            },
+          };
+        }
+      } else if (sheetId) {
+        const pubRes = await readPublicGoogleSheet(sheetId, seedDb);
+        if (pubRes.accessible && pubRes.mergedDb) {
+          latestDb = pubRes.mergedDb;
+        }
+      }
+      if (latestDb !== seedDb && mutationSeqRef.current === startSeq) {
+        dbRef.current = latestDb;
+        setDb(latestDb);
+        lastSyncEpochRef.current = Date.now();
+        setLastSyncedAt(formatSyncTime());
+      }
+    } catch {
+      // Fallback safely to current in-memory DB if network temporarily fails
+    }
+    return latestDb;
+  }, []);
 
   // Handler: Immediate push to LINE Group(s) with optional .JPEG table snapshot
   const handleSendLineReportNow = async (params: {
@@ -2787,7 +2886,9 @@ export default function App() {
       showToast(err, 'error');
       return { ok: false, error: err };
     }
-    const baseDb = dbRef.current;
+    const baseDb = !params.imageDataUrl
+      ? await fetchLatestDbForLineSend(dbRef.current)
+      : dbRef.current;
     const configuredGroups = (baseDb.settings.lineTargetGroups || []).filter(
       (g) => g.enabled && (g.id || '').trim()
     );
@@ -2814,7 +2915,7 @@ export default function App() {
     const resolvedShift = params.shift || baseDb.settings.lineAutoShift || 'ในเวลา 08:00-16:00';
     const premSubs = baseDb.settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
     const messageToSend =
-      (params.message || '').trim() ||
+      (params.imageDataUrl && (params.message || '').trim()) ||
       buildDailyCensusLineMessage({
         workloads: baseDb.workloads,
         date: resolvedDate,
@@ -2972,7 +3073,7 @@ export default function App() {
     return { ok: false, error: gasErr };
   };
 
-  // Client-side multi-schedule Bangkok-time auto-scheduler (renders .jpeg table automatically when open)
+  // Client-side multi-schedule Bangkok-time auto-scheduler (always syncs live Sheets data first + 15-min grace for late saves)
   useEffect(() => {
     const checkSchedules = async () => {
       const curDb = dbRef.current;
@@ -2991,7 +3092,7 @@ export default function App() {
       const parts = Object.fromEntries(fmt.formatToParts(new Date()).map((p) => [p.type, p.value]));
       const bkkHour = parts.hour === '24' ? '00' : parts.hour;
       const bkkYmd = `${parts.year}-${parts.month}-${parts.day}`;
-      const bkkHm = `${bkkHour}:${parts.minute}`;
+      const nowMins = Number(bkkHour) * 60 + Number(parts.minute);
 
       const schedules =
         st.lineSchedules && st.lineSchedules.length > 0
@@ -3006,14 +3107,52 @@ export default function App() {
         dedupeMap = {};
       }
 
-      for (const sch of schedules) {
-        if (!sch.enabled) continue;
-        const schTime = normalizeLineTimeString(sch.time, DEFAULT_LINE_AUTO_TIME);
-        if (bkkHm !== schTime) continue;
-        if (!doesDateMatchLineDayRule(bkkYmd, sch.dayRule, customHolidays)) continue;
+      const toMins = (hmStr: string) => {
+        const [h, m] = hmStr.split(':').map(Number);
+        return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+      };
 
+      const dueSchedules = schedules.filter((sch) => {
+        if (!sch.enabled) return false;
+        const schTime = normalizeLineTimeString(sch.time, DEFAULT_LINE_AUTO_TIME);
+        const diff = nowMins - toMins(schTime);
+        if (diff < 0 || diff > 15) return false;
+        if (!doesDateMatchLineDayRule(bkkYmd, sch.dayRule, customHolidays)) return false;
+        return !dedupeMap[`${sch.id}|${bkkYmd}`];
+      });
+      if (dueSchedules.length === 0) return;
+
+      // Always fetch fresh workloads from Google Sheets BEFORE rendering .jpeg & counting rows!
+      const freshDb = await fetchLatestDbForLineSend(curDb);
+      const freshSt = freshDb.settings;
+      const premSubs = freshSt.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
+
+      for (const sch of dueSchedules) {
         const dedupeKey = `${sch.id}|${bkkYmd}`;
         if (dedupeMap[dedupeKey]) continue;
+
+        const schTime = normalizeLineTimeString(sch.time, DEFAULT_LINE_AUTO_TIME);
+        const diff = nowMins - toMins(schTime);
+
+        const targetDate = resolveLineAutoReportDate(
+          freshDb.workloads,
+          sch.reportDayMode || 'TODAY',
+          bkkYmd
+        );
+        const targetDateNorm = normalizeWorkloadDateStr(targetDate);
+        const schShiftNorm = normalizeWorkloadShiftStr(sch.shift);
+        const matchingRows = freshDb.workloads.filter((w) => {
+          const matchDate = normalizeWorkloadDateStr(w.date) === targetDateNorm;
+          const matchShift =
+            schShiftNorm === 'ALL' || normalizeWorkloadShiftStr(w.shift) === schShiftNorm;
+          return matchDate && matchShift;
+        });
+
+        // Grace window: during first 14 minutes after schTime, hold sending if 0 clinics so late-entered rows aren't skipped!
+        if (matchingRows.length === 0 && diff < 15) {
+          continue;
+        }
+
         dedupeMap[dedupeKey] = new Date().toISOString();
         try {
           localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
@@ -3021,36 +3160,31 @@ export default function App() {
           // ignore
         }
 
-        const targetDate = resolveLineAutoReportDate(
-          curDb.workloads,
-          sch.reportDayMode || 'TODAY'
-        );
-        const premSubs = st.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
         const msg = buildDailyCensusLineMessage({
-          workloads: curDb.workloads,
+          workloads: freshDb.workloads,
           date: targetDate,
           shiftFilter: sch.shift,
           premiumSubClinics: premSubs,
           includeClinicBreakdown: true,
         });
 
-        const groups = (st.lineTargetGroups || []).filter((g) => g.enabled && (g.id || '').trim());
+        const groups = (freshSt.lineTargetGroups || []).filter((g) => g.enabled && (g.id || '').trim());
         const targetIds = Array.from(
           new Set(
-            (groups.length > 0 ? groups.map((g) => g.id) : [st.lineTargetId || DEFAULT_LINE_GROUP_ID])
+            (groups.length > 0 ? groups.map((g) => g.id) : [freshSt.lineTargetId || DEFAULT_LINE_GROUP_ID])
               .map((id) => (id || '').trim())
               .filter(Boolean)
           )
         );
-        const gasUrl = (st.gasUrl || '').trim();
-        const schedSendFormat = resolveLineSendFormat(st.lineSendFormat, st.lineSendAsImage);
+        const gasUrl = (freshSt.gasUrl || '').trim();
+        const schedSendFormat = resolveLineSendFormat(freshSt.lineSendFormat, freshSt.lineSendAsImage);
         let imageUrl = '';
         let previewImageUrl = '';
 
         if (schedSendFormat !== 'TEXT_ONLY' && gasUrl) {
           try {
             const rendered = renderDailyCensusReportJpegDataUrl({
-              workloads: curDb.workloads,
+              workloads: freshDb.workloads,
               date: targetDate,
               shiftFilter: sch.shift,
               premiumSubClinics: premSubs,
@@ -3086,6 +3220,7 @@ export default function App() {
                   shift: sch.shift,
                   reportDayMode: sch.reportDayMode,
                   message: msg,
+                  clientClinicCount: matchingRows.length,
                   sendFormat: schedSendFormat,
                   ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
                 },
@@ -3116,7 +3251,7 @@ export default function App() {
       void checkSchedules();
     }, 30_000);
     return () => window.clearInterval(timerId);
-  }, []);
+  }, [fetchLatestDbForLineSend]);
 
   const handleFetchLineStatus = useCallback(async (): Promise<LineAutomationStatusInfo | null> => {
     const baseDb = dbRef.current;

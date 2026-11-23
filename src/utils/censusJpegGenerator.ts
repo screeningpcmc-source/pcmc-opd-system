@@ -15,6 +15,8 @@ import {
   getWorkloadOffDutyReason,
   getWorkloadOffDutyStaff,
   formatOffDutyStaffSummaryText,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
 } from '../types';
 import { formatThaiFullDate, formatThaiDateTime } from './thaiDate';
 
@@ -72,11 +74,13 @@ function buildVisualRows(options: RenderCensusJpegOptions): {
     sw: number;
   };
 } {
-  const shiftFilter = options.shiftFilter || 'ในเวลา 08:00-16:00';
+  const shiftFilter = normalizeWorkloadShiftStr(options.shiftFilter || 'ในเวลา 08:00-16:00');
+  const targetDateNorm = normalizeWorkloadDateStr(options.date);
   const premiumSubClinics = options.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
   const filtered = options.workloads.filter((w) => {
-    const matchDate = (w.date || '').trim() === (options.date || '').trim();
-    const matchShift = shiftFilter === 'ALL' || w.shift === shiftFilter;
+    const matchDate = normalizeWorkloadDateStr(w.date) === targetDateNorm;
+    const matchShift =
+      shiftFilter === 'ALL' || normalizeWorkloadShiftStr(w.shift) === shiftFilter;
     return matchDate && matchShift;
   });
 

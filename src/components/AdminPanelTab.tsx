@@ -37,7 +37,8 @@ import {
   LineReportDayRule,
   LineSendFormat,
   resolveLineSendFormat,
-  normalizeLineTimeString
+  normalizeLineTimeString,
+  DEFAULT_BOOBY_OWNER_NAME
 } from '../types';
 import {
   markReferralClinicRemovedByAdmin,
@@ -135,6 +136,9 @@ interface AdminPanelTabProps {
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
     sendFormat?: LineSendFormat;
+    boobyOwnerName?: string;
+    boobyOwnerUserId?: string;
+    boobyGroupMentionOnly?: boolean;
   }) => Promise<{
     ok: boolean;
     error?: string;
@@ -325,6 +329,15 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage)
   );
   const lineSendAsImage = lineSendFormat !== 'TEXT_ONLY';
+  const [boobyOwnerName, setBoobyOwnerName] = useState<string>(
+    settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME
+  );
+  const [boobyOwnerUserId, setBoobyOwnerUserId] = useState<string>(
+    settings.boobyOwnerUserId || ''
+  );
+  const [boobyGroupMentionOnly, setBoobyGroupMentionOnly] = useState<boolean>(
+    settings.boobyGroupMentionOnly !== false
+  );
   const [isSavingLineAuto, setIsSavingLineAuto] = useState<boolean>(false);
   const [isTestingLineSend, setIsTestingLineSend] = useState<boolean>(false);
   const [isCheckingLineStatus, setIsCheckingLineStatus] = useState<boolean>(false);
@@ -384,6 +397,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       setLineSchedules(DEFAULT_LINE_SCHEDULES.map((s) => ({ ...s })));
     }
     setLineSendFormat(resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage));
+    setBoobyOwnerName(settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME);
+    setBoobyOwnerUserId(settings.boobyOwnerUserId || '');
+    setBoobyGroupMentionOnly(settings.boobyGroupMentionOnly !== false);
   }, [settings]);
 
   useEffect(() => {
@@ -513,6 +529,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         schedules: cleanedSchedules,
         sendAsImage: lineSendAsImage,
         sendFormat: lineSendFormat,
+        boobyOwnerName: boobyOwnerName.trim() || DEFAULT_BOOBY_OWNER_NAME,
+        boobyOwnerUserId: boobyOwnerUserId.trim(),
+        boobyGroupMentionOnly,
       });
       if (res.ok) {
         setLineAutoTime(cleanTime);
@@ -1156,6 +1175,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
         'Service Worker': swRate,
         'Service Worker (Daily Wage)': swRate,
       },
+      boobyOwnerName: boobyOwnerName.trim() || DEFAULT_BOOBY_OWNER_NAME,
+      boobyOwnerUserId: boobyOwnerUserId.trim(),
+      boobyGroupMentionOnly,
     };
 
     onSaveSettings(updated);
@@ -3351,6 +3373,70 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     </span>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Booby Executive Secretary Persona & Group-Mention Settings */}
+          <div className="pt-3 border-t border-emerald-100 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-700" />
+                <span>ตั้งค่าบุคลิกและกฎห้องแชต &quot;บูบี้ ผู้ช่วย AI&quot; (Executive Secretary Mode)</span>
+              </div>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-white border border-emerald-200 text-emerald-800">
+                1-on-1 ตอบทันที • กลุ่มรักษาความลับ
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start bg-white rounded-xl border border-emerald-200/80 p-3">
+              <div className="md:col-span-4">
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  ชื่อเรียกเจ้านาย / เจ้าของระบบ *
+                </label>
+                <input
+                  type="text"
+                  value={boobyOwnerName}
+                  onChange={(e) => setBoobyOwnerName(e.target.value)}
+                  placeholder="เช่น คุณทรงยศ"
+                  className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-semibold text-gray-900 bg-white"
+                />
+                <span className="block text-[10px] text-gray-500 mt-0.5">
+                  บูบี้จะใช้เรียกแทนเจ้านายอย่างสุภาพ (เช่น &quot;คุณทรงยศ&quot;)
+                </span>
+              </div>
+
+              <div className="md:col-span-4">
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                  LINE User ID เจ้านาย (ไม่บังคับ)
+                </label>
+                <input
+                  type="text"
+                  value={boobyOwnerUserId}
+                  onChange={(e) => setBoobyOwnerUserId(e.target.value)}
+                  placeholder="ขึ้นต้นด้วย U... (พิมพ์ /id ในแชตส่วนตัวเพื่อดู)"
+                  className="w-full text-xs rounded-lg border border-gray-300 py-1.5 px-2.5 font-mono text-gray-800 bg-white"
+                />
+                <span className="block text-[10px] text-gray-500 mt-0.5">
+                  ใช้ยืนยันสิทธิ์เข้าถึงบันทึกส่วนตัว 1-on-1 และเรียกชื่อถูกต้อง
+                </span>
+              </div>
+
+              <div className="md:col-span-4 flex flex-col justify-center pt-1">
+                <label className="inline-flex items-start gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={boobyGroupMentionOnly}
+                    onChange={(e) => setBoobyGroupMentionOnly(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
+                  />
+                  <span className="text-[11px] font-bold text-gray-800 leading-snug">
+                    ใน LINE กลุ่ม ตอบเฉพาะเมื่อถูกเรียกชื่อ (&quot;บูบี้&quot; / &quot;@บูบี้&quot;) หรือ Reply ข้อความ
+                  </span>
+                </label>
+                <span className="block text-[10px] text-gray-500 pl-6 mt-0.5">
+                  ป้องกันบอทแทรกบทสนทนาทั่วไปของทีม และไม่นำข้อมูลส่วนตัวมาแสดงในกลุ่ม
+                </span>
               </div>
             </div>
           </div>

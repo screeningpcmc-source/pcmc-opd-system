@@ -15,6 +15,8 @@ import {
   getWorkloadOffDutyReason,
   getWorkloadOffDutyStaff,
   formatOffDutyStaffSummaryText,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
 } from '../types';
 import { formatThaiFullDate, getLocalTodayIso } from './thaiDate';
 
@@ -45,7 +47,7 @@ export function resolveLineAutoReportDate(
     const dates = Array.from(
       new Set(
         workloads
-          .map((w) => (w.date || '').trim())
+          .map((w) => normalizeWorkloadDateStr(w.date))
           .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
       )
     ).sort();
@@ -61,9 +63,12 @@ export function buildDailyCensusLineMessage({
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   includeClinicBreakdown = true,
 }: BuildDailyCensusLineOptions): string {
+  const targetDateNorm = normalizeWorkloadDateStr(date);
+  const shiftFilterNorm = normalizeWorkloadShiftStr(shiftFilter);
   const filtered = workloads.filter((w) => {
-    const matchDate = (w.date || '').trim() === (date || '').trim();
-    const matchShift = shiftFilter === 'ALL' || w.shift === shiftFilter;
+    const matchDate = normalizeWorkloadDateStr(w.date) === targetDateNorm;
+    const matchShift =
+      shiftFilterNorm === 'ALL' || normalizeWorkloadShiftStr(w.shift) === shiftFilterNorm;
     return matchDate && matchShift;
   });
 

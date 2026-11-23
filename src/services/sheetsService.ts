@@ -45,6 +45,7 @@ import {
   normalizeLineTimeString,
   LineSendFormat,
   resolveLineSendFormat,
+  DEFAULT_BOOBY_OWNER_NAME,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -332,6 +333,9 @@ function buildSettingsSheetRows(settings: SystemSettings, staffList?: StaffMembe
     ['Line_Schedules', JSON.stringify(settings.lineSchedules || DEFAULT_LINE_SCHEDULES)],
     ['Line_Send_As_Image', settings.lineSendAsImage !== false ? 'true' : 'false'],
     ['Line_Send_Format', resolveLineSendFormat(settings.lineSendFormat, settings.lineSendAsImage)],
+    ['Booby_Owner_Name', (settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME).trim()],
+    ['Booby_Owner_User_ID', (settings.boobyOwnerUserId || '').trim()],
+    ['Booby_Group_Mention_Only', settings.boobyGroupMentionOnly !== false ? 'true' : 'false'],
   ];
   const codeMap = buildStaffEmployeeCodesMap(staffList || []);
   if (Object.keys(codeMap).length > 0) {
@@ -1913,6 +1917,19 @@ export const syncAllWithGoogleSheet = async (
       settingsMap['Line_Detected_Group_Name'] !== undefined
         ? settingsMap['Line_Detected_Group_Name']
         : db.settings.lineDetectedGroupName,
+    boobyOwnerName: settingsDirty
+      ? db.settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME
+      : settingsMap['Booby_Owner_Name'] || db.settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME,
+    boobyOwnerUserId: settingsDirty
+      ? db.settings.boobyOwnerUserId || ''
+      : settingsMap['Booby_Owner_User_ID'] !== undefined
+      ? settingsMap['Booby_Owner_User_ID']
+      : db.settings.boobyOwnerUserId || '',
+    boobyGroupMentionOnly: settingsDirty
+      ? db.settings.boobyGroupMentionOnly !== false
+      : settingsMap['Booby_Group_Mention_Only'] !== undefined
+      ? settingsMap['Booby_Group_Mention_Only'].toLowerCase() !== 'false'
+      : db.settings.boobyGroupMentionOnly !== false,
   };
 
   // 6. Push headers + updated tabs back to Google Sheets cleanly
@@ -3004,6 +3021,19 @@ function mergeRemoteDataRows(
       settingsMap['Line_Detected_Group_Name'] !== undefined
         ? settingsMap['Line_Detected_Group_Name']
         : db.settings.lineDetectedGroupName,
+    boobyOwnerName: settingsDirty
+      ? db.settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME
+      : settingsMap['Booby_Owner_Name'] || db.settings.boobyOwnerName || DEFAULT_BOOBY_OWNER_NAME,
+    boobyOwnerUserId: settingsDirty
+      ? db.settings.boobyOwnerUserId || ''
+      : settingsMap['Booby_Owner_User_ID'] !== undefined
+      ? settingsMap['Booby_Owner_User_ID']
+      : db.settings.boobyOwnerUserId || '',
+    boobyGroupMentionOnly: settingsDirty
+      ? db.settings.boobyGroupMentionOnly !== false
+      : settingsMap['Booby_Group_Mention_Only'] !== undefined
+      ? settingsMap['Booby_Group_Mention_Only'].toLowerCase() !== 'false'
+      : db.settings.boobyGroupMentionOnly !== false,
   };
 
   return {
@@ -5010,6 +5040,9 @@ export const configureLineViaServerProxy = async (params: {
   schedules?: LineReportSchedule[];
   sendAsImage?: boolean;
   sendFormat?: LineSendFormat;
+  boobyOwnerName?: string;
+  boobyOwnerUserId?: string;
+  boobyGroupMentionOnly?: boolean;
   gasUrl?: string;
   adminPin?: string;
 }): Promise<{
@@ -5067,6 +5100,9 @@ export const configureLineAutomationViaAppsScript = async (params: {
     schedules?: LineReportSchedule[];
     sendAsImage?: boolean;
     sendFormat?: LineSendFormat;
+    boobyOwnerName?: string;
+    boobyOwnerUserId?: string;
+    boobyGroupMentionOnly?: boolean;
   };
   db: AppDatabase;
   expectedDirtyVersion?: number;

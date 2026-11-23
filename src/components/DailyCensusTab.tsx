@@ -27,6 +27,8 @@ import {
   getWorkloadOffDutyStaff,
   formatOffDutyStaffSummaryText,
   OFF_DUTY_STAFF_REASON_PRESETS,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
 } from '../types';
 import { formatThaiFullDate, formatThaiShortDate, formatThaiDateTime, THAI_SHORT_MONTHS, getLocalTodayIso } from '../utils/thaiDate';
 import { isWeekendOrThaiHoliday } from '../utils/thaiHolidays';
@@ -148,9 +150,11 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
 
   // Filter workloads for this date and shift
   const filteredWorkloads = useMemo(() => {
+    const targetDateNorm = normalizeWorkloadDateStr(date);
+    const shiftNorm = normalizeWorkloadShiftStr(shiftFilter);
     return workloads.filter(w => {
-      const matchDate = w.date === date;
-      const matchShift = shiftFilter === 'ALL' || w.shift === shiftFilter;
+      const matchDate = normalizeWorkloadDateStr(w.date) === targetDateNorm;
+      const matchShift = shiftNorm === 'ALL' || normalizeWorkloadShiftStr(w.shift) === shiftNorm;
       return matchDate && matchShift;
     });
   }, [workloads, date, shiftFilter]);

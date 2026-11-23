@@ -643,8 +643,13 @@ export interface SystemSettings {
   lineLastStatus?: string;
   lineDetectedGroupId?: string;
   lineDetectedGroupName?: string;
+  // Booby Executive Secretary AI Persona & Chat Environment Config
+  boobyOwnerName?: string;
+  boobyOwnerUserId?: string;
+  boobyGroupMentionOnly?: boolean;
 }
 
+export const DEFAULT_BOOBY_OWNER_NAME = 'คุณทรงยศ';
 export const DEFAULT_LINE_AUTO_TIME = '15:55';
 export const DEFAULT_LINE_GROUP_ID = 'C21630721218bccf814848fcf793e1746';
 export type LineAutoReportDayMode = 'YESTERDAY' | 'TODAY' | 'LATEST_WITH_DATA';
@@ -1248,3 +1253,29 @@ export function isOtDuplicateConflict(
   if (!exParsed.periodLabel || !caParsed.periodLabel) return true;
   return exParsed.periodLabel === caParsed.periodLabel;
 }
+
+export function normalizeWorkloadDateStr(raw?: string | null): string {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    let y = Number(iso[1]);
+    if (y >= 2400) y -= 543;
+    return `${y}-${String(Number(iso[2])).padStart(2, '0')}-${String(Number(iso[3])).padStart(2, '0')}`;
+  }
+  const slash = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+  if (slash) {
+    const d = Number(slash[1]);
+    const m = Number(slash[2]);
+    let yr = Number(slash[3]);
+    if (yr < 100) yr += yr >= 55 ? 2500 - 543 : 2000;
+    else if (yr >= 2400) yr -= 543;
+    return `${yr}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  return s;
+}
+
+export function normalizeWorkloadShiftStr(raw?: string | null): string {
+  return String(raw || '').trim().replace(/\s+/g, ' ');
+}
+

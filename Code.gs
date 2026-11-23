@@ -57,7 +57,8 @@ var SHEET_NAMES = {
   LEAVE: 'Leave_Records',
   OT: 'OT_Attendance',
   SETTINGS: 'Settings',
-  AUDIT: 'Audit_Logs'
+  AUDIT: 'Audit_Logs',
+  GROUP_NOTES: 'Group_Notes'
 };
 
 var DEFAULT_IN_TIME_CLINICS = [
@@ -145,6 +146,12 @@ function setupOpdDatabase() {
       rows: []
     },
     {
+      name: SHEET_NAMES.GROUP_NOTES,
+      headers: ['Note_ID', 'Timestamp', 'Category', 'Content', 'Saved_By', 'Group_ID', 'Keywords', 'Status'],
+      color: '#0f766e',
+      rows: []
+    },
+    {
       name: SHEET_NAMES.SETTINGS,
       headers: ['Key', 'Value'],
       color: '#374151',
@@ -171,7 +178,10 @@ function setupOpdDatabase() {
         ['Line_Target_Groups', JSON.stringify([{ id: DEFAULT_LINE_GROUP_ID, name: 'หัวหน้าห้องตรวจ OPD', enabled: true }])],
         ['Line_Schedules', JSON.stringify(DEFAULT_LINE_SCHEDULES)],
         ['Line_Send_As_Image', 'true'],
-        ['Line_Send_Format', 'BOTH']
+        ['Line_Send_Format', 'BOTH'],
+        ['Booby_Owner_Name', 'คุณทรงยศ'],
+        ['Booby_Owner_User_ID', ''],
+        ['Booby_Group_Mention_Only', 'true']
       ]
     }
   ];
@@ -2271,17 +2281,18 @@ function buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap) {
   var hasId = workloadData.headers[0] === 'Record_ID';
   var off = hasId ? 1 : 0;
 
+  var normTargetDate = normalizeSheetDateGas_(targetDate) || String(targetDate || '').trim();
   var premiumSubRaw = (settingsMap && settingsMap['Premium_Sub_Clinics']) || DEFAULT_PREMIUM_SUB_CLINICS.join(', ');
   var premiumSubs = premiumSubRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
-  var shiftTarget = String(shiftFilter || 'ALL').trim() || 'ALL';
+  var shiftTarget = String(shiftFilter || 'ALL').replace(/\s+/g, ' ').trim() || 'ALL';
 
   var parsedRows = [];
   workloadData.rows.forEach(function(r) {
-    var d = String(r[off] || '').trim();
-    var sh = String(r[off + 1] || '').trim();
+    var d = normalizeSheetDateGas_(r[off]);
+    var sh = String(r[off + 1] || '').replace(/\s+/g, ' ').trim();
     var cl = String(r[off + 2] || '').trim();
     if (!d || !cl) return;
-    if (d !== targetDate) return;
+    if (d !== normTargetDate) return;
     if (shiftTarget !== 'ALL' && sh !== shiftTarget) return;
 
     var adultPt = Number(r[off + 4] || 0) || 0;
@@ -2676,136 +2687,1522 @@ function fetchLineGroupNameGas_(channelAccessToken, groupId) {
   return '';
 }
 
+function normalizeSheetDateGas_(raw) {
+  var s = String(raw || '').trim();
+  if (!s) return '';
+  var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    var y = Number(iso[1]);
+    if (y >= 2400) y -= 543;
+    return y + '-' + String(Number(iso[2])).padStart(2, '0') + '-' + String(Number(iso[3])).padStart(2, '0');
+  }
+  var slash = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (slash) {
+    var d = Number(slash[1]);
+    var m = Number(slash[2]);
+    var yr = Number(slash[3]);
+    if (yr < 100) yr += (yr >= 60 ? 2500 - 543 : 2000);
+    else if (yr >= 2400) yr -= 543;
+    return yr + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+  return s;
+}
+
+function parseThaiQueryTargetDateGas_(rawText, todayYmd) {
+  var thaiDigits = '๐๑๒๓๔๕๖๗๘๙';
+  var txt = String(rawText || '').trim().toLowerCase().replace(/[๐-๙]/g, function(ch) {
+    var idx = thaiDigits.indexOf(ch);
+    return idx !== -1 ? String(idx) : ch;
+  }).replace(/\s+/g, ' ');
+
+  var p = String(todayYmd || '').split('-').map(Number);
+  var baseYear = p.length === 3 ? p[0] : new Date().getFullYear();
+  var baseMonth = p.length === 3 ? p[1] : (new Date().getMonth() + 1);
+  var baseDay = p.length === 3 ? p[2] : new Date().getDate();
+  var curDow = p.length === 3 ? new Date(Date.UTC(baseYear, baseMonth - 1, baseDay)).getUTCDay() : new Date().getDay();
+
+  var pad2 = function(n) { return (n < 10 ? '0' : '') + n; };
+  var makeYmd = function(y, m, d) {
+    var dt = new Date(Date.UTC(y, m - 1, d));
+    if (isNaN(dt.getTime())) return todayYmd;
+    return dt.getUTCFullYear() + '-' + pad2(dt.getUTCMonth() + 1) + '-' + pad2(dt.getUTCDate());
+  };
+  var lastDayOfMonth = function(y, m) {
+    return new Date(Date.UTC(y, m, 0)).getUTCDate();
+  };
+  var normalizeYear = function(rawY, fallbackYear) {
+    if (!rawY && rawY !== 0) return fallbackYear;
+    var n = Number(rawY);
+    if (!isFinite(n) || n <= 0) return fallbackYear;
+    if (n < 100) {
+      if (n >= 55) return 2500 + n - 543; // e.g. 69 -> 2569 BE -> 2026 CE
+      if (n >= 20 && n <= 45) return 2000 + n; // e.g. 26 -> 2026 CE
+      return fallbackYear;
+    }
+    if (n >= 2400) return n - 543;
+    if (n >= 1900 && n <= 2150) return n;
+    return fallbackYear;
+  };
+  var singleResult = function(ymd, relLabel, isFallback) {
+    return { ymd: ymd, endYmd: ymd, isRange: false, relLabel: relLabel || '', hasExplicitDate: !isFallback };
+  };
+  var rangeResult = function(startYmd, endYmd, relLabel) {
+    if (startYmd > endYmd) {
+      var tmp = startYmd; startYmd = endYmd; endYmd = tmp;
+    }
+    return { ymd: startYmd, endYmd: endYmd, isRange: startYmd !== endYmd, relLabel: relLabel || '', hasExplicitDate: true };
+  };
+
+  var thaiMonthMap = {
+    'มกราคม': 1, 'มกรา': 1, 'มค': 1,
+    'กุมภาพันธ์': 2, 'กุมภา': 2, 'กพ': 2,
+    'มีนาคม': 3, 'มีนา': 3, 'มีค': 3,
+    'เมษายน': 4, 'เมษา': 4, 'เมย': 4,
+    'พฤษภาคม': 5, 'พฤษภา': 5, 'พค': 5,
+    'มิถุนายน': 6, 'มิถุนา': 6, 'มิย': 6,
+    'กรกฎาคม': 7, 'กรกฎา': 7, 'กค': 7,
+    'สิงหาคม': 8, 'สิงหา': 8, 'สค': 8,
+    'กันยายน': 9, 'กันยา': 9, 'กย': 9,
+    'ตุลาคม': 10, 'ตุลา': 10, 'ตค': 10,
+    'พฤศจิกายน': 11, 'พฤศจิกา': 11, 'พย': 11,
+    'ธันวาคม': 12, 'ธันวา': 12, 'ธค': 12
+  };
+  var monthPattern = '(มกราคม|มกรา|ม\\.?\\s*ค\\.?|กุมภาพันธ์|กุมภา|ก\\.?\\s*พ\\.?|มีนาคม|มีนา|มี\\.?\\s*ค\\.?|เมษายน|เมษา|เม\\.?\\s*ย\\.?|พฤษภาคม|พฤษภา|พ\\.?\\s*ค\\.?|มิถุนายน|มิถุนา|มิ\\.?\\s*ย\\.?|กรกฎาคม|กรกฎา|ก\\.?\\s*ค\\.?|สิงหาคม|สิงหา|ส\\.?\\s*ค\\.?|กันยายน|กันยา|ก\\.?\\s*ย\\.?|ตุลาคม|ตุลา|ต\\.?\\s*ค\\.?|พฤศจิกายน|พฤศจิกา|พ\\.?\\s*ย\\.?|ธันวาคม|ธันวา|ธ\\.?\\s*ค\\.?)';
+  var resolveMonth = function(rawM) {
+    return thaiMonthMap[String(rawM || '').replace(/[\s\.]/g, '')] || 0;
+  };
+
+  // 1. Explicit ISO range / single ISO YYYY-MM-DD
+  var isoRangeRe = /(\d{4})-(\d{1,2})-(\d{1,2})\s*(?:-|–|—|ถึง)\s*(\d{4})-(\d{1,2})-(\d{1,2})/;
+  var isoRM = txt.match(isoRangeRe);
+  if (isoRM) {
+    return rangeResult(
+      makeYmd(normalizeYear(isoRM[1], baseYear), Number(isoRM[2]), Number(isoRM[3])),
+      makeYmd(normalizeYear(isoRM[4], baseYear), Number(isoRM[5]), Number(isoRM[6])),
+      ''
+    );
+  }
+  var isoM = txt.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoM) {
+    return singleResult(makeYmd(normalizeYear(isoM[1], baseYear), Number(isoM[2]), Number(isoM[3])), '');
+  }
+
+  // 2. Explicit Thai month date range: "20-23 พ.ย.", "28 พ.ย. - 2 ธ.ค. 69", "วันที่ 20 ถึง 23 พ.ย."
+  var tmCrossRe = new RegExp('(?:ที่\\s*)?(\\d{1,2})\\s*' + monthPattern + '(?:\\s*(?:พ\\.?ศ\\.?\\s*)?(\\d{2,4})(?!\\s*[:.]\\d|\\s*น\\.))?\\s*(?:-|–|—|ถึง)\\s*(?:ที่\\s*)?(\\d{1,2})\\s*' + monthPattern + '(?:\\s*(?:พ\\.?ศ\\.?\\s*)?(\\d{2,4})(?!\\s*[:.]\\d|\\s*น\\.))?');
+  var tmCross = txt.match(tmCrossRe);
+  if (tmCross) {
+    var cd1 = Number(tmCross[1]), cm1 = resolveMonth(tmCross[2]), cy1 = normalizeYear(tmCross[3], baseYear);
+    var cd2 = Number(tmCross[4]), cm2 = resolveMonth(tmCross[5]), cy2 = normalizeYear(tmCross[6], cy1);
+    if (cm1 && cm2 && cd1 >= 1 && cd1 <= 31 && cd2 >= 1 && cd2 <= 31) {
+      return rangeResult(makeYmd(cy1, cm1, cd1), makeYmd(cy2, cm2, cd2), '');
+    }
+  }
+  var tmSameRe = new RegExp('(?:ที่\\s*)?(\\d{1,2})\\s*(?:-|–|—|ถึง)\\s*(\\d{1,2})\\s*' + monthPattern + '(?:\\s*(?:พ\\.?ศ\\.?\\s*)?(\\d{2,4})(?!\\s*[:.]\\d|\\s*น\\.))?');
+  var tmSame = txt.match(tmSameRe);
+  if (tmSame) {
+    var sd1 = Number(tmSame[1]), sd2 = Number(tmSame[2]), smm = resolveMonth(tmSame[3]), syy = normalizeYear(tmSame[4], baseYear);
+    if (smm && sd1 >= 1 && sd1 <= 31 && sd2 >= 1 && sd2 <= 31) {
+      return rangeResult(makeYmd(syy, smm, sd1), makeYmd(syy, smm, sd2), '');
+    }
+  }
+
+  // 3. Explicit Single Thai month date: "23 พ.ย.", "23 พ.ย. 69", "23 พฤศจิกายน พ.ศ. 2569"
+  var tmSingleRe = new RegExp('(?:ที่\\s*)?(\\d{1,2})\\s*' + monthPattern + '(?:\\s*(?:พ\\.?ศ\\.?\\s*)?(\\d{2,4})(?!\\s*[:.]\\d|\\s*น\\.))?');
+  var tmMatch = txt.match(tmSingleRe);
+  if (tmMatch) {
+    var td = Number(tmMatch[1]);
+    var tm = resolveMonth(tmMatch[2]);
+    if (tm && td >= 1 && td <= 31) {
+      var ty = normalizeYear(tmMatch[3], baseYear);
+      return singleResult(makeYmd(ty, tm, td), '');
+    }
+  }
+
+  // 4. Numeric DD/MM(/YYYY) range & single, plus DD.MM.YYYY
+  var slashRangeM = txt.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\s*(?:-|–|—|ถึง)\s*(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+  if (slashRangeM) {
+    var rsd1 = Number(slashRangeM[1]), rsm1 = Number(slashRangeM[2]), rsy1 = normalizeYear(slashRangeM[3], baseYear);
+    var rsd2 = Number(slashRangeM[4]), rsm2 = Number(slashRangeM[5]), rsy2 = normalizeYear(slashRangeM[6], rsy1);
+    if (rsd1 >= 1 && rsd1 <= 31 && rsm1 >= 1 && rsm1 <= 12 && rsd2 >= 1 && rsd2 <= 31 && rsm2 >= 1 && rsm2 <= 12) {
+      return rangeResult(makeYmd(rsy1, rsm1, rsd1), makeYmd(rsy2, rsm2, rsd2), '');
+    }
+  }
+  var slashM = txt.match(/(?:ที่\s*)?(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+  if (slashM) {
+    var sd = Number(slashM[1]), sm = Number(slashM[2]);
+    if (sd >= 1 && sd <= 31 && sm >= 1 && sm <= 12) {
+      var sy = normalizeYear(slashM[3], baseYear);
+      return singleResult(makeYmd(sy, sm, sd), '');
+    }
+  }
+  var dotM = txt.match(/(?:ที่\s*)?(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
+  if (dotM) {
+    var dd1 = Number(dotM[1]), dm1 = Number(dotM[2]), dy1 = normalizeYear(dotM[3], baseYear);
+    if (dd1 >= 1 && dd1 <= 31 && dm1 >= 1 && dm1 <= 12) {
+      return singleResult(makeYmd(dy1, dm1, dd1), '');
+    }
+  }
+
+  // 5. Relative single days & numeric/word offsets
+  if (txt.indexOf('เมื่อวานซืน') !== -1 || txt.indexOf('วานซืน') !== -1) {
+    return singleResult(addDaysIsoGas_(todayYmd, -2), 'เมื่อวานซืน');
+  }
+  if (txt.indexOf('เมื่อวาน') !== -1 || txt.indexOf('วานนี้') !== -1) {
+    return singleResult(addDaysIsoGas_(todayYmd, -1), 'เมื่อวาน');
+  }
+  if (txt.indexOf('มะเรื่อง') !== -1) {
+    return singleResult(addDaysIsoGas_(todayYmd, 3), 'มะเรื่อง');
+  }
+  if (txt.indexOf('มะรืน') !== -1) {
+    return singleResult(addDaysIsoGas_(todayYmd, 2), 'มะรืนนี้');
+  }
+  if (txt.indexOf('พรุ่งนี้') !== -1 || txt.indexOf('พรุ้งนี้') !== -1) {
+    return singleResult(addDaysIsoGas_(todayYmd, 1), 'พรุ่งนี้');
+  }
+  if (txt.indexOf('วันนี้') !== -1) {
+    return singleResult(todayYmd, 'วันนี้');
+  }
+
+  var thaiNumWords = {
+    'หนึ่ง': 1, 'สอง': 2, 'สาม': 3, 'สี่': 4, 'ห้า': 5,
+    'หก': 6, 'เจ็ด': 7, 'แปด': 8, 'เก้า': 9, 'สิบ': 10
+  };
+  var parseCountWord = function(w) {
+    if (!w) return 0;
+    if (/^\d+$/.test(w)) return Number(w);
+    return thaiNumWords[w] || 0;
+  };
+  var pastDaysM = txt.match(/(\d+|หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ)\s*(?:วันก่อน|วันที่แล้ว)/);
+  if (pastDaysM) {
+    var pn = parseCountWord(pastDaysM[1]);
+    if (pn > 0 && pn <= 90) return singleResult(addDaysIsoGas_(todayYmd, -pn), pn + ' วันที่แล้ว');
+  }
+  var fwdDaysM = txt.match(/(?:อีก\s*(\d+|หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ)\s*วัน|(\d+|หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ)\s*วันข้างหน้า)/);
+  if (fwdDaysM) {
+    var fn = parseCountWord(fwdDaysM[1] || fwdDaysM[2]);
+    if (fn > 0 && fn <= 90) return singleResult(addDaysIsoGas_(todayYmd, fn), 'อีก ' + fn + ' วัน');
+  }
+
+  // Normalize "วันอาทิตย์" before distinguishing week-meaning "อาทิตย์นี้/หน้า/ที่แล้ว/ที่ผ่านมา"
+  var txtMarked = txt.replace(/วัน\s*อาทิตย์/g, 'วัน__sun__');
+  var hasLastWeekMod = /(?:สัปดาห์ที่แล้ว|สัปดาห์ที่ผ่านมา|สัปดาห์ก่อน|อาทิตย์ที่แล้ว|อาทิตย์ที่ผ่านมา|อาทิตย์ก่อน|วีคที่แล้ว|วีคก่อน)/.test(txtMarked);
+  var hasNextWeekMod = /(?:สัปดาห์หน้า|สัปดาห์ถัดไป|อาทิตย์หน้า|อาทิตย์ถัดไป|วีคหน้า)/.test(txtMarked);
+  var hasThisWeekMod = /(?:สัปดาห์นี้|อาทิตย์นี้|วีคนี้)/.test(txtMarked);
+  var hasPastMod = /(?:ที่ผ่านมา|ที่แล้ว|ก่อนหน้า|ก่อนนี้|เมื่อวัน|ล่าสุด)/.test(txt) || /(?:^|\s)เมื่อ/.test(txt);
+  var hasFutureMod = /(?:หน้า|ถัดไป|ที่จะถึง|ข้างหน้า)/.test(txt);
+
+  // 6. Thai weekdays (handles "วันศุกร์ที่ผ่านมา", "เมื่อวันจันทร์", "วันจันทร์หน้า", "วันพุธสัปดาห์ที่แล้ว", etc.)
+  var weekdayRules = [
+    { kw: 'วัน__sun__', dow: 0 },
+    { kw: 'จันทร์', dow: 1 },
+    { kw: 'อังคาร', dow: 2 },
+    { kw: 'พุธ', dow: 3 },
+    { kw: 'พฤหัส', dow: 4 },
+    { kw: 'ศุกร์', dow: 5 },
+    { kw: 'เสาร์', dow: 6 }
+  ];
+  for (var wi = 0; wi < weekdayRules.length; wi++) {
+    if (txtMarked.indexOf(weekdayRules[wi].kw) !== -1) {
+      var targetDow = weekdayRules[wi].dow;
+      if (hasLastWeekMod) {
+        var monOffsetBack = (curDow === 0 ? -6 : 1 - curDow) - 7;
+        var dayInWeek = (targetDow === 0 ? 6 : targetDow - 1);
+        return singleResult(addDaysIsoGas_(todayYmd, monOffsetBack + dayInWeek), '');
+      }
+      if (hasNextWeekMod) {
+        var monOffsetFwd = (curDow === 0 ? -6 : 1 - curDow) + 7;
+        var dayInWeekFwd = (targetDow === 0 ? 6 : targetDow - 1);
+        return singleResult(addDaysIsoGas_(todayYmd, monOffsetFwd + dayInWeekFwd), '');
+      }
+      if (hasPastMod) {
+        var backDiff = (curDow - targetDow + 7) % 7;
+        if (backDiff === 0) backDiff = 7;
+        return singleResult(addDaysIsoGas_(todayYmd, -backDiff), '');
+      }
+      if (hasFutureMod) {
+        var fwdDiff = (targetDow - curDow + 7) % 7;
+        if (fwdDiff === 0) fwdDiff = 7;
+        return singleResult(addDaysIsoGas_(todayYmd, fwdDiff), '');
+      }
+      var defaultDiff = (targetDow - curDow + 7) % 7;
+      return singleResult(addDaysIsoGas_(todayYmd, defaultDiff), '');
+    }
+  }
+
+  // Helper for relative month shifts ("เดือนหน้า", "เดือนที่แล้ว")
+  var targetMonthOffset = 0;
+  if (/เดือนที่แล้ว|เดือนที่ผ่านมา|เดือนก่อน/.test(txt)) targetMonthOffset = -1;
+  else if (/เดือนหน้า|เดือนถัดไป/.test(txt)) targetMonthOffset = 1;
+  var shiftedDt = new Date(Date.UTC(baseYear, baseMonth - 1 + targetMonthOffset, 1));
+  var effYear = shiftedDt.getUTCFullYear();
+  var effMonth = shiftedDt.getUTCMonth() + 1;
+
+  // 7. Day-of-month range or single day number: e.g. "วันที่ 20-23", "วันที่ 5 เดือนหน้า", "วันที่ 23"
+  var dayRangeM = txt.match(/(?:วันที่|ที่)\s*(\d{1,2})\s*(?:-|–|—|ถึง)\s*(\d{1,2})(?!\d)/);
+  if (dayRangeM) {
+    var dr1 = Number(dayRangeM[1]), dr2 = Number(dayRangeM[2]);
+    if (dr1 >= 1 && dr1 <= 31 && dr2 >= 1 && dr2 <= 31) {
+      return rangeResult(makeYmd(effYear, effMonth, dr1), makeYmd(effYear, effMonth, dr2), '');
+    }
+  }
+  var dayOnlyM = txt.match(/(?:วันที่|ที่)\s*(\d{1,2})(?!\d)/);
+  if (dayOnlyM) {
+    var dd = Number(dayOnlyM[1]);
+    if (dd >= 1 && dd <= 31) {
+      return singleResult(makeYmd(effYear, effMonth, dd), '');
+    }
+  }
+
+  // 8. Whole Week queries ("สัปดาห์นี้", "อาทิตย์ที่ผ่านมา", "สัปดาห์หน้า", etc.)
+  if (hasLastWeekMod) {
+    var lwMon = addDaysIsoGas_(todayYmd, (curDow === 0 ? -6 : 1 - curDow) - 7);
+    return rangeResult(lwMon, addDaysIsoGas_(lwMon, 6), 'สัปดาห์ที่ผ่านมา');
+  }
+  if (hasNextWeekMod) {
+    var nwMon = addDaysIsoGas_(todayYmd, (curDow === 0 ? -6 : 1 - curDow) + 7);
+    return rangeResult(nwMon, addDaysIsoGas_(nwMon, 6), 'สัปดาห์หน้า');
+  }
+  if (hasThisWeekMod) {
+    var twMon = addDaysIsoGas_(todayYmd, curDow === 0 ? -6 : 1 - curDow);
+    return rangeResult(twMon, addDaysIsoGas_(twMon, 6), 'สัปดาห์นี้');
+  }
+
+  // 9. Whole Month queries ("เดือนนี้", "เดือนที่แล้ว", "เดือนหน้า", "เดือน พ.ย.", "เดือนพฤศจิกายน 2569")
+  var explicitMonthRe = new RegExp('(?:เดือน\\s*)' + monthPattern + '(?:\\s*(?:พ\\.?ศ\\.?\\s*)?(\\d{2,4}))?');
+  var expMM = txt.match(explicitMonthRe);
+  if (expMM) {
+    var em = resolveMonth(expMM[1]);
+    if (em) {
+      var ey = normalizeYear(expMM[2], baseYear);
+      return rangeResult(makeYmd(ey, em, 1), makeYmd(ey, em, lastDayOfMonth(ey, em)), '');
+    }
+  }
+  if (/เดือนนี้|เดือนที่แล้ว|เดือนที่ผ่านมา|เดือนก่อน|เดือนหน้า|เดือนถัดไป/.test(txt)) {
+    var mLabel = targetMonthOffset < 0 ? 'เดือนที่ผ่านมา' : targetMonthOffset > 0 ? 'เดือนหน้า' : 'เดือนนี้';
+    return rangeResult(makeYmd(effYear, effMonth, 1), makeYmd(effYear, effMonth, lastDayOfMonth(effYear, effMonth)), mLabel);
+  }
+
+  return singleResult(todayYmd, 'วันนี้', true);
+}
+
+function fetchLineSenderNameGas_(token, evSource) {
+  if (!token || !evSource || !evSource.userId) return 'สมาชิกกลุ่ม';
+  try {
+    var uid = String(evSource.userId).trim();
+    var gid = String(evSource.groupId || '').trim();
+    var url = gid
+      ? ('https://api.line.me/v2/bot/group/' + encodeURIComponent(gid) + '/member/' + encodeURIComponent(uid))
+      : ('https://api.line.me/v2/bot/profile/' + encodeURIComponent(uid));
+    var res = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() === 200) {
+      var data = JSON.parse(res.getContentText() || '{}');
+      if (data.displayName) return String(data.displayName).trim();
+    }
+  } catch (e) {
+    // ignore profile fetch errors
+  }
+  return 'สมาชิกกลุ่ม';
+}
+
+function detectGroupNoteCategoryGas_(content) {
+  var c = String(content || '').toLowerCase();
+  if (/ลงนัด|นัดหมาย|ตารางนัด|มีนัด|นัดประชุม|เตือนความจำ|เตือนให้|reminder/.test(c)) return 'นัดหมาย/เตือนความจำ';
+  if (/สั่งงาน|งานค้าง|มอบหมาย|action item|to-do|todo/.test(c)) return 'งานที่ต้องทำ/To-Do';
+  if (/สลับเวร|อยู่เวร|ตารางเวร|นอกเวลา|\bot\b|โอที/.test(c)) return 'ตารางเวร/สลับเวร';
+  if (/ข้อตกลง|มติ|กติกา|เงื่อนไข|ตกลงตาม/.test(c)) return 'ข้อตกลง/มติ';
+  if (/ประกาศ|แจ้งเวียน|ประชุม|ปิดบริการ|งดตรวจ|วันหยุด/.test(c)) return 'ประกาศ/แจ้งเวียน';
+  return 'บันทึกช่วยจำ';
+}
+
+function extractNoteKeywordsGas_(content) {
+  var tokens = String(content || '').toLowerCase().replace(/[^\u0E00-\u0E7Fa-z0-9\s]/g, ' ').split(/\s+/).filter(function(t) {
+    return t.length >= 2;
+  });
+  var uniq = [];
+  tokens.forEach(function(t) {
+    if (uniq.indexOf(t) === -1 && uniq.length < 15) uniq.push(t);
+  });
+  return uniq.join(', ');
+}
+
+function saveLineGroupNoteGas_(content, savedBy, groupId, explicitCategory, isPrivateScope) {
+  var headers = ['Note_ID', 'Timestamp', 'Category', 'Content', 'Saved_By', 'Group_ID', 'Keywords', 'Status'];
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.GROUP_NOTES, headers);
+  var nowTs = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  var idTag = 'N-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd-HHmm') + '-' + String(Math.floor(10 + Math.random() * 89));
+  var baseCat = explicitCategory || detectGroupNoteCategoryGas_(content);
+  var category = isPrivateScope && baseCat.indexOf('[ส่วนตัว]') === -1 ? ('[ส่วนตัว] ' + baseCat) : baseCat;
+  var storedGroupId = String(groupId || '').trim();
+  if (isPrivateScope && storedGroupId.indexOf('PRIVATE:') !== 0) {
+    storedGroupId = 'PRIVATE:' + storedGroupId;
+  }
+  var keywords = extractNoteKeywordsGas_(content);
+  var row = [idTag, nowTs, category, String(content || '').trim(), String(savedBy || 'สมาชิกกลุ่ม'), storedGroupId, keywords, 'ACTIVE'];
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  SpreadsheetApp.flush();
+  return { id: idTag, timestamp: nowTs, category: category, content: row[3], savedBy: row[4], groupId: storedGroupId };
+}
+
+function readActiveGroupNotesGas_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.GROUP_NOTES);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var vals = sheet.getRange(2, 1, sheet.getLastRow() - 1, 8).getValues();
+  var list = [];
+  for (var i = 0; i < vals.length; i++) {
+    var r = vals[i];
+    var status = String(r[7] || 'ACTIVE').trim().toUpperCase();
+    var content = String(r[3] || '').trim();
+    if (!content || status === 'ARCHIVED' || status === 'DELETED' || status === 'DONE') continue;
+    list.push({
+      rowNumber: i + 2,
+      id: String(r[0] || '').trim(),
+      timestamp: String(r[1] || '').trim(),
+      category: String(r[2] || 'บันทึกช่วยจำ').trim(),
+      content: content,
+      savedBy: String(r[4] || 'สมาชิกกลุ่ม').trim(),
+      groupId: String(r[5] || '').trim(),
+      keywords: String(r[6] || '').trim(),
+      status: status
+    });
+  }
+  return list;
+}
+
+function isPrivateNoteRecordGas_(n) {
+  if (!n) return false;
+  return String(n.groupId || '').indexOf('PRIVATE:') === 0 || String(n.category || '').indexOf('[ส่วนตัว]') !== -1;
+}
+
+function readVisibleNotesForEventGas_(isGroupChat, userId) {
+  var all = readActiveGroupNotesGas_();
+  var uid = String(userId || '').trim();
+  return all.filter(function(n) {
+    var priv = isPrivateNoteRecordGas_(n);
+    if (isGroupChat) {
+      return !priv;
+    }
+    if (!priv) return true;
+    var gid = String(n.groupId || '').trim();
+    if (gid === 'PRIVATE:' || gid === 'PRIVATE') return true;
+    return uid ? gid === ('PRIVATE:' + uid) : false;
+  });
+}
+
+function archiveGroupNotesGas_(queryOrId, scopedList, targetStatus) {
+  var active = Array.isArray(scopedList) ? scopedList : readActiveGroupNotesGas_();
+  if (active.length === 0) return { archived: [], count: 0 };
+  var q = String(queryOrId || '').trim().toLowerCase();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.GROUP_NOTES);
+  var newStatus = targetStatus || 'ARCHIVED';
+  var targets = [];
+
+  if (!q || q === 'ล่าสุด' || q === 'ข้อล่าสุด') {
+    targets.push(active[active.length - 1]);
+  } else if (/^#?\d{1,3}$/.test(q)) {
+    var idx = Number(q.replace('#', '')) - 1;
+    if (idx >= 0 && idx < active.length) targets.push(active[idx]);
+  } else {
+    var cleanQ = q.replace(/^#/, '');
+    for (var i = 0; i < active.length; i++) {
+      var n = active[i];
+      if (n.id.toLowerCase() === cleanQ || n.content.toLowerCase().indexOf(cleanQ) !== -1) {
+        targets.push(n);
+      }
+    }
+  }
+  targets.forEach(function(t) {
+    sheet.getRange(t.rowNumber, 8).setValue(newStatus);
+  });
+  if (targets.length > 0) SpreadsheetApp.flush();
+  return { archived: targets, count: targets.length };
+}
+
+function formatBoobyPersonaReplyGas_(rawText, speakerCall, addClosingWit) {
+  var txt = String(rawText || '').trim();
+  if (!txt) return '';
+  var lines = txt.split('\n');
+  var outLines = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (/^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*$/.test(line)) continue;
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      var cells = line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(function(c) { return c.trim(); }).filter(Boolean);
+      if (cells.length > 0) outLines.push('• ' + cells.join(' — '));
+      continue;
+    }
+    outLines.push(line);
+  }
+  var cleaned = outLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (addClosingWit && cleaned.length > 60 && cleaned.indexOf('☕') === -1 && cleaned.indexOf('✨ หาก') === -1) {
+    var closingOffers = [
+      '\n\n☕ หากต้องการให้บูบี้ช่วยจัดทำรายงาน หรือดำเนินการเพิ่มเติมในจุดใด แจ้งได้เลยนะครับ',
+      '\n\n✨ หากมีข้อมูลส่วนใดให้บูบี้ช่วยกลั่นกรองเพิ่มเติม บอกได้ทุกเมื่อเลยครับ',
+      '\n\n🎩 หากต้องการให้สรุปส่งเข้าที่ประชุมหรือปรับแก้จุดใด แจ้งบูบี้ได้ทันทีครับ'
+    ];
+    var pickIdx = (cleaned.length + (speakerCall ? speakerCall.length : 0)) % closingOffers.length;
+    cleaned += closingOffers[pickIdx];
+  }
+  return cleaned;
+}
+
+function stripThaiHonorificsGas_(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:นางสาว|นาง|นาย|น\.ส\.|ดร\.|ผศ\.|รศ\.|ศ\.|พว\.|นพ\.|พญ\.|ทพ\.|ภก\.|คุณ|พี่|น้อง|หัวหน้า)\s*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractStaffMatchesGas_(txt, staffRows, leaveRows, lOff, otRows, oOff) {
+  var normTxt = String(txt || '').toLowerCase().replace(/\s+/g, ' ');
+  var stopTokens = {
+    'ลา': 1, 'วัน': 1, 'คน': 1, 'งาน': 1, 'เวร': 1, 'คลินิก': 1, 'ห้อง': 1, 'ตรวจ': 1,
+    'วันนี้': 1, 'พรุ่งนี้': 1, 'เมื่อวาน': 1, 'เดือน': 1, 'สัปดาห์': 1, 'อาทิตย์': 1,
+    'ใคร': 1, 'บ้าง': 1, 'ไหน': 1, 'เท่าไหร่': 1, 'กี่คน': 1, 'อายุรกรรม': 1, 'ศัลยกรรม': 1,
+    'กุมารเวชกรรม': 1, 'จักษุวิทยา': 1, 'ทั่วไป': 1, 'คัดกรอง': 1, 'พยาบาล': 1, 'ผู้ช่วย': 1
+  };
+  var directoryMap = {};
+  var addPerson = function(name, pos, clinic, status, empCode) {
+    var clean = String(name || '').trim();
+    if (!clean) return;
+    if (!directoryMap[clean]) {
+      directoryMap[clean] = {
+        name: clean,
+        pos: String(pos || '').trim(),
+        clinic: String(clinic || '').trim(),
+        status: String(status || 'Active').trim(),
+        empCode: String(empCode || '').trim()
+      };
+    } else {
+      if (!directoryMap[clean].pos && pos) directoryMap[clean].pos = String(pos).trim();
+      if (!directoryMap[clean].clinic && clinic) directoryMap[clean].clinic = String(clinic).trim();
+      if (!directoryMap[clean].empCode && empCode) directoryMap[clean].empCode = String(empCode).trim();
+    }
+  };
+  for (var si = 0; si < staffRows.length; si++) {
+    var sr = staffRows[si];
+    addPerson(sr[1], sr[2], sr[3], sr[4], sr[7]);
+  }
+  for (var li = 0; li < leaveRows.length; li++) {
+    var lr = leaveRows[li];
+    addPerson(lr[lOff + 2], lr[lOff + 3], lr[lOff + 4], 'Active', '');
+  }
+  for (var oi = 0; oi < otRows.length; oi++) {
+    var orow = otRows[oi];
+    addPerson(orow[oOff + 2], orow[oOff + 3], orow[oOff + 4] || orow[oOff + 5], 'Active', orow[oOff + 7]);
+  }
+
+  var matches = [];
+  var fullNames = Object.keys(directoryMap);
+  for (var fi = 0; fi < fullNames.length; fi++) {
+    var full = fullNames[fi];
+    var stripped = stripThaiHonorificsGas_(full);
+    if (stripped.length >= 2 && normTxt.indexOf(stripped) !== -1) {
+      matches.push({ staff: directoryMap[full], score: stripped.length + 100 });
+      continue;
+    }
+    var parts = stripped.split(/\s+/).filter(function(tk) {
+      return tk.length >= 2 && !stopTokens[tk];
+    });
+    for (var pi = 0; pi < parts.length; pi++) {
+      var tk = parts[pi];
+      if (normTxt.indexOf(tk) !== -1) {
+        matches.push({ staff: directoryMap[full], score: tk.length });
+        break;
+      }
+    }
+  }
+  matches.sort(function(a, b) { return b.score - a.score; });
+  return {
+    matchedStaff: matches.map(function(m) { return m.staff; }),
+    directoryCount: fullNames.length,
+    directoryList: fullNames.map(function(k) { return directoryMap[k]; })
+  };
+}
+
+function extractCandidatePersonBeforeQueryGas_(rawTxt) {
+  var cleaned = String(rawTxt || '')
+    .trim()
+    .replace(/^@?บูบี้\s*/i, '')
+    .replace(/^(?:ช่วยเช็ค|ช่วยดู|เช็ค|สอบถาม|ถามหน่อย|อยากรู้ว่า|ดูให้หน่อยว่า)\s*/i, '')
+    .replace(/^(?:นาย|นางสาว|นาง|น\.ส\.|พว\.|นพ\.|พญ\.|คุณ|พี่|น้อง)\s*/i, '')
+    .trim();
+  var m = cleaned.match(/^([\u0E00-\u0E7Fa-zA-Z\.]{2,30}(?:\s+[\u0E00-\u0E7Fa-zA-Z\.]{2,30})?)\s+(?:ลา|อยู่\s*ot|ขึ้นเวร|อยู่เวร|อยู่คลินิก|ตำแหน่ง|รหัส|เบิก|มี\s*ot)/i);
+  if (!m) return '';
+  var cand = String(m[1] || '').trim();
+  if (/^(?:ใคร|วัน|พรุ่งนี้|วันนี้|เมื่อวาน|มะรืน|สัปดาห์|อาทิตย์|เดือน|คลินิก|ห้อง|ทั้งหมด|สรุป|ยอด|ช่วย|ที่|มี|ทำไม|หรือ)$/i.test(cand)) return '';
+  return cand;
+}
+
+function extractClinicMatchGas_(txt, settingsMap) {
+  var q = String(txt || '').toLowerCase();
+  var aliases = [
+    { kw: 'ศูนย์ปัญญาภิรมย์', target: 'ศูนย์ปัญญาภิรมย์' },
+    { kw: 'ปัญญาภิรมย์', target: 'ศูนย์ปัญญาภิรมย์' },
+    { kw: 'พรีเมียม', target: 'ศูนย์ปัญญาภิรมย์' },
+    { kw: 'premium', target: 'ศูนย์ปัญญาภิรมย์' },
+    { kw: 'ห้องรับ-ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
+    { kw: 'รับ-ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
+    { kw: 'ส่งต่อ', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
+    { kw: 'refer', target: 'ห้องรับ-ส่งต่อผู้ป่วย' },
+    { kw: 'ศัลยกรรมกระดูก', target: 'ศัลยกรรมกระดูก' },
+    { kw: 'ออร์โธ', target: 'ศัลยกรรมกระดูก' },
+    { kw: 'ortho', target: 'ศัลยกรรมกระดูก' },
+    { kw: 'กระดูก', target: 'ศัลยกรรมกระดูก' },
+    { kw: 'เวชศาสตร์ฟื้นฟู', target: 'เวชศาสตร์ฟื้นฟู' },
+    { kw: 'ฟื้นฟู', target: 'เวชศาสตร์ฟื้นฟู' },
+    { kw: 'กายภาพ', target: 'เวชศาสตร์ฟื้นฟู' },
+    { kw: 'สูติ-นรีเวชกรรม', target: 'สูติ-นรีเวชกรรม' },
+    { kw: 'สูติ', target: 'สูติ-นรีเวชกรรม' },
+    { kw: 'นรีเวช', target: 'สูติ-นรีเวชกรรม' },
+    { kw: 'กุมารเวชกรรม', target: 'กุมารเวชกรรม' },
+    { kw: 'กุมาร', target: 'กุมารเวชกรรม' },
+    { kw: 'คลินิกเด็ก', target: 'กุมารเวชกรรม' },
+    { kw: 'ตรวจโรคทั่วไป', target: 'ตรวจโรคทั่วไป' },
+    { kw: 'ตรวจโรค', target: 'ตรวจโรคทั่วไป' },
+    { kw: 'gp', target: 'ตรวจโรคทั่วไป' },
+    { kw: 'โสต ศอ นาสิก', target: 'โสต ศอ นาสิก' },
+    { kw: 'หูคอจมูก', target: 'โสต ศอ นาสิก' },
+    { kw: 'หู คอ จมูก', target: 'โสต ศอ นาสิก' },
+    { kw: 'โสต', target: 'โสต ศอ นาสิก' },
+    { kw: 'ent', target: 'โสต ศอ นาสิก' },
+    { kw: 'ศูนย์เลสิก', target: 'ศูนย์เลสิก' },
+    { kw: 'เลสิก', target: 'ศูนย์เลสิก' },
+    { kw: 'จักษุวิทยา', target: 'จักษุวิทยา' },
+    { kw: 'จักษุ', target: 'จักษุวิทยา' },
+    { kw: 'คลินิกตา', target: 'จักษุวิทยา' },
+    { kw: 'อายุรกรรม', target: 'อายุรกรรม' },
+    { kw: 'อายุร', target: 'อายุรกรรม' },
+    { kw: 'ศัลยกรรม', target: 'ศัลยกรรม' },
+    { kw: 'ศัลย์', target: 'ศัลยกรรม' },
+    { kw: 'หน่วยคัดกรอง', target: 'หน่วยคัดกรอง' },
+    { kw: 'คัดกรอง', target: 'หน่วยคัดกรอง' },
+    { kw: 'ประกันสังคม', target: 'ประกันสังคม' },
+    { kw: 'คลินิกหัวใจ', target: 'คลินิกหัวใจ' },
+    { kw: 'หัวใจ', target: 'คลินิกหัวใจ' },
+    { kw: 'echo', target: 'Echo' },
+    { kw: 'aairc', target: 'AAIRC' },
+    { kw: 'ods', target: 'ODS' }
+  ];
+  var extraClinics = []
+    .concat(String(settingsMap['In_Time_Clinics'] || '').split(','))
+    .concat(String(settingsMap['Out_Time_Clinics'] || '').split(','))
+    .concat(String(settingsMap['Premium_Sub_Clinics'] || '').split(','));
+  var containsClinicKw = function(keyword) {
+    var k = String(keyword || '').toLowerCase();
+    if (!k) return false;
+    if (/^[a-z0-9\s-]+$/.test(k)) {
+      var esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp('(?:^|[^a-z0-9])' + esc + '(?:[^a-z0-9]|$)').test(q);
+    }
+    return q.indexOf(k) !== -1;
+  };
+  for (var ei = 0; ei < extraClinics.length; ei++) {
+    var cName = String(extraClinics[ei] || '').trim();
+    if (cName && containsClinicKw(cName)) return cName;
+  }
+  for (var ai = 0; ai < aliases.length; ai++) {
+    if (containsClinicKw(aliases[ai].kw)) return aliases[ai].target;
+  }
+  return '';
+}
+
+function getOtHourlyRateGas_(pos, customRatesMap) {
+  var p = String(pos || '').trim().toUpperCase();
+  if (customRatesMap && isFinite(Number(customRatesMap[pos])) && Number(customRatesMap[pos]) > 0) {
+    return Number(customRatesMap[pos]);
+  }
+  if (p.indexOf('HN') !== -1 || p.indexOf('RN') !== -1 || p.indexOf('พยาบาลวิชาชีพ') !== -1 || p === 'พยาบาล') return 150;
+  if (p.indexOf('CLERK') !== -1 || p.indexOf('SERVICE') !== -1 || p.indexOf('พนักงาน') !== -1 || p.indexOf('ธุรการ') !== -1) return 75;
+  return 95;
+}
+
 function handleLineWebhookEvents_(events) {
   var token = String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim();
   var bkk = getBangkokDatePartsGas_(new Date());
   var todayYmd = bkk.ymd;
+  var thaiDays = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
   var thaiShortMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
   var formatShortThaiDate = function(ymd) {
+    var p = String(ymd || '').split('-');
+    if (p.length !== 3) return String(ymd || '');
+    var y = Number(p[0]), m = Number(p[1]), d = Number(p[2]);
+    var dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    return 'วัน' + thaiDays[dow] + 'ที่ ' + d + ' ' + (thaiShortMonths[m - 1] || p[1]) + ' ' + (y + 543);
+  };
+  var formatCompactThaiDate = function(ymd) {
     var p = String(ymd || '').split('-');
     if (p.length !== 3) return String(ymd || '');
     return Number(p[2]) + ' ' + (thaiShortMonths[Number(p[1]) - 1] || p[1]) + ' ' + (Number(p[0]) + 543);
   };
 
+  var settingsMap = readSettingsMapGas_();
+  var ownerCallName = String(settingsMap['Booby_Owner_Name'] || 'คุณทรงยศ').trim() || 'คุณทรงยศ';
+  var ownerUserId = String(settingsMap['Booby_Owner_User_ID'] || '').trim();
+  var groupMentionOnly = String(settingsMap['Booby_Group_Mention_Only'] || 'true').toLowerCase() !== 'false';
+
   for (var i = 0; i < events.length; i++) {
     var ev = events[i];
     if (!ev || !ev.source) continue;
+    var isGroupChat = Boolean(ev.source.groupId || ev.source.roomId);
     var detectedId = String(ev.source.groupId || ev.source.roomId || ev.source.userId || '').trim();
     if (!detectedId) continue;
 
     var groupName = ev.source.groupId ? fetchLineGroupNameGas_(token, detectedId) : '';
-    var updates = [['Line_Detected_Group_ID', detectedId]];
-    if (groupName) updates.push(['Line_Detected_Group_Name', groupName]);
-    upsertSettingsEntriesGas_(updates);
+    if (isGroupChat) {
+      var updates = [['Line_Detected_Group_ID', detectedId]];
+      if (groupName) updates.push(['Line_Detected_Group_Name', groupName]);
+      upsertSettingsEntriesGas_(updates);
+    }
 
-    var txt = ev.type === 'message' && ev.message && ev.message.type === 'text'
-      ? String(ev.message.text || '').trim().toLowerCase()
+    var rawText = ev.type === 'message' && ev.message && ev.message.type === 'text'
+      ? String(ev.message.text || '').trim()
       : '';
+    var txt = rawText.toLowerCase();
+    if (!token || !ev.replyToken || !txt) continue;
 
-    if (token && ev.replyToken && txt) {
-      var replyText = '';
-      if (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id') {
-        replyText = 'รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n' + detectedId + (groupName ? '\nกลุ่ม: ' + groupName : '');
-      } else if (
-        txt.indexOf('ใครลา') !== -1 ||
-        txt.indexOf('ลาวันนี้') !== -1 ||
-        txt.indexOf('พรุ่งนี้ใครลา') !== -1 ||
-        (txt.indexOf('ลา') !== -1 && (txt.indexOf('ใคร') !== -1 || txt.indexOf('วันนี้') !== -1 || txt.indexOf('พรุ่งนี้') !== -1 || txt.indexOf('บ้าง') !== -1))
-      ) {
-        var isTomorrowLeave = txt.indexOf('พรุ่งนี้') !== -1;
-        var targetLeaveYmd = isTomorrowLeave ? addDaysIsoGas_(todayYmd, 1) : todayYmd;
-        var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 9);
-        var lOff = (leaveData.headers[0] === 'Leave_ID') ? 1 : 0;
-        var matchedLeaves = [];
+    // Chat Environment Gate:
+    // - 1-on-1 Private Chat: respond immediately
+    // - Group Chat: when groupMentionOnly=true, respond ONLY when called ("บูบี้", "@บูบี้", "booby"), Replied/Quoted, or /id
+    var isIdCmd = (txt === '/id' || txt === '/groupid' || txt === 'ขอรหัสกลุ่ม' || txt === 'id' || txt === 'whoami');
+    var isMentioned = /บูบี้|booby/i.test(rawText);
+    var isReplyToQuote = Boolean(ev.message && ev.message.quotedMessageId);
+    if (isGroupChat && groupMentionOnly && !isIdCmd && !isMentioned && !isReplyToQuote) {
+      continue;
+    }
 
-        for (var li = 0; li < leaveData.rows.length; li++) {
-          var lr = leaveData.rows[li];
-          var sDate = String(lr[lOff] || '').trim();
-          var eDate = String(lr[lOff + 1] || '').trim() || sDate;
-          var sName = String(lr[lOff + 2] || '').trim();
-          if (!sDate || !sName) continue;
-          if (targetLeaveYmd >= sDate && targetLeaveYmd <= eDate) {
-            matchedLeaves.push({
-              name: sName,
-              pos: String(lr[lOff + 3] || '').trim(),
-              clinic: String(lr[lOff + 4] || '').trim(),
-              leaveType: String(lr[lOff + 5] || 'ลา').trim(),
-              note: String(lr[lOff + 7] || '').trim()
-            });
-          }
+    var senderName = fetchLineSenderNameGas_(token, ev.source);
+    var ownerStripped = stripThaiHonorificsGas_(ownerCallName);
+    var senderStripped = stripThaiHonorificsGas_(senderName);
+    var isOwner = Boolean(
+      (ownerUserId && ev.source.userId === ownerUserId) ||
+      (!isGroupChat) ||
+      (ownerStripped && senderStripped && (senderStripped.indexOf(ownerStripped) !== -1 || ownerStripped.indexOf(senderStripped) !== -1))
+    );
+    var speakerCall = isOwner
+      ? ownerCallName
+      : (senderName && senderName !== 'สมาชิกกลุ่ม' ? ('คุณ' + senderName.replace(/^คุณ\s*/, '')) : 'ทุกท่าน');
+
+    var replyText = '';
+    var addClosingWit = false;
+    var cmdText = rawText.replace(/@?บูบี้/gi, '').replace(/\bbooby\b/gi, '').trim();
+    var cmdLower = cmdText.toLowerCase();
+    var wantsPrivateScope = (!isGroupChat) || /ส่วนตัว|เฉพาะผม|เฉพาะฉัน|ความลับ/.test(cmdLower);
+    var noteGroupScopeId = wantsPrivateScope ? ('PRIVATE:' + String(ev.source.userId || detectedId)) : detectedId;
+    var visibleNotes = readVisibleNotesForEventGas_(isGroupChat, ev.source.userId);
+
+    // 1. LINE ID / WhoAmI Command
+    if (isIdCmd) {
+      if (isGroupChat) {
+        replyText = '🎩 ' + speakerCall + ' ครับ รหัสกลุ่ม LINE (Group ID) สำหรับตั้งค่าออโตเมชั่น OPD:\n' +
+          detectedId + (groupName ? '\nกลุ่ม: ' + groupName : '');
+      } else {
+        replyText = '🎩 สวัสดีครับ ' + speakerCall + ' รหัส LINE User ID ของท่านคือ:\n' +
+          String(ev.source.userId || detectedId) +
+          '\n\n💡 นำรหัส U... นี้ไปใส่ในหน้า Admin เพื่อยืนยันสิทธิ์เลขาส่วนตัว 1-on-1 ได้เลยครับ';
+      }
+      replyLineMessageGas_(token, ev.replyToken, replyText);
+      continue;
+    }
+
+    // 2. Secretarial Capability 1: Appointments & Reminders (📅 จัดการตารางนัดหมาย & เตือนความจำ)
+    var apptCancelMatch = cmdText.match(/^(?:ยกเลิกนัด|ลบนัด|เลื่อนนัด(?:ออก)?)\s*(.*)/i);
+    if (apptCancelMatch) {
+      var apptPool = visibleNotes.filter(function(n) { return n.category.indexOf('นัดหมาย') !== -1; });
+      var cRes = archiveGroupNotesGas_(apptCancelMatch[1], apptPool, 'ARCHIVED');
+      if (cRes.count > 0) {
+        var cLines = cRes.archived.map(function(n) { return '• #' + n.id + ': ' + n.content.split('\n')[0]; });
+        replyText = '🗑️ เรียบร้อยครับ ' + speakerCall + ' บูบี้ยกเลิกนัดหมายออกจากตารางแล้ว (' + cRes.count + ' รายการ):\n' + cLines.join('\n');
+      } else {
+        replyText = '🔍 ยังไม่พบนัดหมายที่ตรงกับ "' + String(apptCancelMatch[1] || 'ล่าสุด').trim() + '" ครับ ' + speakerCall + ' (ลองพิมพ์ "ดูตารางนัด" ก่อนได้นะครับ)';
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+      continue;
+    }
+
+    var isApptRecall = /(?:ดูนัด|เช็คนัด|เช็กนัด|ตารางนัด|มีนัดอะไร|นัดหมายอะไร|นัดอะไรบ้าง|เตือนความจำอะไร|มีนัดไหม|มีนัดมั้ย)/.test(cmdLower);
+    var isApptCreate = /^(?:ลงนัด|เพิ่มนัด|นัดหมาย|ตั้งเตือน|เตือนความจำ|เตือนให้|บันทึกนัด|ช่วยจำนัด|มีนัด(?:เรื่อง|กับ|ที่))/.test(cmdLower);
+    if (isApptRecall && !isApptCreate) {
+      var appts = visibleNotes.filter(function(n) { return n.category.indexOf('นัดหมาย') !== -1; });
+      var apptDateFilter = parseThaiQueryTargetDateGas_(cmdLower, todayYmd);
+      var filteredAppts = appts;
+      if (apptDateFilter.hasExplicitDate) {
+        var compactDate = formatCompactThaiDate(apptDateFilter.ymd);
+        filteredAppts = appts.filter(function(n) {
+          return n.content.indexOf(apptDateFilter.ymd) !== -1 || n.content.indexOf(compactDate) !== -1;
+        });
+      }
+      if (filteredAppts.length === 0) {
+        replyText = '📅 ' + speakerCall + ' ครับ ' + (apptDateFilter.hasExplicitDate ? 'ประจำ' + formatShortThaiDate(apptDateFilter.ymd) + ' ' : 'ขณะนี้') +
+          'ยังไม่มีกำหนดการนัดหมายที่บันทึกไว้ในระบบครับ\n💡 พิมพ์ "ลงนัด <วันที่> เวลา <เวลา> เรื่อง <หัวข้อ>" เพื่อให้บูบี้ลงตารางให้ได้เลยครับ';
+      } else {
+        var aLines = filteredAppts.slice(-10).map(function(n, idx) {
+          var scopeTag = isPrivateNoteRecordGas_(n) ? '🔒 ส่วนตัว' : '👥 ทีม/กลุ่ม';
+          return (idx + 1) + '. [#' + n.id + ' • ' + scopeTag + ']\n' + n.content;
+        });
+        replyText = '📅 ตารางนัดหมายและการแจ้งเตือนของ ' + speakerCall + ' (' + filteredAppts.length + ' รายการ):\n\n' + aLines.join('\n\n');
+        addClosingWit = true;
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
+
+    if (isApptCreate) {
+      if (isGroupChat && /ส่วนตัว|ลับ/.test(cmdLower)) {
+        replyText = '🔒 ' + speakerCall + ' ครับ เพื่อรักษาความลับ บูบี้ขอแนะนำให้ส่งนัดหมายส่วนตัวมาที่แชตส่วนตัว 1-on-1 ของบูบี้นะครับ';
+        replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+        continue;
+      }
+      var apptDateInfo = parseThaiQueryTargetDateGas_(cmdLower, todayYmd);
+      var apptTimeMatch = cmdText.match(/(\d{1,2}[:.]\d{2}\s*(?:น\.?)?|\d{1,2}\s*โมง(?:\s*(?:เช้า|เย็น|ค่ำ|ครึ่ง))?|เที่ยง(?:ตรง|วัน)?|บ่าย\s*\d{1,2}\s*โมง)/i);
+      if (!apptDateInfo.hasExplicitDate || !apptTimeMatch) {
+        var missingParts = [];
+        if (!apptDateInfo.hasExplicitDate) missingParts.push('วันที่ (เช่น พรุ่งนี้, วันศุกร์, 25 พ.ย.)');
+        if (!apptTimeMatch) missingParts.push('เวลา (เช่น 09:00 น., 13:30 น.)');
+        replyText = '🎩 ' + speakerCall + ' ครับ เพื่อไม่ให้ลงตารางคลาดเคลื่อน บูบี้ขอทราบรายละเอียดเพิ่มเติมเล็กน้อยครับ:\n• ระบุ ' +
+          missingParts.join(' และ ') + ' ได้เลยครับ เดี๋ยวบูบี้จัดระเบียบลงตารางให้ทันทีครับ';
+        replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+        continue;
+      }
+      var timeClean = String(apptTimeMatch[1]).replace(/\s+/g, ' ').trim();
+      if (timeClean.indexOf('น.') === -1 && /\d/.test(timeClean)) timeClean += ' น.';
+      var prepMatch = cmdText.match(/(?:เตรียม|สิ่งที่ต้องเตรียม|นำ)\s*[:\-]?\s*(.+)$/i);
+      var prepText = prepMatch ? String(prepMatch[1] || '').trim() : 'เตรียมประเด็น/เอกสารที่เกี่ยวข้อง';
+      var topicText = cmdText
+        .replace(/^(?:ลงนัด|เพิ่มนัด|นัดหมาย|ตั้งเตือน|เตือนความจำ|เตือนให้|บันทึกนัด|ช่วยจำนัด)\s*[:\-]?\s*/i, '')
+        .replace(apptTimeMatch[0], ' ')
+        .replace(/(?:เตรียม|สิ่งที่ต้องเตรียม)\s*[:\-]?\s*.+$/i, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      var locMatch = topicText.match(/(?:ที่|ณ|ห้อง)\s+([^\s]+(?:\s+[^\s]+)?)/);
+      var formattedAppt = '📌 ' + formatShortThaiDate(apptDateInfo.ymd) + ' เวลา ' + timeClean + '\n' +
+        '📍 ' + (topicText || 'นัดหมายสำคัญ') + (locMatch ? '' : '') + '\n' +
+        '🎒 เตรียม: ' + prepText;
+      var savedAppt = saveLineGroupNoteGas_(formattedAppt, speakerCall, noteGroupScopeId, 'นัดหมาย/เตือนความจำ', wantsPrivateScope);
+      replyText = '📅 บันทึกนัดหมายเรียบร้อยครับ ' + speakerCall + ' (#' + savedAppt.id +
+        (wantsPrivateScope ? ' • 🔒 ส่วนตัว' : ' • 👥 กลุ่ม') + ')\n\n' + formattedAppt;
+      addClosingWit = true;
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
+
+    // 3. Secretarial Capability 2: Chat Summary & To-Do / Action Items (📝 สรุปแชตกลุ่ม & แยกงาน)
+    var todoDoneMatch = cmdText.match(/^(?:ปิดงาน|ทำเสร็จแล้ว|เสร็จแล้ว|เคลียร์งาน)\s*(.*)/i);
+    if (todoDoneMatch) {
+      var todoPool = visibleNotes.filter(function(n) { return n.category.indexOf('To-Do') !== -1 || n.category.indexOf('งานที่ต้องทำ') !== -1; });
+      var doneRes = archiveGroupNotesGas_(todoDoneMatch[1], todoPool, 'DONE');
+      if (doneRes.count > 0) {
+        var dLines = doneRes.archived.map(function(n) { return '✅ #' + n.id + ': ' + n.content; });
+        replyText = '🎉 ยอดเยี่ยมครับ ' + speakerCall + ' บูบี้ปิดงานเรียบร้อยแล้ว (' + doneRes.count + ' รายการ):\n' + dLines.join('\n');
+      } else {
+        replyText = '🔍 ไม่พบรายการงานค้างที่ตรงกับ "' + String(todoDoneMatch[1] || 'ล่าสุด').trim() + '" ครับ (พิมพ์ "งานค้าง" เพื่อดูเลข #ID ได้ครับ)';
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+      continue;
+    }
+
+    var isTodoRecall = /(?:งานค้าง|ดูงาน|รายการงาน|เช็คงาน|เช็กงาน|มีงานอะไรบ้าง|to-do|todo)/.test(cmdLower) && !/^(?:สั่งงาน|มอบหมาย|เพิ่มงาน|แยกงาน)/.test(cmdLower);
+    if (isTodoRecall) {
+      var todos = visibleNotes.filter(function(n) { return n.category.indexOf('To-Do') !== -1 || n.category.indexOf('งานที่ต้องทำ') !== -1; });
+      if (todos.length === 0) {
+        replyText = '✅ ' + speakerCall + ' ครับ ขณะนี้ไม่มีงานค้าง (To-Do) ในรายการครับ ทุกอย่างเรียบร้อยดีครับ';
+      } else {
+        var tLines = todos.slice(-15).map(function(n, idx) {
+          return (idx + 1) + '. [#' + n.id + '] ' + n.content;
+        });
+        replyText = '📝 รายการงานค้าง (Action Items) จำนวน ' + todos.length + ' รายการ:\n\n' + tLines.join('\n\n') +
+          '\n\n💡 พิมพ์ "ปิดงาน #<เลขID>" เมื่อดำเนินการเสร็จสิ้นครับ';
+        addClosingWit = true;
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
+
+    var isChatSummaryCmd = /^(?:สรุปแชต|สรุปข้อความ|สรุปบทสนทนา|สรุปประชุม|แยกงาน)/.test(cmdLower);
+    var isTodoAddCmd = /^(?:สั่งงาน|มอบหมายงาน|มอบหมาย|เพิ่มงาน|to-do|todo)\s*[:\-]?\s*(.+)/i.exec(cmdText);
+    if (isChatSummaryCmd) {
+      var bodyToSummarize = cmdText.replace(/^(?:สรุปแชต|สรุปข้อความ|สรุปบทสนทนา|สรุปประชุม|แยกงาน)\s*[:\-]?\s*/i, '').trim();
+      var rawLines = bodyToSummarize.split(/\r?\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length >= 3; });
+      if (rawLines.length === 0) {
+        replyText = '📝 ' + speakerCall + ' ครับ กรุณาวางข้อความแชตกลุ่มหรือบันทึกการประชุมต่อท้ายคำสั่ง "สรุปแชต:" ได้เลยครับ เดี๋ยวบูบี้สกัดประเด็นสำคัญและแยก Action Items ให้ทันทีครับ';
+        replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+        continue;
+      }
+      var bulletSummary = rawLines.slice(0, 5).map(function(l) { return '📌 ' + (l.length > 140 ? l.slice(0, 137) + '...' : l); });
+      var actionLines = [];
+      for (var li = 0; li < rawLines.length; li++) {
+        var ln = rawLines[li];
+        if (/คุณ|ส่ง|ทำ|เตรียม|แจ้ง|แก้|ประสาน|ตรวจ|กำหนด|ก่อน|ภายใน|พว\.|หัวหน้า/.test(ln)) {
+          var whoM = ln.match(/(?:คุณ|พว\.|พี่|น้อง)\s*([^\s:,-]+)/);
+          var dlInfo = parseThaiQueryTargetDateGas_(ln.toLowerCase(), todayYmd);
+          var whoStr = whoM ? whoM[0] : 'ทีมผู้เกี่ยวข้อง';
+          var dlStr = dlInfo.hasExplicitDate ? formatCompactThaiDate(dlInfo.ymd) : 'แจ้งกำหนดเพิ่มเติม';
+          actionLines.push('• ' + ln + ' — ผู้รับผิดชอบ: ' + whoStr + ' — กำหนดส่ง: ' + dlStr);
+          saveLineGroupNoteGas_(ln + ' — ผู้รับผิดชอบ: ' + whoStr + ' — กำหนดส่ง: ' + dlStr, speakerCall, noteGroupScopeId, 'งานที่ต้องทำ/To-Do', wantsPrivateScope);
         }
+      }
+      replyText = '📝 สรุปสาระสำคัญจากบทสนทนาครับ ' + speakerCall + ':\n\n' +
+        bulletSummary.join('\n') +
+        (actionLines.length > 0
+          ? '\n\n✅ Action Items ที่แยกและบันทึกลง To-Do แล้ว (' + actionLines.length + ' งาน):\n' + actionLines.slice(0, 8).join('\n')
+          : '\n\n💡 หากต้องการมอบหมายงานชิ้นใด พิมพ์ "สั่งงาน: <ชื่องาน> ให้คุณ<ชื่อ> ภายใน <วัน>" ได้เลยครับ');
+      addClosingWit = true;
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
 
-        var leaveDateLabel = isTomorrowLeave ? 'พรุ่งนี้' : 'วันนี้';
-        var leaveThaiDate = formatShortThaiDate(targetLeaveYmd);
+    if (isTodoAddCmd && isTodoAddCmd[1]) {
+      var taskRaw = String(isTodoAddCmd[1]).trim();
+      var assigneeM = taskRaw.match(/(?:ให้|ผู้รับผิดชอบ\s*[:\-]?)\s*((?:คุณ|พว\.|พี่|น้อง)?\s*[\u0E00-\u0E7Fa-zA-Z]+)/);
+      var taskDateInfo = parseThaiQueryTargetDateGas_(taskRaw.toLowerCase(), todayYmd);
+      var assigneeStr = assigneeM ? String(assigneeM[1]).trim() : 'ยังไม่ระบุ';
+      var deadlineStr = taskDateInfo.hasExplicitDate ? formatShortThaiDate(taskDateInfo.ymd) : 'ไม่ระบุกำหนดส่ง';
+      var formattedTask = taskRaw + ' — ผู้รับผิดชอบ: ' + assigneeStr + ' — กำหนดส่ง: ' + deadlineStr;
+      var savedTask = saveLineGroupNoteGas_(formattedTask, speakerCall, noteGroupScopeId, 'งานที่ต้องทำ/To-Do', wantsPrivateScope);
+      replyText = '📝 บูบี้บันทึกงานเข้ากระดาน To-Do เรียบร้อยครับ ' + speakerCall + ' (#' + savedTask.id + ')\n\n' +
+        '• งาน: ' + taskRaw + '\n' +
+        '• ผู้รับผิดชอบ: ' + assigneeStr + '\n' +
+        '• กำหนดส่ง: ' + deadlineStr;
+      addClosingWit = true;
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
+
+    // 4. Secretarial Capability 3: Drafting Announcements & Coordination Messages (✍️ ร่างประกาศ 2 สไตล์)
+    var isDraftCmd = /^(?:ร่างข้อความ|ร่างประกาศ|เขียนประกาศ|ร่างไลน์|ขอข้อความแจ้ง|ช่วยพิมพ์แจ้ง|ช่วยเขียนแจ้ง|ร่างคำชี้แจง)/.test(cmdLower);
+    if (isDraftCmd) {
+      var draftTopic = cmdText
+        .replace(/^(?:ร่างข้อความ|ร่างประกาศ|เขียนประกาศ|ร่างไลน์|ขอข้อความแจ้ง|ช่วยพิมพ์แจ้ง|ช่วยเขียนแจ้ง|ร่างคำชี้แจง)\s*(?:เรื่อง|เกี่ยวกับ)?\s*[:\-]?\s*/i, '')
+        .trim();
+      if (!draftTopic || draftTopic.length < 3) {
+        replyText = '✍️ ' + speakerCall + ' ครับ ต้องการให้บูบี้ร่างข้อความหรือประกาศเรื่องอะไร และส่งถึงกลุ่มใดครับ แจ้งสั้นๆ ได้เลยครับ เดี๋ยวจัดให้ครบทั้งแบบทางการและแบบเป็นกันเองครับ';
+      } else {
+        replyText = '✍️ บูบี้ร่างข้อความให้เลือก 2 รูปแบบตามระดับผู้รับสารครับ ' + speakerCall + ':\n\n' +
+          '1️⃣ แบบทางการสุภาพ (สำหรับผู้บริหาร / หัวหน้าหน่วยงาน / หนังสือเวียน)\n' +
+          'เรียน ทุกท่านที่เกี่ยวข้อง\n' +
+          'ขออนุญาตแจ้งประชาสัมพันธ์เรื่อง "' + draftTopic + '" เพื่อให้การปฏิบัติงานและประสานงานของกลุ่มงานการพยาบาลผู้ป่วยนอก (OPD) เป็นไปด้วยความเรียบร้อย จึงเรียนมาเพื่อโปรดทราบและถือปฏิบัติโดยพร้อมเพรียงกัน\n' +
+          'ขอแสดงความนับถือ\n\n' +
+          '2️⃣ แบบกระชับเป็นกันเอง (สำหรับกลุ่ม LINE ทีมงาน OPD)\n' +
+          '📢 แจ้งทีม OPD ทราบครับทุกคน\n' +
+          '📌 เรื่อง: ' + draftTopic + '\n' +
+          'รบกวนทุกท่านรับทราบและช่วยกันดำเนินการตามนี้นะครับ หากมีข้อสงสัยแจ้งในกลุ่มนี้ได้เลย ขอบคุณทุกท่านมากครับ 🙏';
+        addClosingWit = true;
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, addClosingWit));
+      continue;
+    }
+
+    // 5. Group Memory: Write / Save New Agreement or Group Memo
+    var saveNoteMatch = cmdText.match(/^(?:จำไว้ว่า|จำไว้หน่อยว่า|จำไว้หน่อย|จำไว้|ฝากจำว่า|ฝากจำ|จดไว้ว่า|จดไว้|จดบันทึก|บันทึกข้อตกลงใหม่|บันทึกข้อตกลง|ข้อตกลงใหม่|ข้อตกลงกลุ่ม|ข้อตกลง|มติที่ประชุม|มติกลุ่ม|มติ|ตกลงตามนี้|ประกาศใหม่|แจ้งเวียน|โน้ตไว้|เพิ่มบันทึก|บันทึกช่วยจำ|เงื่อนไขใหม่)[:\s-]*(.+)/i);
+    var passiveSaveMatch = !saveNoteMatch && cmdText.match(/^(?:.*?(?:จำไว้ว่า|จดไว้ว่า|บันทึกไว้ว่า))\s*[:\-]?\s*(.+)/i);
+    var noteContentToSave = saveNoteMatch ? String(saveNoteMatch[1] || '').trim() : (passiveSaveMatch ? String(passiveSaveMatch[1] || '').trim() : '');
+    var looksLikeRecallNoteQuestion = !noteContentToSave ||
+      /^(?:อะไรบ้าง|มีอะไร|กี่|ทั้งหมด|เรื่อง|ที่จำ|ไหม|มั้ย|มั๊ย|ได้ไหม|ได้มั้ย|\?)/.test(noteContentToSave) ||
+      /(?:อะไรบ้าง|มีอะไรบ้าง|กี่ข้อ|กี่เรื่อง|ไหม|มั้ย|มั๊ย|\?)\s*$/.test(noteContentToSave);
+    if (noteContentToSave && !looksLikeRecallNoteQuestion) {
+      var savedNote = saveLineGroupNoteGas_(noteContentToSave, speakerCall, noteGroupScopeId, '', wantsPrivateScope);
+      replyText = '📝 บูบี้จดจำ' + (wantsPrivateScope ? 'บันทึกส่วนตัว' : 'ข้อตกลงกลุ่ม') + 'เรียบร้อยแล้วครับ ' + speakerCall + ' (#' + savedNote.id + ')\n\n' +
+        '📂 หมวดหมู่: ' + savedNote.category + '\n' +
+        '📌 "' + savedNote.content + '"\n' +
+        '👤 โดย: ' + savedNote.savedBy + ' (' + savedNote.timestamp.slice(11, 16) + ' น.)\n' +
+        '💡 พิมพ์ "สรุปข้อตกลง" เพื่อเรียกดูได้ตลอดครับ';
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, true));
+      continue;
+    }
+
+    // 6. Group Memory: Delete / Archive Note
+    var delNoteMatch = cmdText.match(/^(?:ลบข้อตกลง|ลบบันทึก|ลืมเรื่อง|ลืมข้อตกลง|ยกเลิกข้อตกลง|ลบโน้ต)\s*(.*)/i);
+    if (delNoteMatch) {
+      var delRes = archiveGroupNotesGas_(delNoteMatch[1], visibleNotes, 'ARCHIVED');
+      if (delRes.count > 0) {
+        var delLines = delRes.archived.map(function(n) { return '• #' + n.id + ': "' + n.content + '"'; });
+        replyText = '🗑️ จัดเก็บบันทึกเรียบร้อยครับ ' + speakerCall + ' (' + delRes.count + ' รายการ):\n' + delLines.join('\n');
+      } else {
+        replyText = '🔍 ไม่พบบันทึกข้อตกลงที่ตรงกับเงื่อนไขลบครับ ' + speakerCall + ' (ลองพิมพ์ "สรุปข้อตกลง" เพื่อดูเลข #ID ก่อนได้ครับ)';
+      }
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(replyText, speakerCall, false));
+      continue;
+    }
+
+    // Load database sheets & settings for intelligent querying + Executive Briefing
+    var staffData = getSheetRowsNormalized_(SHEET_NAMES.STAFF, 8);
+    var leaveData = getSheetRowsNormalized_(SHEET_NAMES.LEAVE, 9);
+    var lOff = (leaveData.headers[0] === 'Leave_ID') ? 1 : 0;
+    var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 9);
+    var oOff = (otData.headers[0] === 'OT_ID') ? 1 : 0;
+
+    var parsedTarget = parseThaiQueryTargetDateGas_(txt, todayYmd);
+    var startYmd = parsedTarget.ymd;
+    var endYmd = parsedTarget.endYmd || startYmd;
+    var hasExplicitDate = Boolean(parsedTarget.hasExplicitDate);
+    var isRange = Boolean(parsedTarget.isRange && startYmd !== endYmd);
+    var dateHeader = isRange
+      ? (parsedTarget.relLabel ? parsedTarget.relLabel + ' (' : '') + formatCompactThaiDate(startYmd) + ' - ' + formatCompactThaiDate(endYmd) + (parsedTarget.relLabel ? ')' : '')
+      : (parsedTarget.relLabel ? parsedTarget.relLabel + ' (' : '') + formatShortThaiDate(startYmd) + (parsedTarget.relLabel ? ')' : '');
+
+    // Secretarial Capability 4: Executive Briefing (🗂️ กลั่นกรองข้อมูลก่อนตัดสินใจ)
+    var isExecutiveBriefing = /(?:สรุปผู้บริหาร|executive|briefing|ภาพรวมวันนี้|สรุปภาพรวมทั้งหมด|ต้องตัดสินใจอะไรบ้าง|สถานการณ์วันนี้|สรุปสำหรับหัวหน้า)/.test(cmdLower);
+    if (isExecutiveBriefing) {
+      var briefDate = hasExplicitDate ? startYmd : todayYmd;
+      var briefReport = buildDailyCensusLineMessageGas_(briefDate, 'ALL', settingsMap);
+      var bLeaves = leaveData.rows.filter(function(r) {
+        var s = normalizeSheetDateGas_(r[lOff]);
+        var e = normalizeSheetDateGas_(r[lOff + 1]) || s;
+        return s && s <= briefDate && e >= briefDate;
+      });
+      var bOt = otData.rows.filter(function(r) {
+        return normalizeSheetDateGas_(r[oOff]) === briefDate;
+      });
+      var bAppts = visibleNotes.filter(function(n) { return n.category.indexOf('นัดหมาย') !== -1; });
+      var bTodos = visibleNotes.filter(function(n) { return n.category.indexOf('To-Do') !== -1 || n.category.indexOf('งานที่ต้องทำ') !== -1; });
+
+      var execAdvice = 'สถานการณ์อยู่ในเกณฑ์ปกติ สามารถบริหารอัตรากำลังตามแผนได้ครับ';
+      if (briefReport.clinicCount === 0 && bLeaves.length > 0) {
+        execAdvice = 'วันนี้มีผู้ลา ' + bLeaves.length + ' ท่าน แนะนำตรวจการจัดคนทดแทนและติดตามการบันทึกยอด Census ช่วงปิดเวรครับ';
+      } else if (bLeaves.length >= 3) {
+        execAdvice = 'วันนี้มีผู้ลา ' + bLeaves.length + ' ท่าน (ค่อนข้างหนาแน่น) แนะนำพิจารณาเกลี่ยอัตรากำลังคลินิกรองหรือจัดเวร OT เสริมครับ';
+      } else if (bTodos.length > 0) {
+        execAdvice = 'ภาระงานโดยรวมคุมได้ แนะนำติดตามงานค้าง (To-Do) ' + bTodos.length + ' รายการ และตรวจสอบความครบถ้วนก่อนปิดเวรครับ';
+      }
+
+      var bSummary = '🗂️ Executive Briefing — ' + formatShortThaiDate(briefDate) + '\n' +
+        '💡 ข้อเสนอแนะเชิงบริหาร: ' + execAdvice + '\n\n' +
+        '📊 ภาระงานผู้ป่วยนอก: ' + (briefReport.clinicCount > 0 ? (briefReport.clinicCount + ' คลินิก • ' + briefReport.totalPt.toLocaleString() + ' ราย') : 'ยังไม่มีบันทึกยอดประจำวัน') + '\n' +
+        '🏥 ผู้ลาวันนี้: ' + bLeaves.length + ' รายการ' + (bLeaves.length > 0 ? ' (' + bLeaves.slice(0, 4).map(function(r) { return String(r[lOff + 2] || '').trim(); }).join(', ') + (bLeaves.length > 4 ? '...' : '') + ')' : '') + '\n' +
+        '⏰ เวร OT นอกเวลา: ' + bOt.length + ' รายการ' + '\n' +
+        '📅 นัดหมายที่บันทึกไว้: ' + bAppts.length + ' รายการ\n' +
+        '📝 งานค้าง (To-Do): ' + bTodos.length + ' รายการ';
+      replyLineMessageGas_(token, ev.replyToken, formatBoobyPersonaReplyGas_(bSummary, speakerCall, true));
+      continue;
+    }
+
+    var staffExtract = extractStaffMatchesGas_(txt, staffData.rows, leaveData.rows, lOff, otData.rows, oOff);
+    var matchedStaff = staffExtract.matchedStaff;
+    var candidateName = matchedStaff.length > 0 ? matchedStaff[0].name : extractCandidatePersonBeforeQueryGas_(rawText);
+    var isPersonQuery = matchedStaff.length > 0 || Boolean(candidateName);
+    var asksOpenWhen = /(?:วันไหน|เมื่อไหร่|ช่วงไหน|วันที่เท่าไหร่|วันอะไร|บ่อยแค่ไหน|กี่ครั้ง|กี่วัน|ทั้งหมด|ล่าสุด|เคยลา|เคยขึ้น)/.test(txt);
+
+    var matchedClinic = extractClinicMatchGas_(txt, settingsMap);
+    var shiftFilter = '';
+    if (txt.indexOf('นอกเวลาวันหยุด') !== -1 || (txt.indexOf('นอกเวลา') !== -1 && (txt.indexOf('วันหยุด') !== -1 || txt.indexOf('12:00') !== -1))) {
+      shiftFilter = 'นอกเวลาวันหยุด 08:00-12:00';
+    } else if (txt.indexOf('นอกเวลาเย็น') !== -1 || (txt.indexOf('นอกเวลา') !== -1 && (txt.indexOf('เย็น') !== -1 || txt.indexOf('16:00') !== -1 || txt.indexOf('20:00') !== -1))) {
+      shiftFilter = 'นอกเวลาเย็น 16:00-20:00';
+    } else if (txt.indexOf('ในเวลา') !== -1 && txt.indexOf('นอกเวลา') === -1) {
+      shiftFilter = 'ในเวลา 08:00-16:00';
+    } else if (txt.indexOf('นอกเวลา') !== -1) {
+      shiftFilter = 'OUT_TIME_ALL';
+    }
+
+    // Group Memory Recall / Search Intent (Respecting Group vs 1-on-1 Privacy Scope)
+    var asksRecallNotes = /(?:สรุปข้อตกลง|ข้อตกลง|บันทึกที่จำ|ความจำ|จำอะไรไว้|จำเรื่อง|โน้ตที่|มติที่ประชุม|มติกลุ่ม|ประกาศที่บันทึก|บันทึกใหม่)/.test(txt);
+
+    // Structured Intents across OPD System
+    var txtNoTimeWord = txt.replace(/นอกเวลา|ในเวลา|เวลา/g, '');
+    var asksLeave = (
+      txtNoTimeWord.indexOf('ใครลา') !== -1 ||
+      txtNoTimeWord.indexOf('ลาวันนี้') !== -1 ||
+      txtNoTimeWord.indexOf('ลาบ้าง') !== -1 ||
+      txtNoTimeWord.indexOf('ลาวันไหน') !== -1 ||
+      txtNoTimeWord.indexOf('คนลา') !== -1 ||
+      txtNoTimeWord.indexOf('ผู้ลา') !== -1 ||
+      txtNoTimeWord.indexOf('ลาป่วย') !== -1 ||
+      txtNoTimeWord.indexOf('ลากิจ') !== -1 ||
+      txtNoTimeWord.indexOf('ลาพัก') !== -1 ||
+      txtNoTimeWord.indexOf('ลางาน') !== -1 ||
+      txtNoTimeWord.indexOf('ยอดลา') !== -1 ||
+      txtNoTimeWord.indexOf('ไปอบรม') !== -1 ||
+      /(?:ใคร|คน|ผู้|ยื่น|ขอ|หยุด|แจ้ง|มี|กี่คน|วันไหน|เมื่อไหร่|เคย).*ลา|ลา.*(?:ใคร|บ้าง|กี่คน|กี่วัน|วันไหน|เมื่อไหร่|ไหม|มั้ย|วัน|สัปดาห์|อาทิตย์|เดือน|พรุ่งนี้|มะรืน|เมื่อวาน|\d)/.test(txtNoTimeWord)
+    );
+    var asksOt = (
+      txt.indexOf('ot') !== -1 ||
+      txt.indexOf('โอที') !== -1 ||
+      txt.indexOf('นอกเวลา') !== -1 ||
+      txt.indexOf('อยู่เวร') !== -1 ||
+      txt.indexOf('ขึ้นเวร') !== -1 ||
+      txt.indexOf('ค่าตอบแทน') !== -1 ||
+      txt.indexOf('ค่าเวร') !== -1 ||
+      txt.indexOf('เวร') !== -1
+    );
+    var asksProductivity = /(?:productivity|โปรดัก|ประสิทธิผล|nhppd|\bftc\b|skill\s*mix|สกิลมิกซ์|\boutput\b|\binput\b|กำลังคน|อัตรากำลัง|ขาดคน|เกินเกณฑ์|ภาระงานหนัก|โหลดสุด)/.test(txt);
+    var asksWorkload = /(?:ยอดผู้ป่วย|ผู้ป่วย|คนไข้|ยอดคนไข้|ยอดตรวจ|ยอดรวม|สรุปยอด|census|admit|แอดมิท|รับไว้|ส่งต่อ|refer|off\s*เวร|ปิดคลินิก|กี่ราย|เยอะสุด|มากสุด)/.test(txt);
+    var asksCostCenter = /(?:cost\s*center|คอสเซ็นเตอร์|คอลเซ็นเตอร์|รหัสศูนย์ต้นทุน)/.test(txt);
+    var asksScheduleInfo = /(?:ตั้งเวลา|ตารางส่ง|รอบส่งรายงาน|ส่งรายงานกี่โมง|ออโต้ส่งกี่โมง)/.test(txt);
+    var asksStaffInfo = (
+      /(?:อยู่คลินิกไหน|อยู่หน่วยไหน|ตำแหน่งอะไร|รหัสพนักงาน|รหัสประจำตัว|กี่คนในหน่วย|มีพยาบาลกี่คน|มีบุคลากรกี่คน|รายชื่อเจ้าหน้าที่|รายชื่อบุคลากร|staff|อัตรากำลังประจำ)/.test(txt) ||
+      (isPersonQuery && !asksLeave && !asksOt && !asksWorkload && !asksProductivity && !asksRecallNotes)
+    );
+
+    var replySections = [];
+
+    // --- Section: Recall Group Notes (Strictly scoped by Private vs Group) ---
+    if (asksRecallNotes) {
+      if (visibleNotes.length === 0) {
+        replySections.push('📒 ' + speakerCall + ' ครับ ยังไม่มีข้อตกลงหรือบันทึกที่จดจำไว้ในขอบเขตห้องแชตนี้ครับ\n💡 พิมพ์ขึ้นต้นว่า "จำไว้ว่า ..." หรือ "บันทึกข้อตกลง: ..." เพื่อให้บูบี้จำให้ได้เลยครับ');
+      } else {
+        var noteTopic = rawText
+          .replace(/(?:@?บูบี้|สรุปข้อตกลงทั้งหมด|สรุปข้อตกลง|ข้อตกลงทั้งหมด|ข้อตกลงกลุ่ม|มีข้อตกลง|ข้อตกลง|มติที่ประชุม|มติกลุ่ม|มติ|บันทึกที่จำ|บันทึกทั้งหมด|ความจำ|จำอะไรไว้บ้าง|จำอะไรไว้|ที่จำไว้|เรื่อง|เกี่ยวกับ|มีอะไรบ้าง|อะไรบ้าง|ทั้งหมด|โน้ตที่|มี|ไหม|มั้ย|มั๊ย|บ้าง|\?)/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        var filteredNotes = visibleNotes;
+        if (noteTopic.length >= 2) {
+          filteredNotes = visibleNotes.filter(function(n) {
+            return n.content.toLowerCase().indexOf(noteTopic) !== -1 || n.category.toLowerCase().indexOf(noteTopic) !== -1;
+          });
+        }
+        if (filteredNotes.length > 0) {
+          var noteLines = filteredNotes.slice(-15).reverse().map(function(n, idx) {
+            return (idx + 1) + '. [#' + n.id + ' • ' + n.category + '] ' + n.content + ' (โดย ' + n.savedBy + ' • ' + n.timestamp.slice(0, 10) + ')';
+          });
+          replySections.push('📒 ข้อตกลง/บันทึกที่บูบี้จำไว้' + (noteTopic.length >= 2 ? ' (ค้นหา: "' + noteTopic + '")' : '') + ':\nรวม ' + filteredNotes.length + ' รายการ\n' + noteLines.join('\n'));
+        } else {
+          replySections.push('🔍 ไม่พบข้อตกลงเกี่ยวกับ "' + noteTopic + '" ครับ ' + speakerCall + ' (ปัจจุบันมีบันทึกทั้งหมด ' + visibleNotes.length + ' รายการ — พิมพ์ "สรุปข้อตกลง" เพื่อดูทั้งหมด)');
+        }
+      }
+    }
+
+    // --- Section: Cost Center / Settings / Schedule Info ---
+    if (asksCostCenter) {
+      var defaultCC = String(settingsMap['Default_Cost_Center'] || '2012000000').trim();
+      var clinicCCMap = {};
+      try { clinicCCMap = JSON.parse(settingsMap['Clinic_Cost_Centers'] || '{}') || {}; } catch (e) {}
+      if (matchedClinic) {
+        var foundCC = clinicCCMap[matchedClinic] || defaultCC;
+        replySections.push('🏷️ Cost Center ของ "' + matchedClinic + '":\n' + foundCC + (clinicCCMap[matchedClinic] ? ' (กำหนดเฉพาะหน่วย)' : ' (ใช้ค่าหลัก OPD)'));
+      } else {
+        var ccKeys = Object.keys(clinicCCMap).filter(function(k) { return clinicCCMap[k]; });
+        var ccLines = ccKeys.map(function(k) { return '• ' + k + ': ' + clinicCCMap[k]; });
+        replySections.push('🏷️ ข้อมูล Cost Center OPD:\n• ค่าหลักหน่วยงาน: ' + defaultCC + (ccLines.length > 0 ? '\n' + ccLines.join('\n') : '\n(ทุกห้องตรวจใช้ค่าหลักนี้)'));
+      }
+    }
+
+    if (asksScheduleInfo) {
+      var autoEn = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+      var scheds = getLineSchedulesFromSettingsMap_(settingsMap);
+      var schedLines = scheds.map(function(s, idx) {
+        return (idx + 1) + '. ' + (s.enabled === false ? '⏸️ ' : '✅ ') + (s.label || s.shift) + ' — เวลา ' + s.time + ' น. [' + (s.shift || '') + ']';
+      });
+      replySections.push('⏰ ตารางส่งรายงานอัตโนมัติเข้า LINE: ' + (autoEn ? 'เปิดใช้งานอยู่' : 'ปิดอยู่') + '\n' + schedLines.join('\n'));
+    }
+
+    // --- Section: Staff Directory / Personal Info ---
+    if (asksStaffInfo) {
+      if (matchedStaff.length > 0) {
+        var pLines = matchedStaff.slice(0, 5).map(function(st) {
+          return '👤 ' + st.name +
+            (st.pos ? '\n• ตำแหน่ง: ' + st.pos : '') +
+            (st.clinic ? '\n• หน่วยหลัก: ' + st.clinic : '') +
+            (st.empCode ? '\n• รหัสบุคลากร: ' + st.empCode : '') +
+            (st.status ? '\n• สถานะ: ' + st.status : '');
+        });
+        replySections.push(pLines.join('\n\n'));
+      } else if (matchedClinic) {
+        var cStaff = staffExtract.directoryList.filter(function(st) {
+          return st.status !== 'Inactive' && st.clinic && st.clinic.toLowerCase().indexOf(matchedClinic.toLowerCase()) !== -1;
+        });
+        if (cStaff.length > 0) {
+          var csLines = cStaff.slice(0, 30).map(function(st, idx) {
+            return (idx + 1) + '. ' + st.name + (st.pos ? ' (' + st.pos + ')' : '');
+          });
+          replySections.push('👩‍⚕️ บุคลากรประจำ "' + matchedClinic + '" (' + cStaff.length + ' คน):\n' + csLines.join('\n'));
+        } else {
+          replySections.push('🔍 ไม่พบรายชื่อบุคลากรประจำ "' + matchedClinic + '" ใน Staff_Master ครับ');
+        }
+      } else {
+        var activeStaff = staffExtract.directoryList.filter(function(st) { return st.status !== 'Inactive'; });
+        var posCounts = {};
+        activeStaff.forEach(function(st) {
+          var pKey = st.pos || 'ไม่ระบุ';
+          posCounts[pKey] = (posCounts[pKey] || 0) + 1;
+        });
+        var posSummary = Object.keys(posCounts).map(function(k) { return '• ' + k + ': ' + posCounts[k] + ' คน'; });
+        replySections.push('👩‍⚕️ สรุปบุคลากร OPD ที่ปฏิบัติงาน (Active):\nรวมทั้งหมด ' + activeStaff.length + ' คน\n' + posSummary.join('\n'));
+      }
+    }
+
+    // --- Section: Leave Records (Supports Person-Centric Open Search + Date/Clinic/Type Filters) ---
+    if (asksLeave) {
+      var leaveRowsAll = leaveData.rows;
+      var matchedLeaves = [];
+      var leaveTypeFilter = '';
+      if (txtNoTimeWord.indexOf('ลาป่วย') !== -1) leaveTypeFilter = 'ลาป่วย';
+      else if (txtNoTimeWord.indexOf('ลากิจ') !== -1) leaveTypeFilter = 'ลากิจ';
+      else if (txtNoTimeWord.indexOf('ลาพัก') !== -1) leaveTypeFilter = 'ลาพัก';
+      else if (txtNoTimeWord.indexOf('อบรม') !== -1 || txtNoTimeWord.indexOf('ประชุม') !== -1) leaveTypeFilter = 'อบรม';
+
+      var searchAllDatesForPerson = isPersonQuery && (!hasExplicitDate || asksOpenWhen);
+      var personTokens = matchedStaff.length > 0
+        ? matchedStaff.map(function(st) { return stripThaiHonorificsGas_(st.name); })
+        : (candidateName ? [stripThaiHonorificsGas_(candidateName)] : []);
+
+      for (var lri = 0; lri < leaveRowsAll.length; lri++) {
+        var lr = leaveRowsAll[lri];
+        var lsDate = normalizeSheetDateGas_(lr[lOff]);
+        var leDate = normalizeSheetDateGas_(lr[lOff + 1]) || lsDate;
+        var lsName = String(lr[lOff + 2] || '').trim();
+        var lClinic = String(lr[lOff + 4] || '').trim();
+        var lType = String(lr[lOff + 5] || 'ลา').trim();
+        if (!lsDate || !lsName) continue;
+
+        if (isPersonQuery) {
+          var normLs = stripThaiHonorificsGas_(lsName);
+          var matchedName = personTokens.some(function(pt) {
+            return pt && (normLs.indexOf(pt) !== -1 || pt.indexOf(normLs) !== -1);
+          });
+          if (!matchedName) continue;
+          if (hasExplicitDate && (lsDate > endYmd || leDate < startYmd)) continue;
+        } else {
+          if (lsDate > endYmd || leDate < startYmd) continue;
+          if (matchedClinic && lClinic.toLowerCase().indexOf(matchedClinic.toLowerCase()) === -1) continue;
+        }
+        if (leaveTypeFilter && lType.indexOf(leaveTypeFilter) === -1) continue;
+
+        matchedLeaves.push({
+          sDate: lsDate,
+          eDate: leDate,
+          name: lsName,
+          pos: String(lr[lOff + 3] || '').trim(),
+          clinic: lClinic,
+          leaveType: lType,
+          days: Number(lr[lOff + 6] || 1),
+          note: String(lr[lOff + 7] || '').trim()
+        });
+      }
+
+      var targetPersonLabel = matchedStaff.length > 0 ? matchedStaff[0].name : candidateName;
+      if (isPersonQuery) {
         if (matchedLeaves.length > 0) {
-          var leaveLines = matchedLeaves.map(function(item, idx) {
+          matchedLeaves.sort(function(a, b) {
+            var aUp = a.eDate >= todayYmd ? 0 : 1;
+            var bUp = b.eDate >= todayYmd ? 0 : 1;
+            if (aUp !== bUp) return aUp - bUp;
+            return aUp === 0 ? (a.sDate < b.sDate ? -1 : 1) : (a.sDate > b.sDate ? -1 : 1);
+          });
+          var totalDays = 0;
+          var pLeaveLines = matchedLeaves.slice(0, 20).map(function(item, idx) {
+            totalDays += (isFinite(item.days) && item.days > 0 ? item.days : 1);
+            var tag = item.eDate >= todayYmd ? '🔜 ' : '📌 ';
+            var dStr = formatShortThaiDate(item.sDate) + (item.eDate !== item.sDate ? ' ถึง ' + formatShortThaiDate(item.eDate) : '');
             var periodMatch = item.note.match(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]/);
             var periodTxt = periodMatch ? ' [' + periodMatch[1] + ']' : '';
-            var meta = [item.pos, item.clinic].filter(Boolean).join(' • ');
-            return (idx + 1) + '. ' + item.name + (meta ? ' (' + meta + ')' : '') + ' — ' + item.leaveType + periodTxt;
+            return (idx + 1) + '. ' + tag + dStr + ' — ' + item.leaveType + periodTxt + (item.days ? ' (' + item.days + ' วัน)' : '');
           });
-          replyText = '🏥 รายชื่อผู้ลาประจำ' + leaveDateLabel + ' (' + leaveThaiDate + '):\nรวม ' + matchedLeaves.length + ' คน\n' + leaveLines.join('\n');
+          var extraL = matchedLeaves.length > 20 ? '\n...และอีก ' + (matchedLeaves.length - 20) + ' รายการ' : '';
+          replySections.push(
+            '🗓️ ประวัติวันลาของ "' + targetPersonLabel + '"' + (hasExplicitDate ? ' ประจำ' + dateHeader : ' (ทั้งหมดในระบบ)') + ':\n' +
+            'รวม ' + matchedLeaves.length + ' รายการ (' + totalDays + ' วันทำการ)\n' +
+            pLeaveLines.join('\n') + extraL
+          );
         } else {
-          replyText = '✅ ไม่พบรายชื่อผู้ลาประจำ' + leaveDateLabel + ' (' + leaveThaiDate + ') ครับ';
+          replySections.push(
+            '✅ ไม่พบข้อมูลวันลาของ "' + targetPersonLabel + '"' +
+            (hasExplicitDate ? ' ประจำ' + dateHeader : ' ในระบบครับ')
+          );
         }
-      } else if (
-        txt.indexOf('ot') !== -1 ||
-        txt.indexOf('เวร') !== -1 ||
-        txt.indexOf('นอกเวลา') !== -1 ||
-        txt.indexOf('โอที') !== -1
-      ) {
-        var isTomorrowOt = txt.indexOf('พรุ่งนี้') !== -1;
-        var targetOtYmd = isTomorrowOt ? addDaysIsoGas_(todayYmd, 1) : todayYmd;
-        var otData = getSheetRowsNormalized_(SHEET_NAMES.OT, 9);
-        var oOff = (otData.headers[0] === 'OT_ID') ? 1 : 0;
-        var matchedOt = [];
+      } else if (matchedLeaves.length > 0) {
+        var leaveLines = matchedLeaves.slice(0, 35).map(function(item, idx) {
+          var periodMatch = item.note.match(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]/);
+          var periodTxt = periodMatch ? ' [' + periodMatch[1] + ']' : '';
+          var dateSpan = isRange
+            ? ' [' + formatCompactThaiDate(item.sDate) + (item.eDate !== item.sDate ? ' - ' + formatCompactThaiDate(item.eDate) : '') + ']'
+            : '';
+          var meta = [item.pos, item.clinic].filter(Boolean).join(' • ');
+          return (idx + 1) + '. ' + item.name + (meta ? ' (' + meta + ')' : '') + ' — ' + item.leaveType + periodTxt + dateSpan;
+        });
+        replySections.push(
+          '🏥 รายชื่อผู้ลา' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + dateHeader + ':\nรวม ' + matchedLeaves.length + ' รายการ\n' + leaveLines.join('\n')
+        );
+      } else {
+        replySections.push('✅ ไม่พบรายชื่อผู้ลา' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + dateHeader + ' ครับ');
+      }
+    }
 
-        for (var oi = 0; oi < otData.rows.length; oi++) {
-          var orow = otData.rows[oi];
-          var oDate = String(orow[oOff] || '').trim();
-          var oName = String(orow[oOff + 2] || '').trim();
-          if (!oDate || !oName) continue;
-          if (oDate === targetOtYmd) {
-            var oShift = String(orow[oOff + 1] || '').trim();
-            var oHrsNum = Number(orow[oOff + 6]);
-            if (!isFinite(oHrsNum) || oHrsNum <= 0) {
-              oHrsNum = oShift.indexOf('ในเวลาราชการ') !== -1 ? 7 : 4;
-            }
-            matchedOt.push({
-              name: oName,
-              pos: String(orow[oOff + 3] || '').trim(),
-              workClinic: String(orow[oOff + 5] || '').trim(),
-              shift: oShift,
-              hours: oHrsNum
-            });
-          }
+    // --- Section: OT / นอกเวลา (Supports Person-Centric, Clinic, Shift, Hours & Pay Estimation) ---
+    if (asksOt) {
+      var otRatesMap = {};
+      try { otRatesMap = JSON.parse(settingsMap['OT_Hourly_Rates'] || '{}') || {}; } catch (e) {}
+      var otRowsAll = otData.rows;
+      var matchedOt = [];
+      var uniqueOtPeople = {};
+      var totalOtHrs = 0;
+      var totalOtPay = 0;
+      var personTokensOt = matchedStaff.length > 0
+        ? matchedStaff.map(function(st) { return stripThaiHonorificsGas_(st.name); })
+        : (candidateName ? [stripThaiHonorificsGas_(candidateName)] : []);
+
+      for (var oi = 0; oi < otRowsAll.length; oi++) {
+        var orow = otRowsAll[oi];
+        var oDate = normalizeSheetDateGas_(orow[oOff]);
+        var oName = String(orow[oOff + 2] || '').trim();
+        var oPos = String(orow[oOff + 3] || '').trim();
+        var oShift = String(orow[oOff + 1] || '').trim();
+        var oWorkClinic = String(orow[oOff + 5] || '').trim();
+        if (!oDate || !oName) continue;
+
+        if (isPersonQuery) {
+          var normOn = stripThaiHonorificsGas_(oName);
+          var okName = personTokensOt.some(function(pt) {
+            return pt && (normOn.indexOf(pt) !== -1 || pt.indexOf(normOn) !== -1);
+          });
+          if (!okName) continue;
+          if (hasExplicitDate && (oDate < startYmd || oDate > endYmd)) continue;
+        } else {
+          if (oDate < startYmd || oDate > endYmd) continue;
+          if (matchedClinic && oWorkClinic.toLowerCase().indexOf(matchedClinic.toLowerCase()) === -1) continue;
         }
+        if (shiftFilter === 'OUT_TIME_ALL' && oShift.indexOf('ในเวลา 08:00') === 0) continue;
+        else if (shiftFilter && shiftFilter !== 'OUT_TIME_ALL' && oShift !== shiftFilter) continue;
 
-        var otDateLabel = isTomorrowOt ? 'พรุ่งนี้' : 'วันนี้';
-        var otThaiDate = formatShortThaiDate(targetOtYmd);
+        var oHrsNum = Number(orow[oOff + 6]);
+        if (!isFinite(oHrsNum) || oHrsNum <= 0) {
+          oHrsNum = oShift.indexOf('ในเวลาราชการ') !== -1 ? 7 : 4;
+        }
+        var rate = getOtHourlyRateGas_(oPos, otRatesMap);
+        var pay = oHrsNum * rate;
+        totalOtHrs += oHrsNum;
+        totalOtPay += pay;
+        uniqueOtPeople[oName] = true;
+        matchedOt.push({
+          date: oDate,
+          name: oName,
+          pos: oPos,
+          workClinic: oWorkClinic,
+          shift: oShift,
+          hours: oHrsNum,
+          pay: pay
+        });
+      }
+
+      var otTargetPerson = matchedStaff.length > 0 ? matchedStaff[0].name : candidateName;
+      if (isPersonQuery) {
         if (matchedOt.length > 0) {
-          var otLines = matchedOt.map(function(item, idx) {
-            return (idx + 1) + '. ' + item.name + (item.pos ? ' (' + item.pos + ')' : '') + ' • ' + (item.workClinic || 'นอกเวลา') + (item.shift ? ' [' + item.shift + ']' : '') + ' (' + item.hours + ' ชม.)';
+          matchedOt.sort(function(a, b) { return a.date > b.date ? -1 : a.date < b.date ? 1 : 0; });
+          var pOtLines = matchedOt.slice(0, 25).map(function(item, idx) {
+            return (idx + 1) + '. ' + formatShortThaiDate(item.date) + ' • ' + (item.workClinic || 'นอกเวลา') + ' (' + item.hours + ' ชม. ≈ ' + item.pay.toLocaleString() + ' บ.)';
           });
-          replyText = '🏥 รายชื่อผู้ปฏิบัติงาน OT / นอกเวลา ประจำ' + otDateLabel + ' (' + otThaiDate + '):\nรวม ' + matchedOt.length + ' รายการ\n' + otLines.join('\n');
+          replySections.push(
+            '⏰ ประวัติขึ้นเวร OT ของ "' + otTargetPerson + '"' + (hasExplicitDate ? ' ประจำ' + dateHeader : ' (ทั้งหมดในระบบ)') + ':\n' +
+            'รวม ' + matchedOt.length + ' เวร • ' + totalOtHrs + ' ชม. (ประมาณ ' + totalOtPay.toLocaleString() + ' บาท)\n' +
+            pOtLines.join('\n')
+          );
         } else {
-          replyText = '✅ ไม่พบข้อมูลเวร OT ประจำ' + otDateLabel + ' (' + otThaiDate + ') ในระบบครับ';
+          replySections.push(
+            '✅ ไม่พบข้อมูลขึ้นเวร OT ของ "' + otTargetPerson + '"' +
+            (hasExplicitDate ? ' ประจำ' + dateHeader : ' ในระบบครับ')
+          );
         }
-      } else if (
-        txt.indexOf('ช่วย') !== -1 ||
-        txt.indexOf('คำสั่ง') !== -1 ||
-        txt.indexOf('เมนู') !== -1 ||
-        txt.indexOf('ทำอะไรได้') !== -1 ||
-        txt.indexOf('bot') !== -1 ||
-        txt.indexOf('help') !== -1 ||
-        txt.indexOf('บูบี้') !== -1
-      ) {
-        replyText = '🤖 สวัสดีครับ ผม "บูบี้ ผู้ช่วย AI" ระบบ OPD รพ.ชลประทาน ถามข้อมูลได้ทันที:\n• "ใครลาวันนี้" หรือ "พรุ่งนี้ใครลาบ้าง"\n• "ใครอยู่ OT วันนี้" หรือ "พรุ่งนี้ใครอยู่ OT"\n• "/id" (ดูรหัสกลุ่ม LINE)';
+      } else if (matchedOt.length > 0) {
+        matchedOt.sort(function(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+        var uniqueCount = Object.keys(uniqueOtPeople).length;
+        var otLines = matchedOt.slice(0, 40).map(function(item, idx) {
+          var dTag = isRange ? '[' + formatCompactThaiDate(item.date) + '] ' : '';
+          return (idx + 1) + '. ' + dTag + item.name + (item.pos ? ' (' + item.pos + ')' : '') + ' • ' + (item.workClinic || 'นอกเวลา') + (item.shift ? ' [' + item.shift + ']' : '') + ' (' + item.hours + ' ชม.)';
+        });
+        var extraNote = matchedOt.length > 40 ? '\n...และอีก ' + (matchedOt.length - 40) + ' รายการ' : '';
+        var countSummary = uniqueCount === matchedOt.length
+          ? 'รวม ' + uniqueCount + ' คน • ' + totalOtHrs + ' ชม. (ประมาณ ' + totalOtPay.toLocaleString() + ' บ.)'
+          : 'รวม ' + uniqueCount + ' คน (' + matchedOt.length + ' รายการ) • ' + totalOtHrs + ' ชม. (ประมาณ ' + totalOtPay.toLocaleString() + ' บ.)';
+        replySections.push('⏰ รายชื่อผู้ปฏิบัติงาน OT / นอกเวลา' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + dateHeader + ':\n' + countSummary + '\n' + otLines.join('\n') + extraNote);
+      } else {
+        replySections.push('✅ ไม่พบข้อมูลเวร OT' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + dateHeader + ' ในระบบครับ');
+      }
+    }
+
+    // --- Section: Workload & Productivity (Daily_Workload + NHPPD) ---
+    if (asksWorkload || asksProductivity) {
+      var wlData = getSheetRowsNormalized_(SHEET_NAMES.WORKLOAD, 19);
+      var wOff = (wlData.headers[0] === 'Record_ID') ? 1 : 0;
+      // If asking overall Productivity without explicit date, default to current month instead of just today
+      var wlStart = startYmd;
+      var wlEnd = endYmd;
+      var wlHeader = dateHeader;
+      if (asksProductivity && !hasExplicitDate) {
+        var bParts = todayYmd.split('-').map(Number);
+        var mLastDay = new Date(Date.UTC(bParts[0], bParts[1], 0)).getUTCDate();
+        wlStart = bParts[0] + '-' + String(bParts[1]).padStart(2, '0') + '-01';
+        wlEnd = bParts[0] + '-' + String(bParts[1]).padStart(2, '0') + '-' + String(mLastDay).padStart(2, '0');
+        wlHeader = 'เดือนนี้ (' + thaiShortMonths[bParts[1] - 1] + ' ' + (bParts[0] + 543) + ')';
       }
 
-      if (replyText) {
-        replyLineMessageGas_(token, ev.replyToken, replyText);
+      var generalNhppd = Number(settingsMap['NHPPD']) > 0 ? Number(settingsMap['NHPPD']) : 0.4;
+      var screeningNhppd = Number(settingsMap['Screening_NHPPD']) > 0 ? Number(settingsMap['Screening_NHPPD']) : 0.1;
+      var stdHr = Number(settingsMap['Std_Hr']) > 0 ? Number(settingsMap['Std_Hr']) : 7;
+      var annualHr = Number(settingsMap['Annual_Hr']) > 0 ? Number(settingsMap['Annual_Hr']) : 2080;
+      var workDays = Number(settingsMap['Work_Days']) > 0 ? Number(settingsMap['Work_Days']) : 245;
+
+      var allWlDates = {};
+      var matchedWl = [];
+      for (var wi = 0; wi < wlData.rows.length; wi++) {
+        var wr = wlData.rows[wi];
+        var wd = normalizeSheetDateGas_(wr[wOff]);
+        var wShift = String(wr[wOff + 1] || '').trim();
+        var wClinic = String(wr[wOff + 2] || '').trim();
+        if (!wd || !wClinic) continue;
+        allWlDates[wd] = true;
+        if (wd < wlStart || wd > wlEnd) continue;
+        if (shiftFilter === 'OUT_TIME_ALL' && wShift === 'ในเวลา 08:00-16:00') continue;
+        else if (shiftFilter && shiftFilter !== 'OUT_TIME_ALL' && wShift !== shiftFilter) continue;
+
+        var recType = String(wr[wOff + 17] || '').trim().toUpperCase();
+        var isPrem = (wClinic.indexOf('ปัญญาภิรมย์') !== -1 || /-Premium$/i.test(wClinic) || recType === 'PREMIUM_SUB' || recType === 'PREMIUM_POOL');
+        var groupClinic = isPrem ? 'ศูนย์ปัญญาภิรมย์' : wClinic;
+        if (matchedClinic && groupClinic.toLowerCase().indexOf(matchedClinic.toLowerCase()) === -1 && wClinic.toLowerCase().indexOf(matchedClinic.toLowerCase()) === -1) {
+          continue;
+        }
+        var pt = Math.max(Number(wr[wOff + 3] || 0), Number(wr[wOff + 4] || 0) + Number(wr[wOff + 5] || 0));
+        matchedWl.push({
+          date: wd,
+          shift: wShift,
+          clinic: wClinic,
+          groupClinic: groupClinic,
+          recType: recType,
+          totalPt: pt,
+          adultPt: Number(wr[wOff + 4] || 0),
+          childPt: Number(wr[wOff + 5] || 0),
+          admit: Number(wr[wOff + 6] || 0),
+          hn: Number(wr[wOff + 7] || 0),
+          rn: Number(wr[wOff + 8] || 0),
+          pn: Number(wr[wOff + 9] || 0),
+          na: Number(wr[wOff + 10] || 0),
+          note: String(wr[wOff + 13] || '').trim()
+        });
       }
+
+      if (matchedWl.length === 0) {
+        var latestDates = Object.keys(allWlDates).sort();
+        var latestHint = latestDates.length > 0 ? '\n💡 ล่าสุดที่มีข้อมูลในระบบคือ ' + formatShortThaiDate(latestDates[latestDates.length - 1]) : '';
+        replySections.push('✅ ไม่พบข้อมูลภาระงานผู้ป่วย' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + wlHeader + ' ครับ' + latestHint);
+      } else {
+        var sumPt = 0, sumAdult = 0, sumChild = 0, sumAdmit = 0, sumRN = 0, sumPN = 0, sumNA = 0;
+        var activeDaysSet = {};
+        var byClinicMap = {};
+        matchedWl.forEach(function(r) {
+          sumPt += r.totalPt;
+          sumAdult += r.adultPt;
+          sumChild += r.childPt;
+          sumAdmit += r.admit;
+          sumRN += r.rn;
+          sumPN += r.pn;
+          sumNA += r.na;
+          if (r.totalPt > 0 || (r.rn + r.pn + r.na) > 0) activeDaysSet[r.date] = true;
+          if (!byClinicMap[r.groupClinic]) {
+            byClinicMap[r.groupClinic] = { name: r.groupClinic, pt: 0, admit: 0, rn: 0, pn: 0, na: 0, days: {} };
+          }
+          var bc = byClinicMap[r.groupClinic];
+          bc.pt += r.totalPt; bc.admit += r.admit; bc.rn += r.rn; bc.pn += r.pn; bc.na += r.na;
+          bc.days[r.date] = true;
+        });
+
+        var wDaysCount = Object.keys(activeDaysSet).length || 1;
+        var totalNursing = sumRN + sumPN + sumNA;
+        var avgPtPerDay = sumPt / wDaysCount;
+        var clinicArr = Object.keys(byClinicMap).map(function(k) {
+          var c = byClinicMap[k];
+          var cd = Object.keys(c.days).length || 1;
+          var cNhppd = k === 'หน่วยคัดกรอง' ? screeningNhppd : generalNhppd;
+          var cAvgPt = c.pt / cd;
+          var cFtc = (cAvgPt * cNhppd) / stdHr;
+          var cOut = (cFtc * annualHr) / (workDays * 8);
+          var cInput = (c.rn + c.pn + c.na) / cd;
+          var cProd = cInput > 0 ? (cOut / cInput) * 100 : 0;
+          return { name: k, pt: c.pt, admit: c.admit, nursing: c.rn + c.pn + c.na, prod: cProd, nhppd: cNhppd };
+        });
+        var ftcSum = 0;
+        clinicArr.forEach(function(c) {
+          ftcSum += ((c.pt / wDaysCount) * c.nhppd) / stdHr;
+        });
+        var outputVal = (ftcSum * annualHr) / (workDays * 8);
+        var inputVal = totalNursing / wDaysCount;
+        var prodPct = inputVal > 0 ? (outputVal / inputVal) * 100 : 0;
+        var skillMixPct = totalNursing > 0 ? (sumRN / totalNursing) * 100 : 0;
+        var prodStatusTxt = prodPct === 0 ? 'ไม่มีกำลังคน' : (prodPct > 115 ? '🔴 สูงเกินเกณฑ์ (>115% ภาระงานหนัก)' : (prodPct >= 85 ? '🟢 เหมาะสมตามเกณฑ์ (85-115%)' : '🟡 ต่ำกว่าเกณฑ์ (<85%)'));
+
+        if (asksWorkload) {
+          var topClinics = clinicArr.slice().sort(function(a, b) { return b.pt - a.pt; }).slice(0, 6).map(function(c, idx) {
+            return (idx + 1) + '. ' + c.name + ': ' + c.pt.toLocaleString() + ' ราย' + (c.admit > 0 ? ' (Admit ' + c.admit + ')' : '');
+          });
+          replySections.push(
+            '📊 สรุปภาระงานผู้ป่วยนอก' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + wlHeader + ':\n' +
+            '👥 ผู้ป่วยรวม: ' + sumPt.toLocaleString() + ' ราย (ผู้ใหญ่ ' + sumAdult.toLocaleString() + ' • เด็ก ' + sumChild.toLocaleString() + ')\n' +
+            '🛌 Admit: ' + sumAdmit.toLocaleString() + ' ราย | เฉลี่ย ' + avgPtPerDay.toFixed(1) + ' ราย/วัน (' + wDaysCount + ' วัน)\n' +
+            '👩‍⚕️ กำลังคนพยาบาล (RN+PN+NA): ' + totalNursing.toFixed(1) + ' แรง (RN ' + sumRN.toFixed(1) + ' / PN ' + sumPN.toFixed(1) + ' / NA ' + sumNA.toFixed(1) + ')' +
+            (!matchedClinic && topClinics.length > 0 ? '\n🏆 อันดับคลินิกยอดสูงสุด:\n' + topClinics.join('\n') : '')
+          );
+        }
+
+        if (asksProductivity) {
+          var highLoadClinics = clinicArr.filter(function(c) { return c.prod > 0; }).sort(function(a, b) { return b.prod - a.prod; }).slice(0, 3).map(function(c) {
+            return '• ' + c.name + ': ' + c.prod.toFixed(1) + '% (' + c.pt.toLocaleString() + ' ราย)';
+          });
+          replySections.push(
+            '📈 วิเคราะห์ Productivity & กำลังคน' + (matchedClinic ? ' (' + matchedClinic + ')' : '') + ' ประจำ' + wlHeader + ':\n' +
+            '• Productivity: ' + prodPct.toFixed(1) + '% — ' + prodStatusTxt + '\n' +
+            '• Skill Mix (สัดส่วน RN): ' + skillMixPct.toFixed(1) + '%\n' +
+            '• Output ต้องการ: ' + outputVal.toFixed(2) + ' แรง/วัน | Input จัดจริง: ' + inputVal.toFixed(2) + ' แรง/วัน (FTC ' + ftcSum.toFixed(2) + ')\n' +
+            '• เกณฑ์ NHPPD: ทั่วไป ' + generalNhppd + ' / คัดกรอง ' + screeningNhppd + ' (Std ' + stdHr + ' ชม.)' +
+            (!matchedClinic && highLoadClinics.length > 0 ? '\n🔥 คลินิกภาระงานสูงสุด:\n' + highLoadClinics.join('\n') : '')
+          );
+        }
+      }
+    }
+
+    if (replySections.length > 0) {
+      replyText = formatBoobyPersonaReplyGas_(replySections.join('\n\n'), speakerCall, replySections.length >= 2);
+    } else if (
+      txt.indexOf('ช่วย') !== -1 ||
+      txt.indexOf('คำสั่ง') !== -1 ||
+      txt.indexOf('เมนู') !== -1 ||
+      txt.indexOf('ทำอะไรได้') !== -1 ||
+      txt.indexOf('bot') !== -1 ||
+      txt.indexOf('help') !== -1 ||
+      txt.indexOf('สวัสดี') !== -1 ||
+      txt.indexOf('บูบี้') !== -1
+    ) {
+      var rawHelp = '🎩 สวัสดีครับ ' + speakerCall + ' ผม "บูบี้" (Booby) เลขานุการส่วนตัวและผู้ช่วย AI ระบบ OPD รพ.ชลประทาน พร้อมรับคำสั่งครับ:\n\n' +
+        '1️⃣ ข้อมูล OPD: ถามวันลา / เวร OT / ยอดผู้ป่วย / Productivity / Cost Center / บุคลากรได้ทันที (เช่น "วันศุกร์ที่ผ่านมามี OT กี่คน")\n' +
+        '2️⃣ นัดหมาย & เตือนความจำ: "ลงนัด <วันที่> <เวลา> เรื่อง <หัวข้อ>", "ดูตารางนัด", "ยกเลิกนัด #ID"\n' +
+        '3️⃣ สรุปแชต & แยกงาน (To-Do): "สรุปแชต: <วางข้อความ>", "สั่งงาน: <ชื่องาน>", "งานค้าง", "ปิดงาน #ID"\n' +
+        '4️⃣ ร่างข้อความ (2 สไตล์): "ร่างประกาศ: <เรื่องที่จะแจ้ง>"\n' +
+        '5️⃣ สรุปผู้บริหาร: "สรุปผู้บริหาร" หรือ "ภาพรวมวันนี้"\n' +
+        '6️⃣ จดจำข้อตกลงกลุ่ม: "จำไว้ว่า <ข้อความ>", "สรุปข้อตกลง", "ลบข้อตกลง <คำค้น>"\n' +
+        '• "/id" (ดูรหัสห้อง/User ID)';
+      replyText = formatBoobyPersonaReplyGas_(rawHelp, speakerCall, true);
+    } else {
+      // Passive keyword fallback search in scoped Notes if user asks a random topic stored in memory
+      if (visibleNotes.length > 0 && /[?？]|ไหม|มั้ย|อะไร|ยังไง|ข้อตกลง|เรื่อง/.test(txt)) {
+        var qTokens = txt.replace(/[^\u0E00-\u0E7Fa-z0-9\s]/g, ' ').split(/\s+/).filter(function(tk) {
+          return tk.length >= 2 && !/^(?:อะไร|ไหม|มั้ย|เรื่อง|บูบี้|ช่วย|หน่อย|ข้อตกลง|ถาม)$/.test(tk);
+        });
+        var memMatched = visibleNotes.filter(function(n) {
+          return qTokens.some(function(tk) { return n.content.toLowerCase().indexOf(tk) !== -1; });
+        });
+        if (memMatched.length > 0) {
+          var mLines = memMatched.slice(-5).map(function(n, idx) {
+            return (idx + 1) + '. [#' + n.id + '] ' + n.content + ' (โดย ' + n.savedBy + ')';
+          });
+          replyText = formatBoobyPersonaReplyGas_('📒 ' + speakerCall + ' ครับ พบข้อตกลง/บันทึกที่เกี่ยวข้องในความจำ:\n' + mLines.join('\n'), speakerCall, false);
+        }
+      }
+      if (!replyText && (!isGroupChat || isMentioned || isReplyToQuote)) {
+        replyText = formatBoobyPersonaReplyGas_(
+          '🎩 ' + speakerCall + ' ครับ ขออภัยที่บูบี้อาจยังไม่แน่ใจในรายละเอียดของคำขอนี้ครับ ลองระบุคำสั่งสั้นๆ เช่น "สรุปผู้บริหาร", "ใครลาวันนี้", "ลงนัด ...", หรือพิมพ์ "เมนู" เพื่อดูความสามารถทั้งหมดได้เลยครับ',
+          speakerCall,
+          false
+        );
+      }
+    }
+
+    if (replyText) {
+      if (replyText.length > 4950) replyText = replyText.slice(0, 4900) + '\n...(ข้อความถูกย่อตามขีดจำกัด LINE)';
+      replyLineMessageGas_(token, ev.replyToken, replyText);
     }
   }
   return { success: true };
@@ -2819,7 +4216,7 @@ function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
     var off = hasId ? 1 : 0;
     var dates = [];
     workloadData.rows.forEach(function(r) {
-      var d = String(r[off] || '').trim();
+      var d = normalizeSheetDateGas_(r[off]);
       if (/^\d{4}-\d{2}-\d{2}$/.test(d) && dates.indexOf(d) === -1) dates.push(d);
     });
     dates.sort();
@@ -2855,7 +4252,7 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
   ).trim() || 'ในเวลา 08:00-16:00';
 
   var bkk = getBangkokDatePartsGas_(new Date());
-  var targetDate = String((extraPayload && extraPayload.date) || '').trim() ||
+  var targetDate = normalizeSheetDateGas_(String((extraPayload && extraPayload.date) || '').trim()) ||
     resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
 
   var scheduleKey = specificSchedule && specificSchedule.id ? String(specificSchedule.id) : 'DEFAULT';
@@ -2873,22 +4270,43 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
     legacyImgPref
   );
 
-  var imageUrl = String((extraPayload && extraPayload.imageUrl) || '').trim();
-  var previewImageUrl = String((extraPayload && extraPayload.previewImageUrl) || imageUrl).trim();
-  if (resolvedSendFormat !== 'TEXT_ONLY' && !imageUrl && extraPayload && extraPayload.imageBase64) {
-    var upRes = uploadLineReportJpegFromApi_({
-      base64Jpeg: extraPayload.imageBase64,
-      filename: 'OPD_Census_' + targetDate + '.jpeg'
-    });
-    if (upRes.success && upRes.imageUrl) {
-      imageUrl = upRes.imageUrl;
-      previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
+  // ALWAYS compute live report directly from Google Sheets first to prevent stale 0-clinic client tabs from overriding live data!
+  var report = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
+  var extraMsg = String((extraPayload && extraPayload.message) || '').trim();
+  var clientClinicCount = (extraPayload && extraPayload.clientClinicCount !== undefined && extraPayload.clientClinicCount !== null)
+    ? Number(extraPayload.clientClinicCount)
+    : null;
+  var clientReportedEmpty = (
+    clientClinicCount === 0 ||
+    extraMsg.indexOf('ยังไม่พบข้อมูลบันทึกภาระงาน') !== -1 ||
+    extraMsg.indexOf('0 คลินิก') !== -1
+  );
+
+  var imageUrl = '';
+  var previewImageUrl = '';
+  var textToSend = report.text;
+  var allowFallbackText = (sourceTag === 'AUTO_TRIGGER' || sourceTag === 'AUTO_BACKUP' || sourceTag === 'AUTO_RETRY');
+
+  if (clientReportedEmpty && report.clinicCount > 0) {
+    // Discard stale client 0-clinic JPEG & text; send authoritative Google Sheets report text instead
+    allowFallbackText = true;
+    textToSend = report.text;
+  } else {
+    imageUrl = String((extraPayload && extraPayload.imageUrl) || '').trim();
+    previewImageUrl = String((extraPayload && extraPayload.previewImageUrl) || imageUrl).trim();
+    if (resolvedSendFormat !== 'TEXT_ONLY' && !imageUrl && extraPayload && extraPayload.imageBase64) {
+      var upRes = uploadLineReportJpegFromApi_({
+        base64Jpeg: extraPayload.imageBase64,
+        filename: 'OPD_Census_' + targetDate + '.jpeg'
+      });
+      if (upRes.success && upRes.imageUrl) {
+        imageUrl = upRes.imageUrl;
+        previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
+      }
     }
+    textToSend = extraMsg || report.text;
   }
 
-  var report = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
-  var textToSend = String((extraPayload && extraPayload.message) || '').trim() || report.text;
-  var allowFallbackText = sourceTag === 'AUTO_TRIGGER' || sourceTag === 'AUTO_BACKUP';
   var pushRes = pushLineMessageGas_(
     token,
     targetIds,
@@ -2934,11 +4352,12 @@ function runDueLineSchedulesGas_(sourceTag) {
   var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
   if (!enabled) {
     removeLineTriggersGas_();
-    return;
+    return { needsRetry: false };
   }
   var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
   var bkk = getBangkokDatePartsGas_(new Date());
   var nowMins = hhmmToMinsGas_(bkk.hm);
+  var needsRetry = false;
 
   for (var i = 0; i < schedules.length; i++) {
     var sch = schedules[i];
@@ -2948,16 +4367,29 @@ function runDueLineSchedulesGas_(sourceTag) {
     var diff = nowMins - schMins;
     // Allow 2 mins early and up to 75 mins catch-up window
     if (diff >= -2 && diff <= 75) {
+      var scheduleKey = sch.id ? String(sch.id) : 'DEFAULT';
+      var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey) || '').trim();
+      if (lastSentTriggerDay === bkk.ymd) continue;
+
+      var targetDate = resolveAutoReportTargetDateGas_(sch.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'TODAY', bkk.ymd);
+      var liveCheck = buildDailyCensusLineMessageGas_(targetDate, sch.shift || 'ในเวลา 08:00-16:00', settingsMap);
+      // 15-minute grace period: if Sheet still has 0 clinics at :00..:14, hold & retry instead of locking blank 0-clinic report
+      if (liveCheck.clinicCount === 0 && diff < 15) {
+        needsRetry = true;
+        continue;
+      }
       sendScheduledCensusReportGas_(sourceTag, sch, null);
     }
   }
+  return { needsRetry: needsRetry };
 }
 
 function runLineDailyCensusTrigger_() {
   var lock = LockService.getScriptLock();
+  var dueResult = { needsRetry: false };
   try {
     lock.waitLock(20000);
-    runDueLineSchedulesGas_('AUTO_EXACT');
+    dueResult = runDueLineSchedulesGas_('AUTO_EXACT') || { needsRetry: false };
   } finally {
     var settingsMap = readSettingsMapGas_();
     var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
@@ -2968,6 +4400,13 @@ function runLineDailyCensusTrigger_() {
         if (existing[i].getHandlerFunction() === 'runLineDailyCensusTrigger_') {
           ScriptApp.deleteTrigger(existing[i]);
         }
+      }
+      if (dueResult.needsRetry) {
+        // Schedule a 10-minute grace retry so late entries saved right after 15:55 / 20:00 / 12:30 get picked up cleanly
+        ScriptApp.newTrigger('runLineDailyBackupTrigger_')
+          .timeBased()
+          .after(10 * 60 * 1000)
+          .create();
       }
       var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
       var nextInfo = computeNextMatchingRunEpochGas_(schedules, settingsMap);
@@ -3046,6 +4485,10 @@ function configureLineAutomationFromApi_(payload) {
 
   var hasToken = Boolean(String(PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '').trim());
 
+  var boobyOwnerName = String(payload.boobyOwnerName || 'คุณทรงยศ').trim() || 'คุณทรงยศ';
+  var boobyOwnerUserId = String(payload.boobyOwnerUserId || '').trim();
+  var boobyGroupMentionOnly = payload.boobyGroupMentionOnly !== undefined ? Boolean(payload.boobyGroupMentionOnly) : true;
+
   upsertSettingsEntriesGas_([
     ['Line_Auto_Enabled', enabled ? 'true' : 'false'],
     ['Line_Auto_Time', parsed.formatted],
@@ -3056,7 +4499,10 @@ function configureLineAutomationFromApi_(payload) {
     ['Line_Schedules', JSON.stringify(schedules)],
     ['Line_Send_As_Image', sendAsImage ? 'true' : 'false'],
     ['Line_Send_Format', sendFormat],
-    ['Line_Channel_Token_Set', hasToken ? 'true' : 'false']
+    ['Line_Channel_Token_Set', hasToken ? 'true' : 'false'],
+    ['Booby_Owner_Name', boobyOwnerName],
+    ['Booby_Owner_User_ID', boobyOwnerUserId],
+    ['Booby_Group_Mention_Only', boobyGroupMentionOnly ? 'true' : 'false']
   ]);
 
   var freshSettingsMap = readSettingsMapGas_();
@@ -3103,19 +4549,19 @@ function sendDailyCensusToLineNowFromApi_(payload) {
   }
 
   var bkk = getBangkokDatePartsGas_(new Date());
-  var targetDate = String(payload.date || '').trim() ||
+  var targetDate = normalizeSheetDateGas_(String(payload.date || '').trim()) ||
     resolveAutoReportTargetDateGas_(String(payload.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'TODAY'), bkk.ymd);
   var shiftFilter = String(payload.shift || settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00').trim() || 'ในเวลา 08:00-16:00';
 
-  var textToSend = String(payload.message || '').trim();
-  var metaClinicCount = 0;
-  var metaTotalPt = 0;
-  if (!textToSend) {
-    var built = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
-    textToSend = built.text;
-    metaClinicCount = built.clinicCount;
-    metaTotalPt = built.totalPt;
-  }
+  var built = buildDailyCensusLineMessageGas_(targetDate, shiftFilter, settingsMap);
+  var metaClinicCount = built.clinicCount;
+  var metaTotalPt = built.totalPt;
+  var rawClientMsg = String(payload.message || '').trim();
+  var clientEmpty = (
+    payload.clientClinicCount === 0 ||
+    rawClientMsg.indexOf('ยังไม่พบข้อมูลบันทึกภาระงาน') !== -1 ||
+    rawClientMsg.indexOf('0 คลินิก') !== -1
+  );
 
   var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
   var sendFormat = normalizeLineSendFormatGas_(
@@ -3123,20 +4569,30 @@ function sendDailyCensusToLineNowFromApi_(payload) {
     legacyImgPref
   );
 
-  var imageUrl = String(payload.imageUrl || '').trim();
-  var previewImageUrl = String(payload.previewImageUrl || imageUrl).trim();
-  if (sendFormat !== 'TEXT_ONLY' && !imageUrl && payload.imageBase64) {
-    var upRes = uploadLineReportJpegFromApi_({
-      base64Jpeg: payload.imageBase64,
-      filename: 'OPD_Census_' + targetDate + '.jpeg'
-    });
-    if (upRes.success && upRes.imageUrl) {
-      imageUrl = upRes.imageUrl;
-      previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
+  var imageUrl = '';
+  var previewImageUrl = '';
+  var textToSend = rawClientMsg || built.text;
+  var allowTextFallback = false;
+
+  if (clientEmpty && built.clinicCount > 0) {
+    textToSend = built.text;
+    allowTextFallback = true;
+  } else {
+    imageUrl = String(payload.imageUrl || '').trim();
+    previewImageUrl = String(payload.previewImageUrl || imageUrl).trim();
+    if (sendFormat !== 'TEXT_ONLY' && !imageUrl && payload.imageBase64) {
+      var upRes = uploadLineReportJpegFromApi_({
+        base64Jpeg: payload.imageBase64,
+        filename: 'OPD_Census_' + targetDate + '.jpeg'
+      });
+      if (upRes.success && upRes.imageUrl) {
+        imageUrl = upRes.imageUrl;
+        previewImageUrl = upRes.previewImageUrl || upRes.imageUrl;
+      }
     }
   }
 
-  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl, sendFormat, false);
+  var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl, sendFormat, allowTextFallback);
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
   var imgTag = sendFormat === 'IMAGE_ONLY'
     ? ' (เฉพาะภาพ .jpeg)'
