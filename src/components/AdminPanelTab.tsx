@@ -1375,7 +1375,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                         ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/50 hover:bg-emerald-500/35'
                         : 'bg-black/25 text-slate-300 border-white/15 hover:bg-black/35'
                     }`}
-                    title="เปิด/ปิด การซิงค์ข้อมูลกับ Google Sheet อัตโนมัติทุกครั้งที่มีการกดบันทึก"
+                    title="เปิด/ปิด การซิงค์อัตโนมัติเมื่อเปิดหน้าต่างหรือสลับเมนู (การกดบันทึกจะซิงค์ข้อมูลล่าสุดให้ทันทีเสมอ)"
                   >
                     <span
                       className={`w-2 h-2 rounded-full ${
@@ -1386,7 +1386,7 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                           : 'bg-slate-400'
                       }`}
                     />
-                    <span>{settings.autoSync !== false ? 'ซิงค์เมื่อบันทึก: เปิด' : 'Auto ซิงค์: ปิด'}</span>
+                    <span>{settings.autoSync !== false ? 'ซิงค์เมื่อบันทึก & เปิดหน้า: เปิด' : 'ซิงค์เมื่อบันทึก: เปิด (ปิดดึงอัตโนมัติ)'}</span>
                     {lastSyncedAt && (
                       <span className="text-[10px] text-emerald-200/80">({lastSyncedAt})</span>
                     )}
@@ -2895,6 +2895,30 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   {activeLineTargetIds.length > 1 ? ` (+อีก ${activeLineTargetIds.length - 1} กลุ่ม)` : ''}
                 </span>
               )}
+              {(() => {
+                const qLimit = serverLineStatus?.quotaLimit ?? lineStatusInfo?.quotaLimit ?? null;
+                const qUsed = serverLineStatus?.quotaUsed ?? lineStatusInfo?.quotaUsed ?? null;
+                const qRemaining =
+                  serverLineStatus?.quotaRemaining ??
+                  lineStatusInfo?.quotaRemaining ??
+                  (qLimit !== null && qUsed !== null ? Math.max(0, qLimit - qUsed) : null);
+                if (qLimit === null || qUsed === null) return null;
+                const exhausted = qRemaining === 0;
+                return (
+                  <span
+                    className={`text-[10px] font-semibold ${
+                      exhausted
+                        ? 'text-red-700'
+                        : qRemaining !== null && qRemaining <= 20
+                        ? 'text-amber-700'
+                        : 'text-slate-600'
+                    }`}
+                  >
+                    โควต้า Push เดือนนี้: ใช้แล้ว {qUsed.toLocaleString()} / {qLimit.toLocaleString()} ข้อความ (เหลือ{' '}
+                    {(qRemaining ?? 0).toLocaleString()})
+                  </span>
+                );
+              })()}
             </div>
           </div>
 
@@ -2935,6 +2959,37 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             )}
           </div>
         </div>
+
+        {/* Monthly Push Quota Exhausted Warning (HTTP 429) */}
+        {(() => {
+          const qLimit = serverLineStatus?.quotaLimit ?? lineStatusInfo?.quotaLimit ?? null;
+          const qUsed = serverLineStatus?.quotaUsed ?? lineStatusInfo?.quotaUsed ?? null;
+          const qRemaining =
+            serverLineStatus?.quotaRemaining ??
+            lineStatusInfo?.quotaRemaining ??
+            (qLimit !== null && qUsed !== null ? Math.max(0, qLimit - qUsed) : null);
+          const qPaused = serverLineStatus?.quotaPausedMonth || lineStatusInfo?.quotaPausedMonth || '';
+          const lastSt = serverLineStatus?.lastStatus || lineStatusInfo?.lastStatus || settings.lineLastStatus || '';
+          const isQuotaFull =
+            qRemaining === 0 ||
+            Boolean(qPaused) ||
+            /429|monthly limit|โควต้าส่งข้อความ Push รายเดือน/i.test(lastSt);
+          if (!isQuotaFull) return null;
+          return (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2.5 text-xs text-red-900">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold">
+                  โควต้าส่งข้อความ Push รายเดือนของ LINE OA เต็มแล้ว (HTTP 429)
+                  {qLimit !== null && qUsed !== null ? ` — ใช้ครบ ${qUsed}/${qLimit} ข้อความ` : ''}
+                </div>
+                <p className="text-[11px] text-red-800/90">
+                  แพ็กเกจฟรีของ LINE Official Account ส่งข้อความแบบ Push ได้สูงสุด 200 ข้อความ/เดือน ระบบได้พักการส่งอัตโนมัติชั่วคราวในเดือนนี้เพื่อป้องกันการยิงซ้ำ โควต้าจะรีเซ็ตในวันที่ 1 เดือนถัดไป (หรืออัปเกรดแพ็กเกจใน LINE OA Manager) • <strong>การพิมพ์ถาม-ตอบกับ @บูบี้ ในกลุ่มยังใช้งานได้ฟรีตามปกติ</strong>
+                </p>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Auto-Detected Group ID Banner from Webhook */}
         {(lineStatusInfo?.detectedGroupId || settings.lineDetectedGroupId) &&

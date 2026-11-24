@@ -67,6 +67,10 @@ interface LineMetadataCache {
   groupName: string;
   groupVerified: boolean;
   groupError: string;
+  quotaType?: string;
+  quotaLimit?: number;
+  quotaUsed?: number;
+  quotaRemaining?: number;
 }
 
 const serverLineState: LineServerAutomationState = {
@@ -277,23 +281,52 @@ async function fetchLineMetadata(targetId: string, forceRefresh = false): Promis
     result.groupError = result.tokenError;
   }
 
-  if (result.tokenVerified && resolvedTarget && resolvedTarget.startsWith('C')) {
+  if (result.tokenVerified) {
     try {
-      const grpRes = await fetch(
-        `https://api.line.me/v2/bot/group/${encodeURIComponent(resolvedTarget)}/summary`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (grpRes.ok) {
-        const grpData = (await grpRes.json()) as { groupName?: string };
-        result.groupName = String(grpData.groupName || '').trim();
-        result.groupVerified = true;
-      } else {
-        const errBody = await grpRes.text();
-        result.groupVerified = false;
-        result.groupError =
-          grpRes.status === 404
-            ? 'ไม่พบกลุ่มหรือบอทยังไม่ได้เข้ากลุ่ม LINE นี้'
-            : `LINE Group API HTTP ${grpRes.status}: ${errBody}`;
+      const [grpRes, quotaRes, consRes] = await Promise.all([
+        resolvedTarget && resolvedTarget.startsWith('C')
+          ? fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(resolvedTarget)}/summary`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }).catch(() => null)
+          : Promise.resolve(null),
+        fetch('https://api.line.me/v2/bot/message/quota', {
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => null),
+        fetch('https://api.line.me/v2/bot/message/quota/consumption', {
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => null),
+      ]);
+
+      if (grpRes) {
+        if (grpRes.ok) {
+          const grpData = (await grpRes.json()) as { groupName?: string };
+          result.groupName = String(grpData.groupName || '').trim();
+          result.groupVerified = true;
+        } else {
+          const errBody = await grpRes.text();
+          result.groupVerified = false;
+          result.groupError =
+            grpRes.status === 404
+              ? 'ไม่พบกลุ่มหรือบอทยังไม่ได้เข้ากลุ่ม LINE นี้'
+              : `LINE Group API HTTP ${grpRes.status}: ${errBody}`;
+        }
+      }
+
+      if (quotaRes && quotaRes.ok) {
+        const qData = (await quotaRes.json()) as { type?: string; value?: number };
+        result.quotaType = String(qData.type || '');
+        if (typeof qData.value === 'number' && Number.isFinite(qData.value)) {
+          result.quotaLimit = qData.value;
+        }
+      }
+      if (consRes && consRes.ok) {
+        const cData = (await consRes.json()) as { totalUsage?: number };
+        if (typeof cData.totalUsage === 'number' && Number.isFinite(cData.totalUsage)) {
+          result.quotaUsed = cData.totalUsage;
+        }
+      }
+      if (typeof result.quotaLimit === 'number' && typeof result.quotaUsed === 'number') {
+        result.quotaRemaining = Math.max(0, result.quotaLimit - result.quotaUsed);
       }
     } catch (err) {
       result.groupVerified = false;
@@ -395,7 +428,7 @@ async function pushLineMessages(params: {
   imageUrl?: string;
   previewImageUrl?: string;
   sendFormat?: ServerLineSendFormat;
-}): Promise<{ ok: boolean; statusText: string; sentAt: string; sentCount: number; error?: string }> {
+}): Promise<{ ok: boolean; statusText: string; sentAt: string; sentCount: number; error?: string; quotaExceeded?: boolean }> {
   const token = getLineAccessToken();
   const sentAt = getBangkokDateParts().timestamp;
   const targets = Array.from(
@@ -446,6 +479,7 @@ async function pushLineMessages(params: {
   }
 
   let successCount = 0;
+  let quotaExceeded = false;
   const errors: string[] = [];
 
   for (const to of targets) {
@@ -462,6 +496,13 @@ async function pushLineMessages(params: {
         successCount += 1;
       } else {
         const errText = await res.text();
+        if (res.status === 429 || /monthly limit/i.test(errText)) {
+          quotaExceeded = true;
+          errors.push(
+            'โควต้าส่งข้อความ Push รายเดือนของ LINE OA เต็มแล้ว (HTTP 429 — แพ็กเกจฟรีจำกัด 200 ข้อความ/เดือน) รอรีเซ็ตต้นเดือนถัดไป หรืออัปเกรดแพ็กเกจใน LINE Official Account Manager (ส่วนแชตถาม "บูบี้" ในกลุ่มยังตอบกลับได้ฟรีไม่จำกัด)'
+          );
+          break;
+        }
         const errMsg =
           res.status === 401
             ? 'LINE API HTTP 401: Channel Access Token หมดอายุหรือถูกกด Reissue ใหม่ใน LINE Developers Console กรุณาอัปเดต Token ล่าสุดในเซิร์ฟเวอร์ (.env) และ Apps Script'
@@ -473,6 +514,7 @@ async function pushLineMessages(params: {
     }
   }
 
+  lineMetaCache = null; // Invalidate cached quota consumption after a push attempt
   serverLineState.lastSentAt = sentAt;
   if (successCount > 0 && errors.length === 0) {
     const okStatus = `ส่งรายงานเข้า ${successCount} กลุ่ม LINE ผ่าน Server Proxy สำเร็จ`;
@@ -482,11 +524,11 @@ async function pushLineMessages(params: {
   if (successCount > 0) {
     const partial = `ส่งสำเร็จ ${successCount}/${targets.length} กลุ่ม (${errors[0]})`;
     serverLineState.lastStatus = partial;
-    return { ok: true, statusText: partial, sentAt, sentCount: successCount, error: errors.join('; ') };
+    return { ok: true, statusText: partial, sentAt, sentCount: successCount, error: errors.join('; '), quotaExceeded };
   }
   const errMsg = errors[0] || 'ส่งเข้า LINE ไม่สำเร็จ';
   serverLineState.lastStatus = `ส่งไม่สำเร็จ: ${errMsg}`;
-  return { ok: false, statusText: serverLineState.lastStatus, sentAt, sentCount: 0, error: errMsg };
+  return { ok: false, statusText: serverLineState.lastStatus, sentAt, sentCount: 0, error: errMsg, quotaExceeded };
 }
 
 async function createAppServer(): Promise<void> {
@@ -514,6 +556,10 @@ async function createAppServer(): Promise<void> {
       groupName: meta.groupName,
       groupVerified: meta.groupVerified,
       groupError: meta.groupError,
+      quotaType: meta.quotaType,
+      quotaLimit: meta.quotaLimit,
+      quotaUsed: meta.quotaUsed,
+      quotaRemaining: meta.quotaRemaining,
       serverAutoEnabled: serverLineState.enabled,
       serverAutoTime: serverLineState.time,
       serverNextRunAt: serverLineState.enabled ? computeNextRunAtLabel(serverLineState.time) : '',
@@ -536,6 +582,7 @@ async function createAppServer(): Promise<void> {
   interface LineAutoDailyState {
     completedKeys: Record<string, { at: string; withImage: boolean; statusText?: string }>;
     completedImageKeys: Record<string, string>;
+    quotaPausedMonth?: string;
   }
 
   const lineInFlightClaims = new Map<
@@ -551,6 +598,7 @@ async function createAppServer(): Promise<void> {
           completedKeys: raw?.completedKeys && typeof raw.completedKeys === 'object' ? raw.completedKeys : {},
           completedImageKeys:
             raw?.completedImageKeys && typeof raw.completedImageKeys === 'object' ? raw.completedImageKeys : {},
+          quotaPausedMonth: typeof raw?.quotaPausedMonth === 'string' ? raw.quotaPausedMonth : undefined,
         };
       }
     } catch {
@@ -576,6 +624,9 @@ async function createAppServer(): Promise<void> {
       const cleaned: LineAutoDailyState = {
         completedKeys: keepRecent(state.completedKeys),
         completedImageKeys: keepRecent(state.completedImageKeys),
+        ...(state.quotaPausedMonth && state.quotaPausedMonth >= getBangkokDateParts().ymd.slice(0, 7)
+          ? { quotaPausedMonth: state.quotaPausedMonth }
+          : {}),
       };
       fs.writeFileSync(LINE_AUTO_STATE_PATH, JSON.stringify(cleaned, null, 2), 'utf8');
     } catch {
@@ -3617,6 +3668,11 @@ async function createAppServer(): Promise<void> {
     const dayKey = `${canonKey}|${cleanYmd}`;
 
     const autoState = loadLineAutoState();
+    const currentMonth = cleanYmd.slice(0, 7);
+    if (autoState.quotaPausedMonth && autoState.quotaPausedMonth === currentMonth) {
+      res.json({ ok: true, claimed: false, alreadyCompleted: true, quotaExceeded: true });
+      return;
+    }
     const alreadyDone = wantImage
       ? Boolean(autoState.completedImageKeys[dayKey])
       : Boolean(autoState.completedKeys[dayKey]);
@@ -3651,6 +3707,7 @@ async function createAppServer(): Promise<void> {
       claimToken?: string;
       ok?: boolean;
       sentWithImage?: boolean;
+      quotaExceeded?: boolean;
       statusText?: string;
     };
     const bkk = getBangkokDateParts();
@@ -3664,8 +3721,15 @@ async function createAppServer(): Promise<void> {
       lineInFlightClaims.delete(dayKey);
     }
 
-    if (Boolean(body.ok)) {
+    if (Boolean(body.quotaExceeded)) {
       const autoState = loadLineAutoState();
+      autoState.quotaPausedMonth = cleanYmd.slice(0, 7);
+      saveLineAutoState(autoState);
+      serverLineState.lastSentAt = bkk.timestamp;
+      serverLineState.lastStatus = 'ส่งไม่สำเร็จ: โควต้าส่งข้อความ Push รายเดือน LINE เต็มแล้ว (HTTP 429)';
+    } else if (Boolean(body.ok)) {
+      const autoState = loadLineAutoState();
+      autoState.quotaPausedMonth = undefined;
       const sentAt = bkk.timestamp;
       const sentWithImage = Boolean(body.sentWithImage);
       const statusText = String(body.statusText || '').trim().slice(0, 300);
@@ -3713,6 +3777,17 @@ async function createAppServer(): Promise<void> {
       previewImageUrl: body.previewImageUrl,
       sendFormat: resolvedFmt,
     });
+    if (result.ok) {
+      const autoState = loadLineAutoState();
+      if (autoState.quotaPausedMonth) {
+        autoState.quotaPausedMonth = undefined;
+        saveLineAutoState(autoState);
+      }
+    } else if (result.quotaExceeded) {
+      const autoState = loadLineAutoState();
+      autoState.quotaPausedMonth = getBangkokDateParts().ymd.slice(0, 7);
+      saveLineAutoState(autoState);
+    }
     const meta = await fetchLineMetadata(targetList[0] || primaryTarget, false);
 
     res.status(result.ok ? 200 : 400).json({
@@ -3723,6 +3798,7 @@ async function createAppServer(): Promise<void> {
       statusText: result.statusText,
       sentAt: result.sentAt,
       error: result.error,
+      quotaExceeded: result.quotaExceeded,
     });
   });
 
@@ -3918,6 +3994,9 @@ async function createAppServer(): Promise<void> {
     };
     const nowMins = toMins(bkk.hm);
     const autoState = loadLineAutoState();
+    if (autoState.quotaPausedMonth && autoState.quotaPausedMonth === bkk.ymd.slice(0, 7)) {
+      return;
+    }
 
     for (const sch of activeSchedules) {
       if (!matchesDayRuleServer(bkk.ymd, sch.dayRule || 'ALL_DAYS')) continue;
@@ -3983,7 +4062,17 @@ async function createAppServer(): Promise<void> {
           }),
         });
         if (gasRes.ok) {
-          const parsed = (await gasRes.json()) as { success?: boolean; statusText?: string };
+          const parsed = (await gasRes.json()) as {
+            success?: boolean;
+            statusText?: string;
+            quotaExceeded?: boolean;
+            error?: string;
+          };
+          if (parsed?.quotaExceeded || /429|monthly limit/i.test(String(parsed?.error || ''))) {
+            autoState.quotaPausedMonth = bkk.ymd.slice(0, 7);
+            saveLineAutoState(autoState);
+            break;
+          }
           if (parsed && parsed.success !== false) {
             autoState.completedKeys[dayKey] = {
               at: bkk.timestamp,

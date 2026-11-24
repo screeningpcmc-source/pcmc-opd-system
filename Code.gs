@@ -2781,16 +2781,26 @@ function pushLineMessageGas_(channelAccessToken, targetIdsInput, text, imageUrl,
       muteHttpExceptions: true
     });
     var code = res.getResponseCode();
+    var bodyText = res.getContentText() || '';
     if (code >= 200 && code < 300) {
       sentCount += 1;
     } else if (code === 401) {
       return {
         ok: false,
         sentCount: sentCount,
+        httpCode: 401,
         error: 'LINE API HTTP 401: Channel Access Token ใน Google Apps Script (ScriptProperties) ไม่ถูกต้องหรือหมดอายุ/ถูก Reissue ใหม่แล้ว กรุณาอัปเดตผ่านเมนู Google Sheets "🏥 ระบบ OPD รพ.ชลประทาน → 🔑 อัปเดต LINE Token ใหม่ (แก้ Error 401)"'
       };
+    } else if (code === 429 || /monthly limit/i.test(bodyText)) {
+      return {
+        ok: false,
+        sentCount: sentCount,
+        httpCode: 429,
+        quotaExceeded: true,
+        error: 'โควต้าส่งข้อความ Push รายเดือนของ LINE OA เต็มแล้ว (HTTP 429 — แพ็กเกจฟรีจำกัด 200 ข้อความ/เดือน) แนะนำรอขึ้นเดือนถัดไปหรืออัปเกรดแพ็กเกจ LINE OA (หมายเหตุ: การแชทถาม-ตอบกับ @บูบี้ ในกลุ่มยังใช้งานได้ฟรีตามปกติ)'
+      };
     } else {
-      errors.push(to + ': HTTP ' + code + ' ' + res.getContentText());
+      errors.push(to + ': HTTP ' + code + ' ' + bodyText);
     }
   }
 
@@ -2845,12 +2855,48 @@ function verifyLineTokenGas_(channelAccessToken, targetId) {
         groupError = 'ไม่พบข้อมูลกลุ่ม (HTTP ' + grpRes.getResponseCode() + ') กรุณาตรวจว่าบอทอยู่ในกลุ่มแล้ว';
       }
     }
+
+    var quotaType = '';
+    var quotaLimit = null;
+    var quotaUsed = null;
+    var quotaRemaining = null;
+    try {
+      var qRes = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/quota', {
+        method: 'get',
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      var cRes = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/quota/consumption', {
+        method: 'get',
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      if (qRes.getResponseCode() === 200) {
+        var qData = JSON.parse(qRes.getContentText() || '{}');
+        quotaType = String(qData.type || '');
+        if (typeof qData.value === 'number') quotaLimit = qData.value;
+      }
+      if (cRes.getResponseCode() === 200) {
+        var cData = JSON.parse(cRes.getContentText() || '{}');
+        if (typeof cData.totalUsage === 'number') quotaUsed = cData.totalUsage;
+      }
+      if (quotaLimit !== null && quotaUsed !== null) {
+        quotaRemaining = Math.max(0, quotaLimit - quotaUsed);
+      }
+    } catch (qErr) {
+      // ignore non-critical quota lookup failures
+    }
+
     return {
       ok: true,
       botName: botName,
       groupVerified: groupVerified,
       groupName: groupName,
-      groupError: groupError
+      groupError: groupError,
+      quotaType: quotaType,
+      quotaLimit: quotaLimit,
+      quotaUsed: quotaUsed,
+      quotaRemaining: quotaRemaining
     };
   } catch (e) {
     return { ok: false, error: String(e && e.message ? e.message : e) };
@@ -5037,6 +5083,7 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
   ).trim() || 'ในเวลา 08:00-16:00';
 
   var bkk = getBangkokDatePartsGas_(new Date());
+  var bkkMonth = bkk.ymd.slice(0, 7);
   var targetDate = normalizeSheetDateGas_(String((extraPayload && extraPayload.date) || '').trim()) ||
     resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
 
@@ -5047,6 +5094,16 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
 
   if (sourceTag !== 'MANUAL') {
     var props = PropertiesService.getScriptProperties();
+    var quotaPausedMonth = String(props.getProperty('LINE_QUOTA_EXCEEDED_MONTH') || '').trim();
+    if (quotaPausedMonth === bkkMonth) {
+      return {
+        success: false,
+        skipped: true,
+        quotaExceeded: true,
+        error: 'โควต้าส่งข้อความ Push รายเดือนของ LINE OA เต็มแล้ว (' + bkkMonth + ') ระบบพักการส่งอัตโนมัติจนกว่าจะขึ้นเดือนใหม่',
+        reason: 'Monthly LINE Push quota exceeded for ' + bkkMonth
+      };
+    }
     var lastSentImgDay = String(props.getProperty(dedupeImgPropKey) || '').trim();
     if (lastSentImgDay === bkk.ymd) {
       return {
@@ -5119,8 +5176,9 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
 
   if (pushRes.ok) {
+    var propsOk = PropertiesService.getScriptProperties();
+    propsOk.deleteProperty('LINE_QUOTA_EXCEEDED_MONTH');
     if (sourceTag !== 'MANUAL') {
-      var propsOk = PropertiesService.getScriptProperties();
       propsOk.setProperty(dedupePropKey, bkk.ymd);
       propsOk.setProperty('LINE_LAST_TRIGGER_BKK_DAY', bkk.ymd);
       if (imageUrl) {
@@ -5144,12 +5202,20 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
       imageUrl: imageUrl
     };
   } else {
+    if (pushRes.quotaExceeded) {
+      PropertiesService.getScriptProperties().setProperty('LINE_QUOTA_EXCEEDED_MONTH', bkkMonth);
+    }
     var errStatus = 'ส่งไม่สำเร็จ: ' + pushRes.error;
     upsertSettingsEntriesGas_([
       ['Line_Last_Sent_At', nowThai],
       ['Line_Last_Status', errStatus]
     ]);
-    return { success: false, error: pushRes.error, statusText: errStatus };
+    return {
+      success: false,
+      error: pushRes.error,
+      statusText: errStatus,
+      quotaExceeded: Boolean(pushRes.quotaExceeded)
+    };
   }
 }
 
@@ -5167,6 +5233,11 @@ function runDueLineSchedulesGas_(sourceTag) {
   }
   var schedules = getLineSchedulesFromSettingsMap_(settingsMap);
   var bkk = getBangkokDatePartsGas_(new Date());
+  var bkkMonth = bkk.ymd.slice(0, 7);
+  var propsGlobal = PropertiesService.getScriptProperties();
+  if (String(propsGlobal.getProperty('LINE_QUOTA_EXCEEDED_MONTH') || '').trim() === bkkMonth) {
+    return { needsRetry: false, quotaExceeded: true };
+  }
   var nowMins = hhmmToMinsGas_(bkk.hm);
   var needsRetry = false;
   var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
@@ -5180,9 +5251,8 @@ function runDueLineSchedulesGas_(sourceTag) {
     // Allow 2 mins early and up to 75 mins catch-up window
     if (diff >= -2 && diff <= 75) {
       var scheduleKey = canonicalLineScheduleKeyGas_(sch, null);
-      var props = PropertiesService.getScriptProperties();
-      var lastSentImgDay = String(props.getProperty('LINE_LAST_TRIGGER_BKK_IMG_' + scheduleKey) || '').trim();
-      var lastSentTriggerDay = String(props.getProperty('LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey) || '').trim();
+      var lastSentImgDay = String(propsGlobal.getProperty('LINE_LAST_TRIGGER_BKK_IMG_' + scheduleKey) || '').trim();
+      var lastSentTriggerDay = String(propsGlobal.getProperty('LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey) || '').trim();
       if (lastSentImgDay === bkk.ymd || lastSentTriggerDay === bkk.ymd) continue;
 
       var schedSendFormat = normalizeLineSendFormatGas_(
@@ -5211,7 +5281,10 @@ function runDueLineSchedulesGas_(sourceTag) {
         needsRetry = true;
         continue;
       }
-      sendScheduledCensusReportGas_(sourceTag, sch, null);
+      var sentRes = sendScheduledCensusReportGas_(sourceTag, sch, null);
+      if (sentRes && sentRes.quotaExceeded) {
+        return { needsRetry: false, quotaExceeded: true };
+      }
     }
   }
   return { needsRetry: needsRetry };
@@ -5453,6 +5526,12 @@ function sendDailyCensusToLineNowFromApi_(payload) {
 
   var pushRes = pushLineMessageGas_(token, targetIds, textToSend, imageUrl, previewImageUrl, sendFormat, allowTextFallback);
   var nowThai = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
+  var bkkMonthNow = bkk.ymd.slice(0, 7);
+  if (pushRes.ok) {
+    PropertiesService.getScriptProperties().deleteProperty('LINE_QUOTA_EXCEEDED_MONTH');
+  } else if (pushRes.quotaExceeded) {
+    PropertiesService.getScriptProperties().setProperty('LINE_QUOTA_EXCEEDED_MONTH', bkkMonthNow);
+  }
   var imgTag = sendFormat === 'IMAGE_ONLY'
     ? ' (เฉพาะภาพ .jpeg)'
     : sendFormat === 'TEXT_ONLY'
@@ -5472,6 +5551,7 @@ function sendDailyCensusToLineNowFromApi_(payload) {
   var res = buildPublicReadAllPayload_();
   res.success = pushRes.ok;
   if (!pushRes.ok) res.error = pushRes.error;
+  res.quotaExceeded = Boolean(pushRes.quotaExceeded);
   res.statusText = statusText;
   res.sentAt = nowThai;
   res.targetDate = targetDate;
@@ -5507,7 +5587,12 @@ function getLineAutomationStatusFromApi_() {
     detectedGroupName: String(settingsMap['Line_Detected_Group_Name'] || ''),
     lastSentAt: String(settingsMap['Line_Last_Sent_At'] || ''),
     lastSentReportDate: String(settingsMap['Line_Last_Sent_Report_Date'] || ''),
-    lastStatus: String(settingsMap['Line_Last_Status'] || '')
+    lastStatus: String(settingsMap['Line_Last_Status'] || ''),
+    quotaType: String(tokenCheck.quotaType || ''),
+    quotaLimit: tokenCheck.quotaLimit !== undefined ? tokenCheck.quotaLimit : null,
+    quotaUsed: tokenCheck.quotaUsed !== undefined ? tokenCheck.quotaUsed : null,
+    quotaRemaining: tokenCheck.quotaRemaining !== undefined ? tokenCheck.quotaRemaining : null,
+    quotaPausedMonth: String(PropertiesService.getScriptProperties().getProperty('LINE_QUOTA_EXCEEDED_MONTH') || '')
   };
 }
 

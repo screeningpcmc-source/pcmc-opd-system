@@ -176,11 +176,10 @@ export default function App() {
   dbRef.current = db;
   const isSyncInFlightRef = useRef<boolean>(false);
   const adminWriteInFlightRef = useRef<boolean>(false);
-  const adminWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const sheetOpQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastSyncEpochRef = useRef<number>(0);
   const lastSyncedKeyRef = useRef<string>('');
   const mutationSeqRef = useRef<number>(0);
-  const pendingSyncAfterFlightRef = useRef<boolean>(false);
   const tabInstanceIdRef = useRef<string>(`tab-${Math.random().toString(36).slice(2)}-${Date.now()}`);
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
   const suppressNextBroadcastRef = useRef<boolean>(false);
@@ -188,6 +187,16 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const savingWorkloadSlotsRef = useRef<Set<string>>(new Set());
   const lineAutoCheckInFlightRef = useRef<boolean>(false);
+  const hasMountedTabRef = useRef<boolean>(false);
+
+  const enqueueSheetOperation = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const run = sheetOpQueueRef.current.catch(() => undefined).then(task);
+    sheetOpQueueRef.current = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }, []);
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -637,30 +646,37 @@ export default function App() {
       setAdminOwnerName(match.ownerName);
       showToast(`ปลดล็อกสิทธิ์ผู้ดูแลระบบ (${match.ownerName}) สำเร็จ!`, 'success');
       if (hasPendingAdminDirtyFlags()) {
-        adminWriteQueueRef.current = adminWriteQueueRef.current
-          .catch(() => undefined)
-          .then(async () => {
-            const latestDb = dbRef.current;
-            const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
-            if (targetGasUrl && unlockedAdminPinRef.current) {
-              adminWriteInFlightRef.current = true;
-              try {
-                const res = await syncAdminViaAppsScript(
-                  targetGasUrl,
-                  unlockedAdminPinRef.current,
-                  latestDb
-                );
-                if (res.accessible && res.adminSynced) {
-                  dbRef.current = res.mergedDb;
-                  setDb(res.mergedDb);
-                  lastSyncEpochRef.current = Date.now();
-                  setLastSyncedAt(formatSyncTime());
+        void enqueueSheetOperation(async () => {
+          const latestDb = dbRef.current;
+          const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
+          if (targetGasUrl && unlockedAdminPinRef.current) {
+            adminWriteInFlightRef.current = true;
+            try {
+              const res = await syncAdminViaAppsScript(
+                targetGasUrl,
+                unlockedAdminPinRef.current,
+                latestDb
+              );
+              if (res.accessible && res.adminSynced) {
+                dbRef.current = res.mergedDb;
+                setDb(res.mergedDb);
+                lastSyncEpochRef.current = Date.now();
+                setLastSyncedAt(formatSyncTime());
+                const srvRes = await pushServerSync({
+                  clientId: tabInstanceIdRef.current,
+                  baseVersion: serverVersionRef.current,
+                  mergeFromRemote: true,
+                  db: res.mergedDb,
+                });
+                if (srvRes && srvRes.ok && !srvRes.staleRejected && srvRes.version > serverVersionRef.current) {
+                  serverVersionRef.current = srvRes.version;
                 }
-              } finally {
-                adminWriteInFlightRef.current = false;
               }
+            } finally {
+              adminWriteInFlightRef.current = false;
             }
-          });
+          }
+        });
       }
       return true;
     }
@@ -705,152 +721,225 @@ export default function App() {
       second: '2-digit',
     });
 
-  // Silent background Auto-Sync (100% works without Google Sign-In):
-  // 1) Apps Script Web App 2-way sync if gasUrl is configured (or discovered from Settings tab)
-  // 2) Public GViz read-only sync when ?sheetId= is shared as Anyone with link can view
-  // 3) Optional passive OAuth 2-way sync only if user happened to already hold a valid token
-  const performBackgroundSync = useCallback(async (_reason: 'initial' | 'interval' | 'focus' | 'edit') => {
-    if (isSyncInFlightRef.current || adminWriteInFlightRef.current) {
-      if (_reason === 'edit') {
-        pendingSyncAfterFlightRef.current = true;
-      }
-      return;
-    }
-    const currentDb = dbRef.current;
-    const targetSheetId = (currentDb.settings.spreadsheetId || '').trim();
-    const targetGasUrl = (currentDb.settings.gasUrl || '').trim();
-    if ((!targetSheetId && !targetGasUrl) || currentDb.settings.autoSync === false) return;
-
-    const syncKey = `${targetSheetId}|${targetGasUrl}`;
-    const startSeq = mutationSeqRef.current;
-
-    isSyncInFlightRef.current = true;
-    setIsSyncingSheet(true);
-    try {
-      const applySyncedDb = (nextDb: typeof currentDb) => {
-        if (mutationSeqRef.current !== startSeq) {
-          pendingSyncAfterFlightRef.current = true;
-          return false;
-        }
-        dbRef.current = nextDb;
-        setDb(nextDb);
-        lastSyncEpochRef.current = Date.now();
-        lastSyncedKeyRef.current = syncKey;
-        setLastSyncedAt(formatSyncTime());
-        void pushServerSync({
+  // Broadcast authoritative Sheet-synced snapshot to Node server (/ws) so all users see latest data immediately
+  const broadcastSyncedSnapshot = useCallback(
+    async (nextDb: AppDatabase) => {
+      try {
+        const srvRes = await pushServerSync({
           clientId: tabInstanceIdRef.current,
           baseVersion: serverVersionRef.current,
           mergeFromRemote: true,
           db: nextDb,
-        }).then((srvRes) => {
-          if (!srvRes || !srvRes.ok) return;
-          if (srvRes.staleRejected) {
-            applyAuthoritativeServerSnapshot(srvRes, 'sync');
-          } else if (!srvRes.unchanged && srvRes.version > serverVersionRef.current) {
-            serverVersionRef.current = srvRes.version;
-          }
         });
-        return true;
-      };
+        if (!srvRes || !srvRes.ok) return;
+        if (srvRes.staleRejected) {
+          applyAuthoritativeServerSnapshot(srvRes, 'sync');
+        } else if (!srvRes.unchanged && srvRes.version > serverVersionRef.current) {
+          serverVersionRef.current = srvRes.version;
+        }
+      } catch {
+        // ignore in offline/static mode
+      }
+    },
+    [applyAuthoritativeServerSnapshot]
+  );
 
-      if (targetGasUrl) {
-        const useAdmin = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
-        const gasRes = useAdmin
-          ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, currentDb)
-          : await syncPublicViaAppsScript(targetGasUrl, currentDb);
-        if (gasRes.accessible) {
-          if (useAdmin && 'adminSynced' in gasRes && !gasRes.adminSynced) {
-            console.warn('Admin sync warning:', 'error' in gasRes ? gasRes.error : '');
+  // Core serialized Google Sheets 2-way sync (safe to call inside an existing sheetOpQueue task or directly)
+  const executeSheetSyncNow = useCallback(
+    async (options?: {
+      reason?: 'initial' | 'focus' | 'tab' | 'save' | 'manual';
+      overrideSheetId?: string;
+      ignoreSeqGuard?: boolean;
+    }): Promise<{
+      accessible: boolean;
+      via?: 'gas' | 'oauth' | 'public';
+      pushedCount?: number;
+      staffCount?: number;
+      pulledWorkloads?: number;
+      adminSynced?: boolean;
+      error?: string;
+    }> => {
+      const currentDb = dbRef.current;
+      const targetSheetId = (options?.overrideSheetId || currentDb.settings.spreadsheetId || '').trim();
+      let targetGasUrl = (currentDb.settings.gasUrl || '').trim();
+
+      if (!targetSheetId && !targetGasUrl) {
+        return { accessible: false };
+      }
+
+      const syncKey = `${targetSheetId}|${targetGasUrl}`;
+      const startSeq = mutationSeqRef.current;
+
+      isSyncInFlightRef.current = true;
+      setIsSyncingSheet(true);
+      try {
+        const applySyncedDb = async (nextDb: AppDatabase, resolvedKey?: string) => {
+          if (!options?.ignoreSeqGuard && mutationSeqRef.current !== startSeq) {
+            return false;
           }
-          applySyncedDb({
-            ...gasRes.mergedDb,
-            settings: {
-              ...gasRes.mergedDb.settings,
-              spreadsheetId: targetSheetId || gasRes.mergedDb.settings.spreadsheetId,
-              spreadsheetUrl:
-                targetSheetId
-                  ? `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`
-                  : gasRes.mergedDb.settings.spreadsheetUrl,
-              gasUrl: targetGasUrl,
-            },
-          });
-          return;
-        }
-      }
+          dbRef.current = nextDb;
+          setDb(nextDb);
+          lastSyncEpochRef.current = Date.now();
+          lastSyncedKeyRef.current = resolvedKey || syncKey;
+          setLastSyncedAt(formatSyncTime());
+          await broadcastSyncedSnapshot(nextDb);
+          return true;
+        };
 
-      if (targetSheetId) {
-        const token = await getPassiveGoogleToken();
-        if (mutationSeqRef.current !== startSeq) {
-          pendingSyncAfterFlightRef.current = true;
-          return;
-        }
-        if (token) {
-          const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-          applySyncedDb({
-            ...result.mergedDb,
-            settings: {
-              ...result.mergedDb.settings,
-              spreadsheetId: targetSheetId,
-              spreadsheetUrl:
-                result.mergedDb.settings.spreadsheetUrl ||
-                `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-              gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
-            },
-          });
-          return;
-        }
-      }
+        let publicFallbackRes: { accessible: boolean; mergedDb: AppDatabase } | null = null;
 
-      if (targetSheetId) {
-        const pubRes = await readPublicGoogleSheet(targetSheetId, currentDb);
-        if (pubRes.accessible) {
-          const discoveredGas = (pubRes.mergedDb.settings.gasUrl || '').trim();
-          if (discoveredGas) {
-            const gasRes =
-              isAdminUnlockedRef.current && unlockedAdminPinRef.current
-                ? await syncAdminViaAppsScript(discoveredGas, unlockedAdminPinRef.current, pubRes.mergedDb)
-                : await syncPublicViaAppsScript(discoveredGas, pubRes.mergedDb);
-            const finalDb = gasRes.accessible ? gasRes.mergedDb : pubRes.mergedDb;
-            applySyncedDb({
-              ...finalDb,
-              settings: {
-                ...finalDb.settings,
-                spreadsheetId: targetSheetId,
-                spreadsheetUrl:
-                  finalDb.settings.spreadsheetUrl ||
-                  `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-                gasUrl: discoveredGas,
+        if (!targetGasUrl && targetSheetId) {
+          publicFallbackRes = await readPublicGoogleSheet(targetSheetId, currentDb);
+          if (publicFallbackRes.accessible && publicFallbackRes.mergedDb.settings.gasUrl) {
+            targetGasUrl = publicFallbackRes.mergedDb.settings.gasUrl.trim();
+          }
+        }
+
+        if (targetGasUrl) {
+          const workingDb = publicFallbackRes?.accessible ? publicFallbackRes.mergedDb : currentDb;
+          const useAdminSync = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
+          const gasRes = useAdminSync
+            ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, workingDb)
+            : await syncPublicViaAppsScript(targetGasUrl, workingDb);
+
+          if (gasRes.accessible) {
+            const finalSheetId = targetSheetId || gasRes.mergedDb.settings.spreadsheetId || '';
+            await applySyncedDb(
+              {
+                ...gasRes.mergedDb,
+                settings: {
+                  ...gasRes.mergedDb.settings,
+                  spreadsheetId: finalSheetId || undefined,
+                  spreadsheetUrl:
+                    gasRes.mergedDb.settings.spreadsheetUrl ||
+                    (finalSheetId ? `https://docs.google.com/spreadsheets/d/${finalSheetId}/edit` : undefined),
+                  gasUrl: targetGasUrl,
+                },
               },
-            });
+              `${finalSheetId}|${targetGasUrl}`
+            );
+            return {
+              accessible: true,
+              via: 'gas',
+              pushedCount: gasRes.pushedCount,
+              staffCount: gasRes.mergedDb.staff.length,
+              adminSynced: 'adminSynced' in gasRes ? Boolean(gasRes.adminSynced) : true,
+              error: 'error' in gasRes ? String(gasRes.error || '') : undefined,
+            };
+          }
+        }
+
+        if (targetSheetId) {
+          const token = await getPassiveGoogleToken();
+          if (!options?.ignoreSeqGuard && mutationSeqRef.current !== startSeq) {
+            return { accessible: false };
+          }
+          if (token) {
+            const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
+            await applySyncedDb(
+              {
+                ...result.mergedDb,
+                settings: {
+                  ...result.mergedDb.settings,
+                  spreadsheetId: targetSheetId,
+                  spreadsheetUrl:
+                    result.mergedDb.settings.spreadsheetUrl ||
+                    `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+                  gasUrl: result.mergedDb.settings.gasUrl || targetGasUrl || undefined,
+                },
+              },
+              `${targetSheetId}|${result.mergedDb.settings.gasUrl || targetGasUrl || ''}`
+            );
+            return {
+              accessible: true,
+              via: 'oauth',
+              pushedCount: result.pushedWorkloads,
+              staffCount: result.staffCount,
+              pulledWorkloads: result.pulledWorkloads,
+            };
+          }
+
+          const pubRes = publicFallbackRes || (await readPublicGoogleSheet(targetSheetId, currentDb));
+          if (pubRes.accessible) {
+            const discoveredGas = (pubRes.mergedDb.settings.gasUrl || '').trim();
+            if (discoveredGas) {
+              const gasRes =
+                isAdminUnlockedRef.current && unlockedAdminPinRef.current
+                  ? await syncAdminViaAppsScript(discoveredGas, unlockedAdminPinRef.current, pubRes.mergedDb)
+                  : await syncPublicViaAppsScript(discoveredGas, pubRes.mergedDb);
+              const finalDb = gasRes.accessible ? gasRes.mergedDb : pubRes.mergedDb;
+              await applySyncedDb(
+                {
+                  ...finalDb,
+                  settings: {
+                    ...finalDb.settings,
+                    spreadsheetId: targetSheetId,
+                    spreadsheetUrl:
+                      finalDb.settings.spreadsheetUrl ||
+                      `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+                    gasUrl: discoveredGas,
+                  },
+                },
+                `${targetSheetId}|${discoveredGas}`
+              );
+              return {
+                accessible: true,
+                via: gasRes.accessible ? 'gas' : 'public',
+                pushedCount: gasRes.accessible ? gasRes.pushedCount : 0,
+                staffCount: finalDb.staff.length,
+              };
+            }
+            await applySyncedDb(
+              {
+                ...pubRes.mergedDb,
+                settings: {
+                  ...pubRes.mergedDb.settings,
+                  spreadsheetId: targetSheetId,
+                  spreadsheetUrl:
+                    pubRes.mergedDb.settings.spreadsheetUrl ||
+                    `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
+                },
+              },
+              `${targetSheetId}|`
+            );
+            return {
+              accessible: true,
+              via: 'public',
+              staffCount: pubRes.mergedDb.staff.length,
+            };
           } else {
-            applySyncedDb({
-              ...pubRes.mergedDb,
-              settings: {
-                ...pubRes.mergedDb.settings,
-                spreadsheetId: targetSheetId,
-                spreadsheetUrl:
-                  pubRes.mergedDb.settings.spreadsheetUrl ||
-                  `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-              },
-            });
+            lastSyncedKeyRef.current = syncKey;
           }
-        } else {
-          lastSyncedKeyRef.current = syncKey;
         }
+        return { accessible: false };
+      } finally {
+        isSyncInFlightRef.current = false;
+        setIsSyncingSheet(false);
       }
-    } catch (err) {
-      console.warn('Auto-sync skipped:', err);
-    } finally {
-      isSyncInFlightRef.current = false;
-      setIsSyncingSheet(false);
-      if (pendingSyncAfterFlightRef.current) {
-        pendingSyncAfterFlightRef.current = false;
-        window.setTimeout(() => {
-          performBackgroundSync('edit');
-        }, 100);
-      }
-    }
-  }, []);
+    },
+    [broadcastSyncedSnapshot]
+  );
+
+  // Serialized background sync (never races with active saves or admin edits)
+  const performBackgroundSync = useCallback(
+    async (reason: 'initial' | 'focus' | 'tab' | 'edit') => {
+      const currentDb = dbRef.current;
+      const targetSheetId = (currentDb.settings.spreadsheetId || '').trim();
+      const targetGasUrl = (currentDb.settings.gasUrl || '').trim();
+      if (!targetSheetId && !targetGasUrl) return;
+      if (reason !== 'edit' && currentDb.settings.autoSync === false) return;
+
+      await enqueueSheetOperation(async () => {
+        const latestDb = dbRef.current;
+        if (reason !== 'edit' && latestDb.settings.autoSync === false) return;
+        await executeSheetSyncNow({
+          reason: reason === 'edit' ? 'save' : reason,
+          ignoreSeqGuard: reason === 'edit',
+        });
+      });
+    },
+    [enqueueSheetOperation, executeSheetSyncNow]
+  );
 
   // Auto-Sync: initial load / when user or spreadsheetId/gasUrl changes
   useEffect(() => {
@@ -860,19 +949,14 @@ export default function App() {
     if ((!sheetId && !gasUrl) || db.settings.autoSync === false) return;
     if (lastSyncedKeyRef.current !== syncKey || user) {
       const timer = setTimeout(() => {
-        performBackgroundSync('initial');
+        void performBackgroundSync('initial');
       }, 300);
       return () => clearTimeout(timer);
     }
   }, [user, db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
 
-  // Background periodic polling (every 20s when tab visible) & focus/WS catch-up so open tabs stay aligned
+  // Event-driven focus/visibility catch-up + WebSocket real-time push (no 20s polling race with saves!)
   useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void performBackgroundSync('interval');
-    }, 20_000);
-
     const handleWakeSync = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
       void fetchServerDatabaseSnapshot().then((snap) => {
@@ -880,7 +964,7 @@ export default function App() {
           applyAuthoritativeServerSnapshot(snap, 'ws');
         }
       });
-      if (Date.now() - lastSyncEpochRef.current > 5_000) {
+      if (Date.now() - lastSyncEpochRef.current > 10_000) {
         void performBackgroundSync('focus');
       }
     };
@@ -888,171 +972,71 @@ export default function App() {
     document.addEventListener('visibilitychange', handleWakeSync);
 
     return () => {
-      window.clearInterval(intervalId);
       window.removeEventListener('focus', handleWakeSync);
       document.removeEventListener('visibilitychange', handleWakeSync);
     };
   }, [performBackgroundSync, applyAuthoritativeServerSnapshot]);
 
-  // Manual Sync with linked Google Spreadsheet — works completely WITHOUT Google Sign-In
+  // Refresh latest data cleanly when general users switch tabs (serialized, 10s cooldown)
+  useEffect(() => {
+    if (!hasMountedTabRef.current) {
+      hasMountedTabRef.current = true;
+      return;
+    }
+    if (Date.now() - lastSyncEpochRef.current > 10_000) {
+      void performBackgroundSync('tab');
+    }
+  }, [activeTab, performBackgroundSync]);
+
+  // Manual Sync with linked Google Spreadsheet — serialized through sheetOpQueue
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
     const currentDb = dbRef.current;
     const targetSheetId = (overrideSheetId || currentDb.settings.spreadsheetId || '').trim();
-    let targetGasUrl = (currentDb.settings.gasUrl || '').trim();
+    const targetGasUrl = (currentDb.settings.gasUrl || '').trim();
 
     if (!targetSheetId && !targetGasUrl) {
       showToast('ยังไม่มีลิงก์ Google Sheets หรือ Web App URL กรุณากด "ตั้งค่าลิงก์ชีท" ก่อน', 'info');
       return;
     }
 
-    if (isSyncInFlightRef.current) return;
-
-    const startSeq = mutationSeqRef.current;
-    isSyncInFlightRef.current = true;
-    setIsSyncingSheet(true);
     try {
-      const applyManualDb = (nextDb: typeof currentDb) => {
-        if (mutationSeqRef.current !== startSeq) {
-          pendingSyncAfterFlightRef.current = true;
-          return false;
-        }
-        dbRef.current = nextDb;
-        setDb(nextDb);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void pushServerSync({
-          clientId: tabInstanceIdRef.current,
-          baseVersion: serverVersionRef.current,
-          mergeFromRemote: true,
-          db: nextDb,
-        }).then((srvRes) => {
-          if (!srvRes || !srvRes.ok) return;
-          if (srvRes.staleRejected) {
-            applyAuthoritativeServerSnapshot(srvRes, 'sync');
-          } else if (!srvRes.unchanged && srvRes.version > serverVersionRef.current) {
-            serverVersionRef.current = srvRes.version;
-          }
-        });
-        return true;
-      };
-
-      let publicFallbackRes: { accessible: boolean; mergedDb: typeof currentDb } | null = null;
-
-      // If gasUrl isn't saved yet but spreadsheetId exists, check public sheet first to read & auto-discover Gas_Web_App_URL
-      if (!targetGasUrl && targetSheetId) {
-        publicFallbackRes = await readPublicGoogleSheet(targetSheetId, currentDb);
-        if (publicFallbackRes.accessible && publicFallbackRes.mergedDb.settings.gasUrl) {
-          targetGasUrl = publicFallbackRes.mergedDb.settings.gasUrl.trim();
-        }
-      }
-
-      if (targetGasUrl) {
-        const workingDb = publicFallbackRes?.accessible ? publicFallbackRes.mergedDb : currentDb;
-        const useAdminSync = isAdminUnlockedRef.current && Boolean(unlockedAdminPinRef.current);
-        const gasRes = useAdminSync
-          ? await syncAdminViaAppsScript(targetGasUrl, unlockedAdminPinRef.current, workingDb)
-          : await syncPublicViaAppsScript(targetGasUrl, workingDb);
-
-        if (gasRes.accessible) {
-          const finalSheetId = targetSheetId || gasRes.mergedDb.settings.spreadsheetId || '';
-          const applied = applyManualDb({
-            ...gasRes.mergedDb,
-            settings: {
-              ...gasRes.mergedDb.settings,
-              spreadsheetId: finalSheetId || undefined,
-              spreadsheetUrl:
-                gasRes.mergedDb.settings.spreadsheetUrl ||
-                (finalSheetId ? `https://docs.google.com/spreadsheets/d/${finalSheetId}/edit` : undefined),
-              gasUrl: targetGasUrl,
-            },
-          });
-          if (applied) {
-            lastSyncedKeyRef.current = `${finalSheetId}|${targetGasUrl}`;
-          }
-
-          if (useAdminSync && 'adminSynced' in gasRes && !gasRes.adminSynced) {
-            const errMsg = 'error' in gasRes ? gasRes.error : undefined;
-            showToast(
-              `ดึงข้อมูลสำเร็จ แต่เขียนทับ Google Sheet ในสิทธิ์ Admin ไม่สำเร็จ: ${errMsg || 'กรุณาตรวจสอบ Code.gs'}`,
-              'error'
-            );
-            return;
-          }
-
-          const syncDetail =
-            gasRes.pushedCount > 0
-              ? ` (บุคลากร ${gasRes.mergedDb.staff.length} คน, ส่งขึ้น ${gasRes.pushedCount} รายการ)`
-              : ` (บุคลากร ${gasRes.mergedDb.staff.length} คน)`;
-          showToast(`ซิงค์ข้อมูลกับ Google Sheet สำเร็จ!${syncDetail}`, 'success');
-          return;
-        }
-      }
-
-      // 2) Passive OAuth fallback ONLY if a valid token already exists (never opens Sign-In popup)
-      const token = await getPassiveGoogleToken();
-      if (token && targetSheetId) {
-        const result = await syncAllWithGoogleSheet(token, targetSheetId, currentDb);
-        const applied = applyManualDb({
-          ...result.mergedDb,
-          settings: {
-            ...result.mergedDb.settings,
-            spreadsheetId: targetSheetId,
-            spreadsheetUrl:
-              result.mergedDb.settings.spreadsheetUrl ||
-              `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-          },
-        });
-        if (applied) {
-          lastSyncedKeyRef.current = `${targetSheetId}|${result.mergedDb.settings.gasUrl || ''}`;
-        }
+      const res = await enqueueSheetOperation(() =>
+        executeSheetSyncNow({ reason: 'manual', overrideSheetId })
+      );
+      if (!res.accessible) {
         showToast(
-          `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${result.staffCount} คน, ส่งขึ้น ${result.pushedWorkloads} / ดึงเข้า ${result.pulledWorkloads} รายการ)`,
-          'success'
+          'ไม่สามารถซิงค์แบบไม่ต้อง Sign in ได้ กรุณาวาง Web App URL (/exec) จาก Code.gs ใน "ตั้งค่าลิงก์ชีท" หรือเปิดสิทธิ์ชีทเป็น "ทุกคนที่มีลิงก์อ่านได้"',
+          'info'
         );
         return;
       }
-
-      // 3) Public GViz read-only sync fallback (ZERO Google Sign-In)
-      if (targetSheetId) {
-        const pubRes = publicFallbackRes || (await readPublicGoogleSheet(targetSheetId, currentDb));
-        if (pubRes.accessible) {
-          const applied = applyManualDb({
-            ...pubRes.mergedDb,
-            settings: {
-              ...pubRes.mergedDb.settings,
-              spreadsheetId: targetSheetId,
-              spreadsheetUrl:
-                pubRes.mergedDb.settings.spreadsheetUrl ||
-                `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-            },
-          });
-          if (applied) {
-            lastSyncedKeyRef.current = `${targetSheetId}|${pubRes.mergedDb.settings.gasUrl || ''}`;
-          }
+      if (res.via === 'gas') {
+        if (res.adminSynced === false) {
           showToast(
-            `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${pubRes.mergedDb.staff.length} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
-            'success'
+            `ดึงข้อมูลสำเร็จ แต่เขียนทับ Google Sheet ในสิทธิ์ Admin ไม่สำเร็จ: ${res.error || 'กรุณาตรวจสอบ Code.gs'}`,
+            'error'
           );
           return;
         }
+        const syncDetail =
+          (res.pushedCount || 0) > 0
+            ? ` (บุคลากร ${res.staffCount || 0} คน, ส่งขึ้น ${res.pushedCount} รายการ)`
+            : ` (บุคลากร ${res.staffCount || 0} คน)`;
+        showToast(`ซิงค์ข้อมูลกับ Google Sheet สำเร็จ!${syncDetail}`, 'success');
+      } else if (res.via === 'oauth') {
+        showToast(
+          `ซิงค์ Google Sheet สำเร็จ! (บุคลากร ${res.staffCount || 0} คน, ส่งขึ้น ${res.pushedCount || 0} / ดึงเข้า ${res.pulledWorkloads || 0} รายการ)`,
+          'success'
+        );
+      } else {
+        showToast(
+          `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${res.staffCount || 0} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
+          'success'
+        );
       }
-
-      showToast(
-        'ไม่สามารถซิงค์แบบไม่ต้อง Sign in ได้ กรุณาวาง Web App URL (/exec) จาก Code.gs ใน "ตั้งค่าลิงก์ชีท" หรือเปิดสิทธิ์ชีทเป็น "ทุกคนที่มีลิงก์อ่านได้"',
-        'info'
-      );
     } catch (err: any) {
       console.error('Sync spreadsheet error:', err);
       showToast(`ซิงค์ข้อมูลไม่สำเร็จ: ${err?.message || err}`, 'error');
-    } finally {
-      isSyncInFlightRef.current = false;
-      setIsSyncingSheet(false);
-      if (pendingSyncAfterFlightRef.current) {
-        pendingSyncAfterFlightRef.current = false;
-        window.setTimeout(() => {
-          performBackgroundSync('edit');
-        }, 100);
-      }
     }
   };
 
@@ -1283,11 +1267,6 @@ export default function App() {
       };
       dbRef.current = nextDb;
       setDb(nextDb);
-      void propagateServerMutation('addWorkloads', {
-        workloads: [entry],
-        leaves: newLeaveEntries,
-        ot: newOtEntries,
-      });
 
       const offStaffSavedCount = getWorkloadOffDutyStaff(entry).length;
       showToast(
@@ -1299,64 +1278,65 @@ export default function App() {
         'success'
       );
 
-      // Auto-Sync on Save (append-only, batched & parallelized) to Google Sheets when Auto-Sync is enabled
-      if (dbRef.current.settings.autoSync === false) return;
-      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+      // Every save runs sequentially through sheetOpQueue: push to Sheet -> sync & refresh Web App + broadcast via WebSocket
+      await enqueueSheetOperation(async () => {
+        await propagateServerMutation('addWorkloads', {
+          workloads: [entry],
+          leaves: newLeaveEntries,
+          ot: newOtEntries,
+        });
 
-      if (targetGasUrl) {
-        const [wOk, lOk, oOk] = await Promise.all([
-          appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
-            if (ok) markWorkloadOutboxSynced([entry]);
-            return ok;
-          }),
-          newLeaveEntries.length > 0
-            ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-                if (ok) markLeaveOutboxSynced(newLeaveEntries);
-                return ok;
-              })
-            : Promise.resolve(true),
-          newOtEntries.length > 0
-            ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-                if (ok) markOtOutboxSynced(newOtEntries);
-                return ok;
-              })
-            : Promise.resolve(true),
-        ]);
-        if (wOk && lOk && oOk) {
-          lastSyncEpochRef.current = Date.now();
-          setLastSyncedAt(formatSyncTime());
-          void performBackgroundSync('edit');
-        } else {
-          showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
-        }
-      } else if (targetSheetId) {
-        const token = await getAccessToken();
-        if (token) {
-          await Promise.all([
-            appendDailyWorkloadToSheet(token, targetSheetId, entry).then((ok) => {
+        const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+        const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+        if (targetGasUrl) {
+          const [wOk, lOk, oOk] = await Promise.all([
+            appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
               if (ok) markWorkloadOutboxSynced([entry]);
+              return ok;
             }),
-            ...newLeaveEntries.map((l) =>
-              appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
-                if (ok) markLeaveOutboxSynced([l]);
-              })
-            ),
-            ...newOtEntries.map((o) =>
-              appendOTToSheet(token, targetSheetId, o).then((ok) => {
-                if (ok) markOtOutboxSynced([o]);
-              })
-            ),
+            newLeaveEntries.length > 0
+              ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+                  if (ok) markLeaveOutboxSynced(newLeaveEntries);
+                  return ok;
+                })
+              : Promise.resolve(true),
+            newOtEntries.length > 0
+              ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+                  if (ok) markOtOutboxSynced(newOtEntries);
+                  return ok;
+                })
+              : Promise.resolve(true),
           ]);
-          lastSyncEpochRef.current = Date.now();
-          setLastSyncedAt(formatSyncTime());
-          void performBackgroundSync('edit');
-        } else {
-          showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          if (!(wOk && lOk && oOk) && !syncRes.accessible) {
+            showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+          }
+        } else if (targetSheetId) {
+          const token = await getAccessToken();
+          if (token) {
+            await Promise.all([
+              appendDailyWorkloadToSheet(token, targetSheetId, entry).then((ok) => {
+                if (ok) markWorkloadOutboxSynced([entry]);
+              }),
+              ...newLeaveEntries.map((l) =>
+                appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+                  if (ok) markLeaveOutboxSynced([l]);
+                })
+              ),
+              ...newOtEntries.map((o) =>
+                appendOTToSheet(token, targetSheetId, o).then((ok) => {
+                  if (ok) markOtOutboxSynced([o]);
+                })
+              ),
+            ]);
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          } else {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          }
         }
-      } else {
-        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
-      }
+      });
     } finally {
       savingWorkloadSlotsRef.current.delete(entrySlotKey);
     }
@@ -1513,11 +1493,6 @@ export default function App() {
       };
       dbRef.current = nextDb;
       setDb(nextDb);
-      void propagateServerMutation('addWorkloads', {
-        workloads: entries,
-        leaves: newLeaveEntries,
-        ot: newOtEntries,
-      });
 
       const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
       const batchOffStaffCount = entries.reduce((sum, e) => sum + getWorkloadOffDutyStaff(e).length, 0);
@@ -1531,63 +1506,64 @@ export default function App() {
         'success'
       );
 
-      if (dbRef.current.settings.autoSync === false) return;
-      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+      await enqueueSheetOperation(async () => {
+        await propagateServerMutation('addWorkloads', {
+          workloads: entries,
+          leaves: newLeaveEntries,
+          ot: newOtEntries,
+        });
 
-      if (targetGasUrl) {
-        const [wOk, lOk, oOk] = await Promise.all([
-          appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
-            if (ok) markWorkloadOutboxSynced(entries);
-            return ok;
-          }),
-          newLeaveEntries.length > 0
-            ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-                if (ok) markLeaveOutboxSynced(newLeaveEntries);
-                return ok;
-              })
-            : Promise.resolve(true),
-          newOtEntries.length > 0
-            ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-                if (ok) markOtOutboxSynced(newOtEntries);
-                return ok;
-              })
-            : Promise.resolve(true),
-        ]);
-        if (wOk && lOk && oOk) {
-          lastSyncEpochRef.current = Date.now();
-          setLastSyncedAt(formatSyncTime());
-          void performBackgroundSync('edit');
-        } else {
-          showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
-        }
-      } else if (targetSheetId) {
-        const token = await getAccessToken();
-        if (token) {
-          await Promise.all([
-            appendDailyWorkloadToSheet(token, targetSheetId, entries).then((ok) => {
+        const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+        const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+        if (targetGasUrl) {
+          const [wOk, lOk, oOk] = await Promise.all([
+            appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
               if (ok) markWorkloadOutboxSynced(entries);
+              return ok;
             }),
-            ...newLeaveEntries.map((l) =>
-              appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
-                if (ok) markLeaveOutboxSynced([l]);
-              })
-            ),
-            ...newOtEntries.map((o) =>
-              appendOTToSheet(token, targetSheetId, o).then((ok) => {
-                if (ok) markOtOutboxSynced([o]);
-              })
-            ),
+            newLeaveEntries.length > 0
+              ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+                  if (ok) markLeaveOutboxSynced(newLeaveEntries);
+                  return ok;
+                })
+              : Promise.resolve(true),
+            newOtEntries.length > 0
+              ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+                  if (ok) markOtOutboxSynced(newOtEntries);
+                  return ok;
+                })
+              : Promise.resolve(true),
           ]);
-          lastSyncEpochRef.current = Date.now();
-          setLastSyncedAt(formatSyncTime());
-          void performBackgroundSync('edit');
-        } else {
-          showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          if (!(wOk && lOk && oOk) && !syncRes.accessible) {
+            showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+          }
+        } else if (targetSheetId) {
+          const token = await getAccessToken();
+          if (token) {
+            await Promise.all([
+              appendDailyWorkloadToSheet(token, targetSheetId, entries).then((ok) => {
+                if (ok) markWorkloadOutboxSynced(entries);
+              }),
+              ...newLeaveEntries.map((l) =>
+                appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+                  if (ok) markLeaveOutboxSynced([l]);
+                })
+              ),
+              ...newOtEntries.map((o) =>
+                appendOTToSheet(token, targetSheetId, o).then((ok) => {
+                  if (ok) markOtOutboxSynced([o]);
+                })
+              ),
+            ]);
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          } else {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          }
         }
-      } else {
-        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
-      }
+      });
     } finally {
       batchSlots.forEach((s) => savingWorkloadSlotsRef.current.delete(s));
     }
@@ -1634,7 +1610,7 @@ export default function App() {
     | { staff: TargetedAdminStaffSpec }
     | { settings: TargetedAdminSettingsSpec };
 
-  // Sequential direct Admin sync queue (always executes regardless of autoSync setting)
+  // Sequential direct Admin sync queue inside unified sheetOpQueue (writes to Sheet -> refreshes Web App & WebSocket viewers)
   const enqueueAdminSync = (
     table: 'workloads' | 'leaves' | 'ot' | 'staff' | 'settings',
     expectedDirtyVersion: number,
@@ -1650,245 +1626,83 @@ export default function App() {
     const targetedSettings =
       targeted && 'settings' in targeted ? targeted.settings : undefined;
 
-    adminWriteQueueRef.current = adminWriteQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        adminWriteInFlightRef.current = true;
-        try {
-          const latestDb = dbRef.current;
-          const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
-          const targetSheetId = (latestDb.settings.spreadsheetId || '').trim();
-          const pin = unlockedAdminPinRef.current;
+    void enqueueSheetOperation(async () => {
+      adminWriteInFlightRef.current = true;
+      try {
+        const latestDb = dbRef.current;
+        const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
+        const targetSheetId = (latestDb.settings.spreadsheetId || '').trim();
+        const pin = unlockedAdminPinRef.current;
 
-          if (targetedSettings && targetedSettings.changedEntries.length === 0) {
-            clearSettingsDirty(expectedDirtyVersion);
-            return;
-          }
+        if (targetedSettings && targetedSettings.changedEntries.length === 0) {
+          clearSettingsDirty(expectedDirtyVersion);
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          return;
+        }
 
-          if (targetGasUrl && pin) {
-            // 1. Targeted single-row Workload / Leave / OT
-            if (
-              targetedRow &&
-              auditEntry &&
-              (table === 'workloads' || table === 'leaves' || table === 'ot')
-            ) {
-              const targetRes = await pushTargetedAdminRowMutationViaAppsScript({
-                gasUrl: targetGasUrl,
-                adminPin: pin,
-                action: targetedRow.action,
-                table,
-                target: targetedRow.target,
-                updated: targetedRow.updated,
-                insertIfMissing: targetedRow.insertIfMissing,
-                db: latestDb,
-                auditEntry,
-                expectedDirtyVersion,
-              });
-
-              const isDeleteAction = targetedRow.action.startsWith('delete');
-              if (
-                targetRes.syncedDb &&
-                mutationSeqRef.current === targetedRow.opSeq &&
-                (targetRes.ok || isDeleteAction)
-              ) {
-                dbRef.current = targetRes.syncedDb;
-                setDb(targetRes.syncedDb);
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-              }
-
-              if (targetRes.ok) {
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-                return;
-              }
-
-              if (targetRes.notFound && isDeleteAction) {
-                showToast(
-                  targetRes.error ||
-                    'รายการนี้ถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
-                  'info'
-                );
-                return;
-              }
-
-              const token = await getAccessToken();
-              if (token && targetSheetId) {
-                const oauthRes = await pushTargetedAdminRowViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  action: targetedRow.action,
-                  table,
-                  target: targetedRow.target,
-                  updated: targetedRow.updated,
-                  insertIfMissing: targetedRow.insertIfMissing,
-                  auditEntry,
-                  expectedDirtyVersion,
-                });
-                if (oauthRes.ok) {
-                  lastSyncEpochRef.current = Date.now();
-                  setLastSyncedAt(formatSyncTime());
-                  return;
-                }
-              }
-
-              if (auditEntry) {
-                await recordAuditToSheet(auditEntry);
-              }
-              showToast(
-                `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${targetRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
-                'error'
-              );
-              return;
-            }
-
-            // 2. Targeted single-row Staff_Master
-            if (table === 'staff' && targetedStaff) {
-              const staffRes = await pushTargetedAdminStaffMutationViaAppsScript({
-                gasUrl: targetGasUrl,
-                adminPin: pin,
-                action: targetedStaff.action,
-                target: targetedStaff.target,
-                updated: targetedStaff.updated,
-                previousStaffId: targetedStaff.previousStaffId,
-                propagateOt: targetedStaff.propagateOt,
-                insertIfMissing: targetedStaff.insertIfMissing,
-                db: latestDb,
-                auditEntry,
-                expectedDirtyVersion,
-                expectedOtDirtyVersion: targetedStaff.otDirtyVer,
-              });
-
-              if (staffRes.syncedDb && mutationSeqRef.current === targetedStaff.opSeq) {
-                dbRef.current = staffRes.syncedDb;
-                setDb(staffRes.syncedDb);
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-              }
-
-              if (staffRes.ok) {
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-                return;
-              }
-
-              if (staffRes.notFound) {
-                showToast(
-                  staffRes.error || 'ไม่พบรายชื่อบุคลากรเดิมใน Google Sheets ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
-                  'info'
-                );
-                return;
-              }
-
-              const token = await getAccessToken();
-              if (token && targetSheetId) {
-                const oauthRes = await pushTargetedStaffViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  action: targetedStaff.action,
-                  target: targetedStaff.target,
-                  updated: targetedStaff.updated,
-                  previousStaffId: targetedStaff.previousStaffId,
-                  propagateOt: targetedStaff.propagateOt,
-                  insertIfMissing: targetedStaff.insertIfMissing,
-                  auditEntry,
-                  expectedDirtyVersion,
-                  expectedOtDirtyVersion: targetedStaff.otDirtyVer,
-                });
-                if (oauthRes.ok) {
-                  lastSyncEpochRef.current = Date.now();
-                  setLastSyncedAt(formatSyncTime());
-                  return;
-                }
-              }
-
-              showToast(
-                `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${staffRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
-                'error'
-              );
-              return;
-            }
-
-            // 3. Targeted Settings key-only updates
-            if (table === 'settings' && targetedSettings) {
-              const settingsRes = await pushTargetedSettingsKeysViaAppsScript({
-                gasUrl: targetGasUrl,
-                adminPin: pin,
-                changedEntries: targetedSettings.changedEntries,
-                db: latestDb,
-                auditEntry,
-                expectedDirtyVersion,
-              });
-
-              if (settingsRes.syncedDb && mutationSeqRef.current === targetedSettings.opSeq) {
-                dbRef.current = settingsRes.syncedDb;
-                setDb(settingsRes.syncedDb);
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-              }
-
-              if (settingsRes.ok) {
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
-                return;
-              }
-
-              const token = await getAccessToken();
-              if (token && targetSheetId) {
-                const oauthRes = await pushTargetedSettingsKeysViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  changedEntries: targetedSettings.changedEntries,
-                  auditEntry,
-                  expectedDirtyVersion,
-                });
-                if (oauthRes.ok) {
-                  lastSyncEpochRef.current = Date.now();
-                  setLastSyncedAt(formatSyncTime());
-                  return;
-                }
-              }
-
-              showToast(
-                `บันทึกการตั้งค่าแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${settingsRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
-                'error'
-              );
-              return;
-            }
-
-            // Fallback generic table push if called without targeted descriptor
-            const gasRes = await pushAdminTableViaAppsScript({
+        if (targetGasUrl && pin) {
+          // 1. Targeted single-row Workload / Leave / OT
+          if (
+            targetedRow &&
+            auditEntry &&
+            (table === 'workloads' || table === 'leaves' || table === 'ot')
+          ) {
+            const targetRes = await pushTargetedAdminRowMutationViaAppsScript({
               gasUrl: targetGasUrl,
               adminPin: pin,
+              action: targetedRow.action,
               table,
+              target: targetedRow.target,
+              updated: targetedRow.updated,
+              insertIfMissing: targetedRow.insertIfMissing,
               db: latestDb,
               auditEntry,
               expectedDirtyVersion,
             });
-            if (gasRes.ok) {
+
+            const isDeleteAction = targetedRow.action.startsWith('delete');
+            if (
+              targetRes.syncedDb &&
+              mutationSeqRef.current === targetedRow.opSeq &&
+              (targetRes.ok || isDeleteAction)
+            ) {
+              dbRef.current = targetRes.syncedDb;
+              setDb(targetRes.syncedDb);
               lastSyncEpochRef.current = Date.now();
               setLastSyncedAt(formatSyncTime());
-              if (dbRef.current.settings.autoSync !== false) {
-                window.setTimeout(() => {
-                  void performBackgroundSync('edit');
-                }, 0);
-              }
+              await broadcastSyncedSnapshot(targetRes.syncedDb);
+            }
+
+            if (targetRes.ok) {
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              return;
+            }
+
+            if (targetRes.notFound && isDeleteAction) {
+              showToast(
+                targetRes.error ||
+                  'รายการนี้ถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
+                'info'
+              );
               return;
             }
 
             const token = await getAccessToken();
             if (token && targetSheetId) {
-              const oauthRes = await pushAdminTableViaOAuth({
+              const oauthRes = await pushTargetedAdminRowViaOAuth({
                 accessToken: token,
                 spreadsheetId: targetSheetId,
+                action: targetedRow.action,
                 table,
-                db: latestDb,
+                target: targetedRow.target,
+                updated: targetedRow.updated,
+                insertIfMissing: targetedRow.insertIfMissing,
                 auditEntry,
                 expectedDirtyVersion,
               });
               if (oauthRes.ok) {
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
+                await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
                 return;
               }
             }
@@ -1897,66 +1711,152 @@ export default function App() {
               await recordAuditToSheet(auditEntry);
             }
             showToast(
-              `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${gasRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+              `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${targetRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
               'error'
             );
             return;
           }
 
-          if (targetSheetId) {
+          // 2. Targeted single-row Staff_Master
+          if (table === 'staff' && targetedStaff) {
+            const staffRes = await pushTargetedAdminStaffMutationViaAppsScript({
+              gasUrl: targetGasUrl,
+              adminPin: pin,
+              action: targetedStaff.action,
+              target: targetedStaff.target,
+              updated: targetedStaff.updated,
+              previousStaffId: targetedStaff.previousStaffId,
+              propagateOt: targetedStaff.propagateOt,
+              insertIfMissing: targetedStaff.insertIfMissing,
+              db: latestDb,
+              auditEntry,
+              expectedDirtyVersion,
+              expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+            });
+
+            if (staffRes.syncedDb && mutationSeqRef.current === targetedStaff.opSeq) {
+              dbRef.current = staffRes.syncedDb;
+              setDb(staffRes.syncedDb);
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              await broadcastSyncedSnapshot(staffRes.syncedDb);
+            }
+
+            if (staffRes.ok) {
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              return;
+            }
+
+            if (staffRes.notFound) {
+              showToast(
+                staffRes.error || 'ไม่พบรายชื่อบุคลากรเดิมใน Google Sheets ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
+                'info'
+              );
+              return;
+            }
+
             const token = await getAccessToken();
-            if (token) {
-              let oauthRes: { ok: boolean; error?: string };
-              if (targetedRow && (table === 'workloads' || table === 'leaves' || table === 'ot')) {
-                oauthRes = await pushTargetedAdminRowViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  action: targetedRow.action,
-                  table,
-                  target: targetedRow.target,
-                  updated: targetedRow.updated,
-                  insertIfMissing: targetedRow.insertIfMissing,
-                  auditEntry,
-                  expectedDirtyVersion,
-                });
-              } else if (table === 'staff' && targetedStaff) {
-                oauthRes = await pushTargetedStaffViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  action: targetedStaff.action,
-                  target: targetedStaff.target,
-                  updated: targetedStaff.updated,
-                  previousStaffId: targetedStaff.previousStaffId,
-                  propagateOt: targetedStaff.propagateOt,
-                  insertIfMissing: targetedStaff.insertIfMissing,
-                  auditEntry,
-                  expectedDirtyVersion,
-                  expectedOtDirtyVersion: targetedStaff.otDirtyVer,
-                });
-              } else if (table === 'settings' && targetedSettings) {
-                oauthRes = await pushTargetedSettingsKeysViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  changedEntries: targetedSettings.changedEntries,
-                  auditEntry,
-                  expectedDirtyVersion,
-                });
-              } else {
-                oauthRes = await pushAdminTableViaOAuth({
-                  accessToken: token,
-                  spreadsheetId: targetSheetId,
-                  table,
-                  db: latestDb,
-                  auditEntry,
-                  expectedDirtyVersion,
-                });
-              }
+            if (token && targetSheetId) {
+              const oauthRes = await pushTargetedStaffViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                action: targetedStaff.action,
+                target: targetedStaff.target,
+                updated: targetedStaff.updated,
+                previousStaffId: targetedStaff.previousStaffId,
+                propagateOt: targetedStaff.propagateOt,
+                insertIfMissing: targetedStaff.insertIfMissing,
+                auditEntry,
+                expectedDirtyVersion,
+                expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+              });
               if (oauthRes.ok) {
-                lastSyncEpochRef.current = Date.now();
-                setLastSyncedAt(formatSyncTime());
+                await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
                 return;
               }
-              showToast(`บันทึกทับ Google Sheet ไม่สำเร็จ: ${oauthRes.error || 'OAuth error'}`, 'error');
+            }
+
+            showToast(
+              `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${staffRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+              'error'
+            );
+            return;
+          }
+
+          // 3. Targeted Settings key-only updates
+          if (table === 'settings' && targetedSettings) {
+            const settingsRes = await pushTargetedSettingsKeysViaAppsScript({
+              gasUrl: targetGasUrl,
+              adminPin: pin,
+              changedEntries: targetedSettings.changedEntries,
+              db: latestDb,
+              auditEntry,
+              expectedDirtyVersion,
+            });
+
+            if (settingsRes.syncedDb && mutationSeqRef.current === targetedSettings.opSeq) {
+              dbRef.current = settingsRes.syncedDb;
+              setDb(settingsRes.syncedDb);
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              await broadcastSyncedSnapshot(settingsRes.syncedDb);
+            }
+
+            if (settingsRes.ok) {
+              lastSyncEpochRef.current = Date.now();
+              setLastSyncedAt(formatSyncTime());
+              return;
+            }
+
+            const token = await getAccessToken();
+            if (token && targetSheetId) {
+              const oauthRes = await pushTargetedSettingsKeysViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                changedEntries: targetedSettings.changedEntries,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+              if (oauthRes.ok) {
+                await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+                return;
+              }
+            }
+
+            showToast(
+              `บันทึกการตั้งค่าแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${settingsRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+              'error'
+            );
+            return;
+          }
+
+          // Fallback generic table push if called without targeted descriptor
+          const gasRes = await pushAdminTableViaAppsScript({
+            gasUrl: targetGasUrl,
+            adminPin: pin,
+            table,
+            db: latestDb,
+            auditEntry,
+            expectedDirtyVersion,
+          });
+          if (gasRes.ok) {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            return;
+          }
+
+          const token = await getAccessToken();
+          if (token && targetSheetId) {
+            const oauthRes = await pushAdminTableViaOAuth({
+              accessToken: token,
+              spreadsheetId: targetSheetId,
+              table,
+              db: latestDb,
+              auditEntry,
+              expectedDirtyVersion,
+            });
+            if (oauthRes.ok) {
+              await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
               return;
             }
           }
@@ -1964,10 +1864,77 @@ export default function App() {
           if (auditEntry) {
             await recordAuditToSheet(auditEntry);
           }
-        } finally {
-          adminWriteInFlightRef.current = false;
+          showToast(
+            `บันทึกในหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${gasRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+            'error'
+          );
+          return;
         }
-      });
+
+        if (targetSheetId) {
+          const token = await getAccessToken();
+          if (token) {
+            let oauthRes: { ok: boolean; error?: string };
+            if (targetedRow && (table === 'workloads' || table === 'leaves' || table === 'ot')) {
+              oauthRes = await pushTargetedAdminRowViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                action: targetedRow.action,
+                table,
+                target: targetedRow.target,
+                updated: targetedRow.updated,
+                insertIfMissing: targetedRow.insertIfMissing,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+            } else if (table === 'staff' && targetedStaff) {
+              oauthRes = await pushTargetedStaffViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                action: targetedStaff.action,
+                target: targetedStaff.target,
+                updated: targetedStaff.updated,
+                previousStaffId: targetedStaff.previousStaffId,
+                propagateOt: targetedStaff.propagateOt,
+                insertIfMissing: targetedStaff.insertIfMissing,
+                auditEntry,
+                expectedDirtyVersion,
+                expectedOtDirtyVersion: targetedStaff.otDirtyVer,
+              });
+            } else if (table === 'settings' && targetedSettings) {
+              oauthRes = await pushTargetedSettingsKeysViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                changedEntries: targetedSettings.changedEntries,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+            } else {
+              oauthRes = await pushAdminTableViaOAuth({
+                accessToken: token,
+                spreadsheetId: targetSheetId,
+                table,
+                db: latestDb,
+                auditEntry,
+                expectedDirtyVersion,
+              });
+            }
+            if (oauthRes.ok) {
+              await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+              return;
+            }
+            showToast(`บันทึกทับ Google Sheet ไม่สำเร็จ: ${oauthRes.error || 'OAuth error'}`, 'error');
+            return;
+          }
+        }
+
+        if (auditEntry) {
+          await recordAuditToSheet(auditEntry);
+        }
+      } finally {
+        adminWriteInFlightRef.current = false;
+      }
+    });
   };
 
   // Handler: Update Daily Workload (Admin, mandatory reason + timestamp)
@@ -2173,37 +2140,33 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    void propagateServerMutation('addLeave', { leave });
     showToast(`บันทึกวันลา ${leave.staffName} สำเร็จ!`, 'success');
 
-    if (dbRef.current.settings.autoSync === false) return;
-    const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+    await enqueueSheetOperation(async () => {
+      await propagateServerMutation('addLeave', { leave });
 
-    if (targetGasUrl) {
-      const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', leave);
-      if (ok) {
-        markLeaveOutboxSynced([leave]);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกวันลาในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
-      }
-    } else if (targetSheetId) {
-      const token = await getAccessToken();
-      if (token) {
-        const ok = await appendLeaveToSheet(token, targetSheetId, leave);
+      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+      if (targetGasUrl) {
+        const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', leave);
         if (ok) markLeaveOutboxSynced([leave]);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+        if (!ok && !syncRes.accessible) {
+          showToast('บันทึกวันลาในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+        }
+      } else if (targetSheetId) {
+        const token = await getAccessToken();
+        if (token) {
+          const ok = await appendLeaveToSheet(token, targetSheetId, leave);
+          if (ok) markLeaveOutboxSynced([leave]);
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+        } else {
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        }
       }
-    } else {
-      showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
-    }
+    });
   };
 
   // Handler: Update Leave (Admin, mandatory reason + timestamp)
@@ -2389,42 +2352,38 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
-    void propagateServerMutation('addOt', { records: validRecords });
     showToast(`บันทึกเวรนอกเวลาจำนวน ${validRecords.length} คน เรียบร้อยแล้ว!`, 'success');
 
-    if (dbRef.current.settings.autoSync === false) return;
-    const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+    await enqueueSheetOperation(async () => {
+      await propagateServerMutation('addOt', { records: validRecords });
 
-    if (targetGasUrl) {
-      const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', validRecords);
-      if (ok) {
-        markOtOutboxSynced(validRecords);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกเวร OT ในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
+      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+      if (targetGasUrl) {
+        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', validRecords);
+        if (ok) markOtOutboxSynced(validRecords);
+        const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+        if (!ok && !syncRes.accessible) {
+          showToast('บันทึกเวร OT ในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+        }
+      } else if (targetSheetId) {
+        const token = await getAccessToken();
+        if (token) {
+          await Promise.all(
+            validRecords.map((r) =>
+              appendOTToSheet(token, targetSheetId, r).then((ok) => {
+                if (ok) markOtOutboxSynced([r]);
+              })
+            )
+          );
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+        } else {
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        }
       }
-    } else if (targetSheetId) {
-      const token = await getAccessToken();
-      if (token) {
-        await Promise.all(
-          validRecords.map((r) =>
-            appendOTToSheet(token, targetSheetId, r).then((ok) => {
-              if (ok) markOtOutboxSynced([r]);
-            })
-          )
-        );
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
-      }
-    } else {
-      showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
-    }
+    });
   };
 
   // Handler: Update OT (Admin, mandatory reason + timestamp)
@@ -2884,13 +2843,13 @@ export default function App() {
     });
     showToast(
       enabled
-        ? 'เปิดใช้งาน Auto ซิงค์ทุกครั้งที่กดบันทึกแล้ว'
-        : 'ปิดโหมด Auto ซิงค์ชั่วคราว (สามารถกดปุ่มซิงค์เองได้)',
+        ? 'เปิดซิงค์อัตโนมัติเมื่อเปิดหน้าต่าง/สลับเมนูแล้ว (ทุกการกดบันทึกจะซิงค์ทันทีเสมอ)'
+        : 'ปิดการซิงค์อัตโนมัติเมื่อสลับหน้าต่างแล้ว (ทุกการกดบันทึกยังซิงค์ขึ้นชีททันที)',
       'info'
     );
   };
 
-  // Handler: Save Unit Cost Center (allowed for general OPD staff from Menu 2 & persists locally + GAS)
+  // Handler: Save Unit Cost Center (allowed for general OPD staff from Menu 2 & persists locally + GAS + refreshes latest Sheet state)
   const handleSaveUnitCostCenter = async (
     clinic: string,
     costCenter: string
@@ -2938,43 +2897,45 @@ export default function App() {
     const nextDb: AppDatabase = { ...baseDb, settings: nextSettings };
     dbRef.current = nextDb;
     setDb(nextDb);
-    void propagateServerMutation('saveUnitCostCenter', {
-      clinic: cleanClinic,
-      costCenter: cleanCostCenter,
-    });
 
-    const gasUrl = (baseDb.settings.gasUrl || '').trim();
-    if (gasUrl) {
-      const res = await saveUnitCostCenterViaAppsScript({
-        gasUrl,
+    return enqueueSheetOperation(async () => {
+      await propagateServerMutation('saveUnitCostCenter', {
         clinic: cleanClinic,
         costCenter: cleanCostCenter,
       });
-      if (res.ok) {
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
+
+      const gasUrl = (dbRef.current.settings.gasUrl || '').trim();
+      if (gasUrl) {
+        const res = await saveUnitCostCenterViaAppsScript({
+          gasUrl,
+          clinic: cleanClinic,
+          costCenter: cleanCostCenter,
+        });
+        if (res.ok) {
+          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          showToast(
+            cleanCostCenter
+              ? `บันทึก Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} แล้ว`
+              : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
+            'success'
+          );
+          return { ok: true };
+        }
         showToast(
-          cleanCostCenter
-            ? `บันทึก Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} แล้ว`
-            : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
-          'success'
+          `จำค่า Cost Center บนเครื่องแล้ว แต่ซิงค์ไปยัง Google Sheets ไม่สำเร็จ (${res.error || 'ตรวจสอบ Code.gs ล่าสุด'})`,
+          'info'
         );
         return { ok: true };
       }
+
       showToast(
-        `จำค่า Cost Center บนเครื่องแล้ว แต่ซิงค์ไปยัง Google Sheets ไม่สำเร็จ (${res.error || 'ตรวจสอบ Code.gs ล่าสุด'})`,
-        'info'
+        cleanCostCenter
+          ? `จำค่า Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} เรียบร้อยแล้ว`
+          : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
+        'success'
       );
       return { ok: true };
-    }
-
-    showToast(
-      cleanCostCenter
-        ? `จำค่า Cost Center "${cleanCostCenter}" สำหรับ ${cleanClinic === 'ALL' ? 'ทุกห้องตรวจ OPD' : cleanClinic} เรียบร้อยแล้ว`
-        : `ล้างค่า Cost Center เฉพาะของ ${cleanClinic} แล้ว`,
-      'success'
-    );
-    return { ok: true };
+    });
   };
 
   // Handler: Configure LINE Group Daily Report Automation (Multi-Group + Multi-Schedule + .JPEG)
@@ -3373,6 +3334,15 @@ export default function App() {
       return { ok: false, error: err };
     }
 
+    const LINE_QUOTA_PAUSED_MONTH_KEY = 'pcmc_line_quota_paused_month_v1';
+    const bkkNowMonth = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+    })
+      .format(new Date())
+      .slice(0, 7);
+
     // 1. Try server-side LINE Messaging API proxy first (uses .env token securely)
     const proxyRes = await sendLineMessageViaServerProxy({
       targetId: resolvedTargetId,
@@ -3401,6 +3371,11 @@ export default function App() {
       void propagateServerMutation('saveSettings', { settings: updatedDb.settings });
 
       if (proxyRes.ok) {
+        try {
+          localStorage.removeItem(LINE_QUOTA_PAUSED_MONTH_KEY);
+        } catch {
+          // ignore
+        }
         const formatSuffix =
           resolvedSendFormat === 'IMAGE_ONLY'
             ? ' (เฉพาะภาพตาราง .JPEG)'
@@ -3416,6 +3391,13 @@ export default function App() {
           'success'
         );
         return { ok: true };
+      }
+      if (proxyRes.quotaExceeded) {
+        try {
+          localStorage.setItem(LINE_QUOTA_PAUSED_MONTH_KEY, bkkNowMonth);
+        } catch {
+          // ignore
+        }
       }
       const errMsg = proxyRes.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ';
       showToast(errMsg, 'error');
@@ -3450,6 +3432,11 @@ export default function App() {
     }
 
     if (res.ok) {
+      try {
+        localStorage.removeItem(LINE_QUOTA_PAUSED_MONTH_KEY);
+      } catch {
+        // ignore
+      }
       const gasSuffix =
         resolvedSendFormat === 'IMAGE_ONLY'
           ? ' (เฉพาะภาพตาราง .JPEG)'
@@ -3464,6 +3451,13 @@ export default function App() {
         'success'
       );
       return { ok: true };
+    }
+    if (res.quotaExceeded) {
+      try {
+        localStorage.setItem(LINE_QUOTA_PAUSED_MONTH_KEY, bkkNowMonth);
+      } catch {
+        // ignore
+      }
     }
     const gasErr = res.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ';
     showToast(gasErr, 'error');
@@ -3491,7 +3485,17 @@ export default function App() {
       const parts = Object.fromEntries(fmt.formatToParts(new Date()).map((p) => [p.type, p.value]));
       const bkkHour = parts.hour === '24' ? '00' : parts.hour;
       const bkkYmd = `${parts.year}-${parts.month}-${parts.day}`;
+      const bkkMonth = `${parts.year}-${parts.month}`;
       const nowMins = Number(bkkHour) * 60 + Number(parts.minute);
+
+      const LINE_QUOTA_PAUSED_MONTH_KEY = 'pcmc_line_quota_paused_month_v1';
+      try {
+        if (localStorage.getItem(LINE_QUOTA_PAUSED_MONTH_KEY) === bkkMonth) {
+          return;
+        }
+      } catch {
+        // ignore
+      }
 
       const schedules =
         st.lineSchedules && st.lineSchedules.length > 0
@@ -3579,6 +3583,14 @@ export default function App() {
             serverClaimAvailable = true;
             const claimJson = await claimRes.json();
             if (!claimJson?.claimed) {
+              if (claimJson?.quotaPaused) {
+                try {
+                  localStorage.setItem(LINE_QUOTA_PAUSED_MONTH_KEY, bkkMonth);
+                } catch {
+                  // ignore
+                }
+                break;
+              }
               if (claimJson?.alreadyCompleted) {
                 dedupeMap[dedupeKey] = new Date().toISOString();
                 try {
@@ -3644,6 +3656,7 @@ export default function App() {
         let sentViaGas = false;
         let alreadySentWithImageOnGas = false;
         let sentOk = false;
+        let quotaExceeded = false;
 
         if (gasUrl) {
           try {
@@ -3671,7 +3684,10 @@ export default function App() {
             });
             if (gasRes.ok) {
               const gasJson = await gasRes.json();
-              if (gasJson?.alreadySentWithImage) {
+              const gasErr = String(gasJson?.error || '');
+              if (gasJson?.quotaExceeded || /429|monthly limit|โควต้าส่งข้อความ Push รายเดือน/i.test(gasErr)) {
+                quotaExceeded = true;
+              } else if (gasJson?.alreadySentWithImage) {
                 alreadySentWithImageOnGas = true;
               } else if (gasJson?.success && !gasJson?.skipped) {
                 sentViaGas = true;
@@ -3686,7 +3702,7 @@ export default function App() {
           }
         }
 
-        if (!sentViaGas && !alreadySentWithImageOnGas) {
+        if (!sentViaGas && !alreadySentWithImageOnGas && !quotaExceeded) {
           const proxyRes = await sendLineMessageViaServerProxy({
             targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
             targetIds,
@@ -3696,6 +3712,16 @@ export default function App() {
           });
           if (proxyRes.ok) {
             sentOk = true;
+          } else if (proxyRes.quotaExceeded) {
+            quotaExceeded = true;
+          }
+        }
+
+        if (quotaExceeded) {
+          try {
+            localStorage.setItem(LINE_QUOTA_PAUSED_MONTH_KEY, bkkMonth);
+          } catch {
+            // ignore
           }
         }
 
@@ -3711,8 +3737,13 @@ export default function App() {
                 ymd: bkkYmd,
                 claimToken,
                 ok: sentOk || alreadySentWithImageOnGas,
+                quotaExceeded,
                 sentWithImage: Boolean((sentOk && (imageUrl || renderedBase64)) || alreadySentWithImageOnGas),
-                statusText: sentOk ? `ส่งรายงานอัตโนมัติ (${sch.label || schTime}) สำเร็จ` : undefined,
+                statusText: sentOk
+                  ? `ส่งรายงานอัตโนมัติ (${sch.label || schTime}) สำเร็จ`
+                  : quotaExceeded
+                  ? 'โควต้าส่งข้อความ Push รายเดือน LINE OA เต็มแล้ว (HTTP 429) — พักการส่งอัตโนมัติในเดือนนี้'
+                  : undefined,
               }),
             });
           } catch {
@@ -3720,8 +3751,8 @@ export default function App() {
           }
         }
 
-        // Only lock local dedupe key after confirmed delivery (or confirmed prior image send) so transient errors auto-retry
-        if (sentOk || alreadySentWithImageOnGas) {
+        // Lock local dedupe key after confirmed delivery OR monthly quota pause so it never loops every 30s
+        if (sentOk || alreadySentWithImageOnGas || quotaExceeded) {
           dedupeMap[dedupeKey] = new Date().toISOString();
           try {
             localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
@@ -3729,6 +3760,7 @@ export default function App() {
             // ignore
           }
         }
+        if (quotaExceeded) break;
       }
     } finally {
       lineAutoCheckInFlightRef.current = false;

@@ -5314,6 +5314,11 @@ export interface LineAutomationStatusInfo {
   lastSentAt?: string;
   lastSentReportDate?: string;
   lastStatus?: string;
+  quotaType?: string;
+  quotaLimit?: number | null;
+  quotaUsed?: number | null;
+  quotaRemaining?: number | null;
+  quotaPausedMonth?: string;
 }
 
 export interface LineServerStatusInfo {
@@ -5334,6 +5339,11 @@ export interface LineServerStatusInfo {
   lastStatus: string;
   detectedGroupId?: string;
   detectedGroupName?: string;
+  quotaType?: string;
+  quotaLimit?: number | null;
+  quotaUsed?: number | null;
+  quotaRemaining?: number | null;
+  quotaPausedMonth?: string;
 }
 
 export const fetchServerLineStatus = async (
@@ -5367,6 +5377,7 @@ export const sendLineMessageViaServerProxy = async (params: {
 }): Promise<{
   available: boolean;
   ok: boolean;
+  quotaExceeded?: boolean;
   statusText?: string;
   sentAt?: string;
   groupName?: string;
@@ -5391,9 +5402,15 @@ export const sendLineMessageViaServerProxy = async (params: {
       return { available: false, ok: false };
     }
     const data = await res.json();
+    const errStr = typeof data?.error === 'string' ? data.error : '';
+    const quotaExceeded =
+      Boolean(data?.quotaExceeded) ||
+      res.status === 429 ||
+      /429|monthly limit|โควต้าส่งข้อความ Push รายเดือน/i.test(errStr);
     return {
       available: true,
       ok: Boolean(res.ok && data?.ok),
+      quotaExceeded,
       statusText: data?.statusText,
       sentAt: data?.sentAt,
       groupName: data?.groupName,
@@ -5627,6 +5644,7 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
   db: AppDatabase;
 }): Promise<{
   ok: boolean;
+  quotaExceeded?: boolean;
   error?: string;
   statusText?: string;
   sentAt?: string;
@@ -5693,9 +5711,14 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
       : undefined;
 
     if (!data || data.success === false) {
+      const errStr = String(data?.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ');
+      const quotaExceeded =
+        Boolean(data?.quotaExceeded) ||
+        /429|monthly limit|โควต้าส่งข้อความ Push รายเดือน/i.test(errStr);
       return {
         ok: false,
-        error: String(data?.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ'),
+        quotaExceeded,
+        error: errStr,
         statusText: data?.statusText,
         syncedDb: merged,
       };
@@ -5765,6 +5788,11 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
         lastSentAt: String(data.lastSentAt || ''),
         lastSentReportDate: String(data.lastSentReportDate || ''),
         lastStatus: String(data.lastStatus || ''),
+        quotaType: typeof data.quotaType === 'string' ? data.quotaType : undefined,
+        quotaLimit: typeof data.quotaLimit === 'number' ? data.quotaLimit : null,
+        quotaUsed: typeof data.quotaUsed === 'number' ? data.quotaUsed : null,
+        quotaRemaining: typeof data.quotaRemaining === 'number' ? data.quotaRemaining : null,
+        quotaPausedMonth: typeof data.quotaPausedMonth === 'string' ? data.quotaPausedMonth : undefined,
       },
     };
   } catch (err: any) {
