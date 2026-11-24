@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   DailyWorkload, 
   StaffMember,
@@ -18,6 +18,8 @@ import {
   isPremiumPoolClinicName,
   isPremiumWorkloadRecord,
   normalizeWorkloadRecord,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
   isTrainingLeaveType,
   parseLeavePeriodFromNote,
   stripLeavePeriodFromNote,
@@ -39,6 +41,13 @@ import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate, getLocalCurrentMonthIso } from '../utils/thaiDate';
 import { getHolidaysForYear } from '../utils/thaiHolidays';
 import { exportElementAsJpeg } from '../utils/exportImage';
+import {
+  OPHTHALMOLOGY_CLINIC_NAME,
+  EyeNaMappingMode,
+  isOphthalmologyOutTimeRecord,
+  computeEyeOutTimeRow,
+  summarizeEyeOutTimeRows,
+} from '../utils/ophthalmologyOutTime';
 import { 
   BarChart3, 
   PieChart, 
@@ -62,7 +71,9 @@ import {
   GraduationCap,
   ArrowRightLeft,
   Users,
-  PauseCircle
+  PauseCircle,
+  Eye,
+  Download
 } from 'lucide-react';
 
 interface ProductivityTabProps {
@@ -96,7 +107,11 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [excludeReferral, setExcludeReferral] = useState<boolean>(false);
   const [showAllVerificationDays, setShowAllVerificationDays] = useState<boolean>(false);
   const [isExportingJpeg, setIsExportingJpeg] = useState<boolean>(false);
+  const [eyeNaMappingMode, setEyeNaMappingMode] = useState<EyeNaMappingMode>('auto');
+  const [includeEyeInPrint, setIncludeEyeInPrint] = useState<boolean>(true);
+  const [isExportingEyeJpeg, setIsExportingEyeJpeg] = useState<boolean>(false);
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
+  const eyeReportSheetRef = useRef<HTMLDivElement | null>(null);
 
   // Combine unique clinics list (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at top)
   const allClinicsList = useMemo(() => {
@@ -104,6 +119,17 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       c => c !== PREMIUM_CLINIC_GROUP && c !== LEGACY_PREMIUM_CLINIC_GROUP
     );
   }, [inTimeClinics, outTimeClinics]);
+
+  useEffect(() => {
+    if (
+      selectedClinic !== 'ALL' &&
+      selectedClinic !== PREMIUM_CLINIC_GROUP &&
+      allClinicsList.length > 0 &&
+      !allClinicsList.includes(selectedClinic)
+    ) {
+      setSelectedClinic('ALL');
+    }
+  }, [allClinicsList, selectedClinic]);
 
   // Filter workloads matching month, shift, clinic, and LASIK rule
   const filteredWorkloads = useMemo(() => {
@@ -1290,6 +1316,147 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     }
   };
 
+  // Ophthalmology Out-of-Hours Productivity (STRICTLY for จักษุวิทยา + นอกเวลาราชการ, cost ÷ 150)
+  const ophthalmologyOutTimeData = useMemo(() => {
+    const shiftNorm = normalizeWorkloadShiftStr(selectedShift);
+    const isInTimeOnly = shiftNorm === 'ในเวลา 08:00-16:00';
+    const isEyeClinicScope = selectedClinic === OPHTHALMOLOGY_CLINIC_NAME || selectedClinic === 'ALL';
+
+    const rows =
+      isInTimeOnly || !isEyeClinicScope
+        ? []
+        : workloads
+            .filter((w) => {
+              if (!isOphthalmologyOutTimeRecord(w)) return false;
+              const isoDate = normalizeWorkloadDateStr(w.date);
+              if (!isoDate.startsWith(selectedMonth)) return false;
+              if (shiftNorm !== 'ALL') {
+                return normalizeWorkloadShiftStr(w.shift) === shiftNorm;
+              }
+              return true;
+            })
+            .sort((a, b) => {
+              const da = normalizeWorkloadDateStr(a.date);
+              const db = normalizeWorkloadDateStr(b.date);
+              if (da !== db) return da.localeCompare(db);
+              return a.shift.localeCompare(b.shift, 'th');
+            })
+            .map((w) => computeEyeOutTimeRow(w, eyeNaMappingMode));
+
+    const summary = summarizeEyeOutTimeRows(rows);
+    const showPanel =
+      !isInTimeOnly &&
+      isEyeClinicScope &&
+      (selectedClinic === OPHTHALMOLOGY_CLINIC_NAME || rows.length > 0);
+
+    const hasAnyNa = rows.some((r) => r.rawNa > 0);
+    const showExtraNaColumn = rows.some((r) => r.extraNaCount > 0);
+    const [yrStr, moStr] = selectedMonth.split('-');
+    const yr = Number(yrStr) || new Date().getFullYear();
+    const mo = Number(moStr) || new Date().getMonth() + 1;
+    const thaiMonthTitle = `${THAI_MONTHS[Math.max(0, Math.min(11, mo - 1))] || ''} พ.ศ. ${yr + 543}`;
+
+    return {
+      showPanel,
+      isInTimeOnly,
+      thaiMonthTitle,
+      rows,
+      summary,
+      hasAnyNa,
+      showExtraNaColumn,
+    };
+  }, [workloads, selectedMonth, selectedShift, selectedClinic, eyeNaMappingMode]);
+
+  const handleExportEyeCsv = () => {
+    const headers = [
+      'วัน',
+      'วันที่',
+      'กะเวลา',
+      'เวลาเข้า',
+      'เวลาออก',
+      'ผู้รับบริการ (คน)',
+      'พยาบาล (600)',
+      'PN (380)',
+      'Technician (300)',
+      ...(ophthalmologyOutTimeData.showExtraNaColumn ? ['NA (380)'] : []),
+      'พนง.บริการ (300)',
+      'รายจ่ายรวม (บาท)',
+      'ควรรับขั้นต่ำ (รายจ่าย÷150)',
+      'เทียบเกณฑ์ (คน)',
+      'Productivity (%)',
+      'ต้นทุนต่อราย (บาท)',
+      'หมายเหตุ',
+    ];
+    const bodyRows = ophthalmologyOutTimeData.rows.map((r) => [
+      r.dayAbbrev,
+      r.shortDate,
+      r.record.shift,
+      r.timeIn,
+      r.timeOut,
+      r.actualPatients,
+      r.nurseCount,
+      r.pnCount,
+      r.techCount,
+      ...(ophthalmologyOutTimeData.showExtraNaColumn ? [r.extraNaCount] : []),
+      r.swCount,
+      r.totalExpense,
+      r.targetPatients.toFixed(2),
+      r.diffPatients.toFixed(2),
+      r.productivityPct.toFixed(1),
+      r.costPerPatient.toFixed(1),
+      r.noteText || '-',
+    ]);
+    const s = ophthalmologyOutTimeData.summary;
+    const footerRow = [
+      'รวม',
+      `${ophthalmologyOutTimeData.rows.length} เวร`,
+      '',
+      '',
+      '',
+      s.actualPatients,
+      s.nurseCount,
+      s.pnCount,
+      s.techCount,
+      ...(ophthalmologyOutTimeData.showExtraNaColumn ? [s.extraNaCount] : []),
+      s.swCount,
+      s.totalExpense,
+      s.targetPatients.toFixed(2),
+      s.diffPatients.toFixed(2),
+      s.productivityPct.toFixed(1),
+      s.costPerPatient.toFixed(1),
+      'สูตร: Productivity = (ผู้รับบริการจริง ÷ (รายจ่าย ÷ 150)) × 100',
+    ];
+
+    const csv = [headers, ...bodyRows, footerRow]
+      .map((cols) => cols.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `OPD_Eye_OutTime_Productivity_${selectedMonth}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportEyeJpeg = async () => {
+    if (!eyeReportSheetRef.current) return;
+    setIsExportingEyeJpeg(true);
+    try {
+      await exportElementAsJpeg(
+        eyeReportSheetRef.current,
+        `OPD_Eye_OutTime_Productivity_${selectedMonth}.jpeg`
+      );
+    } catch (err) {
+      console.error('Export Eye Productivity JPEG error:', err);
+    } finally {
+      setIsExportingEyeJpeg(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Banner Notice */}
@@ -1409,6 +1576,31 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
             {excludeLasik ? 'คัดศูนย์เลสิกออก' : 'รวมศูนย์เลสิก'} • {excludeReferral ? 'คัดศูนย์รับ-ส่งต่อออก' : 'รวมศูนย์รับ-ส่งต่อ'}
           </span>
         </div>
+
+        {selectedClinic === OPHTHALMOLOGY_CLINIC_NAME && ophthalmologyOutTimeData.isInTimeOnly && (
+          <div className="bg-cyan-50 border border-cyan-200 rounded-xl px-3 py-2 text-xs text-cyan-950 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              <strong>หมายเหตุ OPD จักษุวิทยา:</strong> สูตรคำนวณอัตรากำลังต่อจำนวนผู้ป่วย (รายจ่าย ÷ 150 บาท/คน) ใช้เฉพาะ{' '}
+              <strong>กะนอกเวลาราชการ</strong> เท่านั้น
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSelectedShift('นอกเวลาเย็น 16:00-20:00')}
+                className="px-2.5 py-1 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-[11px] font-bold cursor-pointer"
+              >
+                ดูนอกเวลาเย็น 16:00-20:00
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedShift('ALL')}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-cyan-100 text-cyan-900 border border-cyan-300 text-[11px] font-bold cursor-pointer"
+              >
+                ดูรวมทุกกะ (แสดงจักษุฯ นอกเวลา)
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main 6 Steps Formulas Cards */}
@@ -1555,6 +1747,443 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Specialized Ophthalmology Out-of-Hours Productivity Summary (Strictly for จักษุวิทยา + นอกเวลาราชการ) */}
+      {ophthalmologyOutTimeData.showPanel && (
+        <div
+          className={
+            includeEyeInPrint
+              ? 'print:break-before-page bg-white rounded-2xl shadow-xs border-2 border-cyan-300/90 p-5 space-y-4 print:p-0 print:border-none print:shadow-none'
+              : 'no-print bg-white rounded-2xl shadow-xs border-2 border-cyan-300/90 p-5 space-y-4'
+          }
+        >
+          <div className="no-print flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-cyan-100 pb-3.5">
+            <div className="flex items-start sm:items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-cyan-700 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Eye className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm sm:text-base font-bold text-cyan-950">
+                    สรุป Productivity เฉพาะ OPD จักษุวิทยา (นอกเวลาราชการ)
+                  </h3>
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-cyan-100 text-cyan-900 border border-cyan-200">
+                    สูตรคำนวณ: รายจ่าย จนท. ÷ 150
+                  </span>
+                </div>
+                <p className="text-xs text-cyan-800/90 mt-0.5">
+                  คำนวณ Productivity เฉพาะแผนก <strong>จักษุวิทยา</strong> กะนอกเวลาราชการ จากอัตราส่วนจำนวนผู้ป่วยนอกเวลาจริงเทียบเป้าหมายคุ้มทุน 150 บ./ราย
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {ophthalmologyOutTimeData.hasAnyNa && (
+                <select
+                  value={eyeNaMappingMode}
+                  onChange={(e) => setEyeNaMappingMode(e.target.value as EyeNaMappingMode)}
+                  title="กำหนดการนับตำแหน่ง NA ในสูตร OPD จักษุ"
+                  aria-label="การนับตำแหน่ง NA"
+                  className="text-[11px] font-semibold text-cyan-950 bg-white border border-cyan-300 rounded-lg px-2 py-1.5 outline-none cursor-pointer"
+                >
+                  <option value="auto">NA → Tech (300) เมื่อไม่มีผู้ปฏิบัติงานทั่วไป</option>
+                  <option value="technician">นับ NA รวมใน Technician (300) เสมอ</option>
+                  <option value="na380">แยกคอลัมน์ NA (380)</option>
+                </select>
+              )}
+
+              <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeEyeInPrint}
+                  onChange={(e) => setIncludeEyeInPrint(e.target.checked)}
+                  className="rounded border-gray-300 text-cyan-700 focus:ring-cyan-600"
+                />
+                <span>พิมพ์แนบรายงาน</span>
+              </label>
+
+              <button
+                type="button"
+                onClick={handleExportEyeCsv}
+                disabled={ophthalmologyOutTimeData.rows.length === 0}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold bg-white text-emerald-800 border border-emerald-300 rounded-lg hover:bg-emerald-50 disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>CSV จักษุฯ</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleExportEyeJpeg}
+                disabled={isExportingEyeJpeg || ophthalmologyOutTimeData.rows.length === 0}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white rounded-lg shadow-2xs transition-colors cursor-pointer"
+              >
+                <ImageDown className="w-3.5 h-3.5" />
+                <span>{isExportingEyeJpeg ? 'กำลังสร้างรูป...' : 'บันทึกภาพ .JPEG'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 5 KPI Summary Cards for Ophthalmology Out-of-Hours Productivity */}
+          <div className="no-print grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-3.5">
+              <div className="text-[11px] font-bold text-blue-800">ผู้รับบริการนอกเวลาจริง</div>
+              <div className="text-2xl font-extrabold text-blue-950 mt-0.5">
+                {ophthalmologyOutTimeData.summary.actualPatients.toLocaleString()}{' '}
+                <span className="text-xs font-normal text-gray-600">คน</span>
+              </div>
+              <div className="text-[11px] text-blue-900/80 mt-1">
+                เปิดตรวจ {ophthalmologyOutTimeData.summary.activeDays} เวร ({ophthalmologyOutTimeData.rows.length} รายการ)
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3.5">
+              <div className="text-[11px] font-bold text-amber-900">รายจ่ายค่าตอบแทน จนท.รวม</div>
+              <div className="text-2xl font-extrabold text-amber-950 mt-0.5">
+                {ophthalmologyOutTimeData.summary.totalExpense.toLocaleString()}{' '}
+                <span className="text-xs font-normal text-gray-600">บาท</span>
+              </div>
+              <div className="text-[11px] text-amber-900/85 mt-1 leading-snug">
+                พยาบาล {ophthalmologyOutTimeData.summary.nurseCount}×600 • PN {ophthalmologyOutTimeData.summary.pnCount}×380 • Tech {ophthalmologyOutTimeData.summary.techCount}×300 • บริการ {ophthalmologyOutTimeData.summary.swCount}×300
+                {ophthalmologyOutTimeData.summary.extraNaCount > 0
+                  ? ` • NA ${ophthalmologyOutTimeData.summary.extraNaCount}×380`
+                  : ''}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-cyan-200 bg-cyan-50/40 p-3.5">
+              <div className="text-[11px] font-bold text-cyan-900">คนไข้ที่ควรรับ (รายจ่าย ÷ 150)</div>
+              <div className="text-2xl font-extrabold text-cyan-950 mt-0.5">
+                {ophthalmologyOutTimeData.summary.targetPatients.toFixed(2)}{' '}
+                <span className="text-xs font-normal text-gray-600">คน</span>
+              </div>
+              <div className="text-[11px] text-cyan-900/80 mt-1">
+                ปัดเต็มขั้นต่ำ {Math.ceil(ophthalmologyOutTimeData.summary.targetPatients)} คน เพื่อคุ้มทุน
+              </div>
+            </div>
+
+            <div
+              className={`rounded-xl border-2 p-3.5 ${
+                ophthalmologyOutTimeData.summary.totalExpense === 0
+                  ? 'border-gray-200 bg-gray-50/60'
+                  : ophthalmologyOutTimeData.summary.productivityPct >= 100
+                  ? 'border-emerald-300 bg-emerald-50/60'
+                  : 'border-rose-300 bg-rose-50/60'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <span
+                  className={`text-[11px] font-bold ${
+                    ophthalmologyOutTimeData.summary.totalExpense === 0
+                      ? 'text-gray-700'
+                      : ophthalmologyOutTimeData.summary.productivityPct >= 100
+                      ? 'text-emerald-900'
+                      : 'text-rose-900'
+                  }`}
+                >
+                  Productivity จักษุฯ นอกเวลา
+                </span>
+                <span className="text-[9px] font-mono bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-600">
+                  จริง ÷ ควรรับ × 100
+                </span>
+              </div>
+              <div
+                className={`text-2xl font-black mt-0.5 ${
+                  ophthalmologyOutTimeData.summary.totalExpense === 0
+                    ? 'text-gray-700'
+                    : ophthalmologyOutTimeData.summary.productivityPct >= 100
+                    ? 'text-emerald-950'
+                    : 'text-rose-950'
+                }`}
+              >
+                {ophthalmologyOutTimeData.summary.productivityPct.toFixed(1)}%
+              </div>
+              <div
+                className={`text-[11px] font-semibold mt-1 ${
+                  ophthalmologyOutTimeData.summary.totalExpense === 0
+                    ? 'text-gray-500'
+                    : ophthalmologyOutTimeData.summary.productivityPct >= 100
+                    ? 'text-emerald-800'
+                    : 'text-rose-800'
+                }`}
+              >
+                {ophthalmologyOutTimeData.summary.totalExpense === 0
+                  ? 'ยังไม่มีข้อมูล'
+                  : ophthalmologyOutTimeData.summary.productivityPct >= 100
+                  ? 'ผ่านเกณฑ์คุ้มทุน (≥ 100%)'
+                  : 'ต่ำกว่าเกณฑ์คุ้มทุน (< 100%)'}
+              </div>
+            </div>
+
+            <div
+              className={`rounded-xl border p-3.5 ${
+                ophthalmologyOutTimeData.summary.diffPatients >= 0
+                  ? 'border-emerald-200 bg-emerald-50/40'
+                  : 'border-rose-200 bg-rose-50/40'
+              }`}
+            >
+              <div
+                className={`text-[11px] font-bold ${
+                  ophthalmologyOutTimeData.summary.diffPatients >= 0
+                    ? 'text-emerald-900'
+                    : 'text-rose-900'
+                }`}
+              >
+                ส่วนต่าง &amp; ต้นทุนต่อราย
+              </div>
+              <div
+                className={`text-2xl font-extrabold mt-0.5 ${
+                  ophthalmologyOutTimeData.summary.diffPatients >= 0
+                    ? 'text-emerald-950'
+                    : 'text-rose-950'
+                }`}
+              >
+                {ophthalmologyOutTimeData.summary.diffPatients >= 0 ? '+' : ''}
+                {ophthalmologyOutTimeData.summary.diffPatients.toFixed(2)}{' '}
+                <span className="text-xs font-normal text-gray-600">คน</span>
+              </div>
+              <div className="text-[11px] text-gray-700 mt-1">
+                {ophthalmologyOutTimeData.summary.actualPatients > 0
+                  ? `ต้นทุนจริง ${ophthalmologyOutTimeData.summary.costPerPatient.toFixed(1)} บ./ราย (เกณฑ์ 150)`
+                  : 'ผู้ป่วย 0 ราย'}
+              </div>
+            </div>
+          </div>
+
+          {/* Detailed Printable / JPEG-Exportable Daily Breakdown Table */}
+          <div className="overflow-x-auto print:overflow-visible">
+            <div
+              ref={eyeReportSheetRef}
+              className="w-[1030px] max-w-full print:w-full mx-auto bg-white p-2 sm:p-3 space-y-2.5"
+            >
+              <div className="text-center border-b border-gray-300 pb-2">
+                <h4 className="text-sm sm:text-base font-extrabold text-gray-950">
+                  สรุป Productivity และจุดคุ้มทุนอัตรากำลังนอกเวลา OPD จักษุวิทยา
+                </h4>
+                <p className="text-xs font-semibold text-gray-700 mt-0.5">
+                  ประจำเดือน {ophthalmologyOutTimeData.thaiMonthTitle} •{' '}
+                  {selectedShift === 'ALL'
+                    ? 'รวมทุกกะนอกเวลาราชการ (16:00-20:00 และวันหยุด 08:00-12:00)'
+                    : selectedShift}
+                </p>
+              </div>
+
+              <table className="w-full text-[11px] border border-gray-400 border-collapse print:text-[9px]">
+                <thead className="bg-slate-100 text-slate-900 font-bold">
+                  <tr>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1 text-center w-12">
+                      วัน
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-24">
+                      วันที่
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1 text-center w-12">
+                      เข้า
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1 text-center w-12">
+                      ออก
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-20 leading-tight bg-blue-50/70">
+                      ผู้รับบริการ (คน)
+                    </th>
+                    <th
+                      colSpan={ophthalmologyOutTimeData.showExtraNaColumn ? 5 : 4}
+                      className="border border-gray-400 py-1 px-2 text-center bg-amber-50/60"
+                    >
+                      จำนวนจนท.ปฏิบัติงาน
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-20 leading-tight bg-amber-50/80">
+                      รายจ่าย (บาท)
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-20 leading-tight bg-cyan-50/80">
+                      ควรรับ (÷150)
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-20 leading-tight">
+                      เทียบเกณฑ์ (คน)
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-1.5 text-center w-20 leading-tight bg-emerald-50/80">
+                      Productivity (%)
+                    </th>
+                    <th rowSpan={2} className="border border-gray-400 py-1.5 px-2 text-left">
+                      หมายเหตุ
+                    </th>
+                  </tr>
+                  <tr>
+                    <th className="border border-gray-400 py-1 px-1 text-center w-14 leading-tight bg-white">
+                      พยาบาล (600)
+                    </th>
+                    <th className="border border-gray-400 py-1 px-1 text-center w-14 leading-tight bg-white">
+                      PN (380)
+                    </th>
+                    <th className="border border-gray-400 py-1 px-1 text-center w-16 leading-tight bg-white">
+                      Tech (300)
+                    </th>
+                    {ophthalmologyOutTimeData.showExtraNaColumn && (
+                      <th className="border border-gray-400 py-1 px-1 text-center w-14 leading-tight bg-white">
+                        NA (380)
+                      </th>
+                    )}
+                    <th className="border border-gray-400 py-1 px-1 text-center w-16 leading-tight bg-white">
+                      บริการ (300)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ophthalmologyOutTimeData.rows.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={ophthalmologyOutTimeData.showExtraNaColumn ? 15 : 14}
+                        className="border border-gray-300 py-6 text-center text-gray-400"
+                      >
+                        ยังไม่มีข้อมูลนอกเวลาราชการของแผนกจักษุวิทยาในเดือนที่เลือก
+                      </td>
+                    </tr>
+                  ) : (
+                    ophthalmologyOutTimeData.rows.map((row) => (
+                      <tr
+                        key={row.record.id}
+                        className={row.isOffDuty ? 'bg-violet-50/70 text-violet-950' : 'hover:bg-slate-50/80'}
+                      >
+                        <td className="border border-gray-300 py-1.5 px-1 text-center font-semibold">
+                          {row.dayAbbrev}
+                        </td>
+                        <td className="border border-gray-300 py-1.5 px-1.5 text-center whitespace-nowrap">
+                          {row.shortDate}
+                        </td>
+                        <td className="border border-gray-300 py-1.5 px-1 text-center">{row.timeIn}</td>
+                        <td className="border border-gray-300 py-1.5 px-1 text-center">{row.timeOut}</td>
+                        <td className="border border-gray-300 py-1.5 px-1.5 text-right font-bold text-blue-950 bg-blue-50/30">
+                          {row.actualPatients.toLocaleString()}
+                        </td>
+                        <td className="border border-gray-300 py-1.5 px-1 text-center">{row.nurseCount}</td>
+                        <td className="border border-gray-300 py-1.5 px-1 text-center">{row.pnCount}</td>
+                        <td
+                          className="border border-gray-300 py-1.5 px-1 text-center"
+                          title={
+                            row.naCountedAsTech > 0
+                              ? `รวม NA ${row.naCountedAsTech} คนเป็น Technician (300)`
+                              : undefined
+                          }
+                        >
+                          {row.techCount}
+                          {row.naCountedAsTech > 0 && <span className="text-[9px] text-cyan-700 ml-0.5">*</span>}
+                        </td>
+                        {ophthalmologyOutTimeData.showExtraNaColumn && (
+                          <td className="border border-gray-300 py-1.5 px-1 text-center">{row.extraNaCount}</td>
+                        )}
+                        <td className="border border-gray-300 py-1.5 px-1 text-center">{row.swCount}</td>
+                        <td className="border border-gray-300 py-1.5 px-1.5 text-right font-semibold text-amber-950 bg-amber-50/25">
+                          {row.totalExpense.toLocaleString()}
+                        </td>
+                        <td className="border border-gray-300 py-1.5 px-1.5 text-right font-bold text-cyan-950 bg-cyan-50/30">
+                          {row.targetPatients.toFixed(2)}
+                        </td>
+                        <td
+                          className={`border border-gray-300 py-1.5 px-1.5 text-right font-bold ${
+                            row.isOffDuty
+                              ? 'text-violet-800'
+                              : row.diffPatients >= 0
+                              ? 'text-emerald-700'
+                              : 'text-rose-700'
+                          }`}
+                        >
+                          {row.isOffDuty
+                            ? 'Off เวร'
+                            : `${row.diffPatients >= 0 ? '+' : ''}${row.diffPatients.toFixed(2)}`}
+                        </td>
+                        <td
+                          className={`border border-gray-300 py-1.5 px-1.5 text-right font-extrabold ${
+                            row.isOffDuty
+                              ? 'text-violet-800'
+                              : row.productivityPct >= 100
+                              ? 'text-emerald-700 bg-emerald-50/40'
+                              : 'text-rose-700 bg-rose-50/40'
+                          }`}
+                        >
+                          {row.isOffDuty ? '-' : `${row.productivityPct.toFixed(1)}%`}
+                        </td>
+                        <td className="border border-gray-300 py-1.5 px-2 text-left text-[10px] text-gray-600 break-words">
+                          {row.noteText || '-'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                {ophthalmologyOutTimeData.rows.length > 0 && (
+                  <tfoot className="bg-slate-200/80 font-extrabold text-gray-950">
+                    <tr>
+                      <td colSpan={4} className="border border-gray-400 py-1.5 px-2 text-center">
+                        รวมทั้งเดือน ({ophthalmologyOutTimeData.rows.length} เวร)
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1.5 text-right text-blue-950 bg-blue-100/70">
+                        {ophthalmologyOutTimeData.summary.actualPatients.toLocaleString()}
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1 text-center">
+                        {ophthalmologyOutTimeData.summary.nurseCount}
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1 text-center">
+                        {ophthalmologyOutTimeData.summary.pnCount}
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1 text-center">
+                        {ophthalmologyOutTimeData.summary.techCount}
+                      </td>
+                      {ophthalmologyOutTimeData.showExtraNaColumn && (
+                        <td className="border border-gray-400 py-1.5 px-1 text-center">
+                          {ophthalmologyOutTimeData.summary.extraNaCount}
+                        </td>
+                      )}
+                      <td className="border border-gray-400 py-1.5 px-1 text-center">
+                        {ophthalmologyOutTimeData.summary.swCount}
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1.5 text-right text-amber-950 bg-amber-100/70">
+                        {ophthalmologyOutTimeData.summary.totalExpense.toLocaleString()}
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-1.5 text-right text-cyan-950 bg-cyan-100/70">
+                        {ophthalmologyOutTimeData.summary.targetPatients.toFixed(2)}
+                      </td>
+                      <td
+                        className={`border border-gray-400 py-1.5 px-1.5 text-right ${
+                          ophthalmologyOutTimeData.summary.diffPatients >= 0
+                            ? 'text-emerald-800 bg-emerald-100/60'
+                            : 'text-rose-800 bg-rose-100/60'
+                        }`}
+                      >
+                        {ophthalmologyOutTimeData.summary.diffPatients >= 0 ? '+' : ''}
+                        {ophthalmologyOutTimeData.summary.diffPatients.toFixed(2)}
+                      </td>
+                      <td
+                        className={`border border-gray-400 py-1.5 px-1.5 text-right font-black ${
+                          ophthalmologyOutTimeData.summary.productivityPct >= 100
+                            ? 'text-emerald-900 bg-emerald-100/80'
+                            : 'text-rose-900 bg-rose-100/80'
+                        }`}
+                      >
+                        {ophthalmologyOutTimeData.summary.productivityPct.toFixed(1)}%
+                      </td>
+                      <td className="border border-gray-400 py-1.5 px-2 text-right text-[10px] font-semibold text-gray-800">
+                        {ophthalmologyOutTimeData.summary.actualPatients > 0
+                          ? `เฉลี่ย ${ophthalmologyOutTimeData.summary.costPerPatient.toFixed(1)} บ./ราย`
+                          : '-'}
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+
+              <div className="pt-1 text-[11px] text-gray-800 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <strong className="text-gray-950">สูตร Productivity จักษุฯ นอกเวลา:</strong>{' '}
+                  คนไข้ที่ควรรับ = รายจ่าย จนท.รวม ÷ 150 •{' '}
+                  <strong>Productivity (%) = (ผู้รับบริการจริง ÷ คนไข้ที่ควรรับ) × 100</strong> (คุ้มทุน ≥ 100%)
+                </div>
+                <div className="text-[10px] text-gray-500">
+                  อัตราต่อเวร: พยาบาล 600 • PN 380 • Technician 300 • พนง.บริการ 300 บาท
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Skill Mix Breakdown Visual Bar */}
       <div className="no-print bg-white rounded-2xl shadow-xs border border-gray-200/90 p-5 space-y-3">

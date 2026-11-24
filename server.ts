@@ -1,9 +1,11 @@
 import dotenv from 'dotenv';
 import fs from 'fs';
+import http from 'http';
 import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 dotenv.config({ override: true });
@@ -452,7 +454,9 @@ async function pushLineMessages(params: {
 
 async function createAppServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '8mb' }));
+  const httpServer = http.createServer(app);
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  app.use(express.json({ limit: '10mb' }));
 
   app.get('/api/line/status', async (req: Request, res: Response) => {
     const requestedTargetId =
@@ -488,6 +492,7 @@ async function createAppServer(): Promise<void> {
   });
 
   const SERVER_DB_PATH = path.join(process.cwd(), 'server-db.json');
+  const SERVER_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
   interface ServerGroupNote {
     id: string;
@@ -498,6 +503,140 @@ async function createAppServer(): Promise<void> {
     groupId: string;
     keywords: string;
     status: 'ACTIVE' | 'ARCHIVED';
+  }
+
+  interface ServerTombstones {
+    workloads: Record<string, number>;
+    leaves: Record<string, number>;
+    ot: Record<string, number>;
+  }
+
+  interface AuthoritativeServerDb {
+    version: number;
+    updatedAt: string;
+    staff: any[];
+    workloads: any[];
+    leaves: any[];
+    ot: any[];
+    auditLogs: any[];
+    settings: Record<string, any>;
+    groupNotes: ServerGroupNote[];
+    tombstones: ServerTombstones;
+  }
+
+  function pruneServerTombstones(raw: any): ServerTombstones {
+    const cutoff = Date.now() - SERVER_TOMBSTONE_TTL_MS;
+    const cleanBucket = (bucket: any): Record<string, number> => {
+      if (!bucket || typeof bucket !== 'object') return {};
+      const out: Record<string, number> = {};
+      Object.entries(bucket).forEach(([k, v]) => {
+        const ts = Number(v);
+        if (k && Number.isFinite(ts) && ts >= cutoff) out[k] = ts;
+      });
+      return out;
+    };
+    return {
+      workloads: cleanBucket(raw?.workloads),
+      leaves: cleanBucket(raw?.leaves),
+      ot: cleanBucket(raw?.ot),
+    };
+  }
+
+  function mergeServerTombstones(a: ServerTombstones, b: any): ServerTombstones {
+    const cleanB = pruneServerTombstones(b);
+    const mergeBucket = (b1: Record<string, number>, b2: Record<string, number>) => {
+      const out = { ...b1 };
+      Object.entries(b2).forEach(([k, v]) => {
+        if (!out[k] || v > out[k]) out[k] = v;
+      });
+      return out;
+    };
+    return {
+      workloads: mergeBucket(a.workloads, cleanB.workloads),
+      leaves: mergeBucket(a.leaves, cleanB.leaves),
+      ot: mergeBucket(a.ot, cleanB.ot),
+    };
+  }
+
+  function serverWorkloadKey(w: any): string {
+    const total = Math.max(Number(w?.totalPt || 0), Number(w?.adultPt || 0) + Number(w?.childPt || 0));
+    const na = w?.na !== undefined ? Number(w.na || 0) : Number(w?.pca || 0);
+    return [
+      String(w?.date || '').trim(),
+      String(w?.shift || '').trim(),
+      String(w?.clinic || '').trim(),
+      total,
+      Number(w?.adultPt || 0),
+      Number(w?.childPt || 0),
+      Number(w?.admit || 0),
+      Number(w?.hn || 0),
+      Number(w?.rn || 0),
+      Number(w?.pn || 0),
+      na,
+      Number(w?.clerk || 0),
+      Number(w?.serviceWorker || 0),
+      String(w?.reporter || '').trim(),
+      String(w?.recordType || 'STANDARD').trim(),
+    ].join('|');
+  }
+
+  function serverLeaveKey(l: any): string {
+    return [
+      String(l?.startDate || '').trim(),
+      String(l?.endDate || l?.startDate || '').trim(),
+      String(l?.staffName || '').trim(),
+      String(l?.clinic || '').trim(),
+      String(l?.leaveType || '').trim(),
+      Number(l?.days || 1),
+      String(l?.note || '').trim(),
+    ].join('|');
+  }
+
+  function serverOtKey(o: any): string {
+    return [
+      String(o?.date || '').trim(),
+      String(o?.shift || '').trim(),
+      String(o?.staffName || '').trim(),
+      String(o?.homeClinic || '').trim(),
+      String(o?.workClinic || '').trim(),
+    ].join('|');
+  }
+
+  function syncServerLineStateFromSettings(settings: any): void {
+    if (!settings || typeof settings !== 'object') return;
+    if (settings.boobyOwnerName) {
+      serverLineState.boobyOwnerName = String(settings.boobyOwnerName).trim() || 'คุณทรงยศ';
+    }
+    if (settings.boobyOwnerUserId !== undefined) {
+      serverLineState.boobyOwnerUserId = String(settings.boobyOwnerUserId || '').trim();
+    }
+    if (settings.boobyGroupMentionOnly !== undefined) {
+      serverLineState.boobyGroupMentionOnly = Boolean(settings.boobyGroupMentionOnly);
+    }
+    if (settings.gasUrl) {
+      serverLineState.gasUrl = String(settings.gasUrl).trim();
+    }
+  }
+
+  function normalizeAuthoritativeDb(raw: any): AuthoritativeServerDb {
+    const rawVer = Number(raw?.version);
+    const hasSeedData =
+      Array.isArray(raw?.workloads) && raw.workloads.length > 0 ||
+      Array.isArray(raw?.leaves) && raw.leaves.length > 0 ||
+      Array.isArray(raw?.ot) && raw.ot.length > 0 ||
+      Array.isArray(raw?.staff) && raw.staff.length > 0;
+    return {
+      version: Number.isFinite(rawVer) && rawVer > 0 ? Math.floor(rawVer) : hasSeedData ? 1 : 0,
+      updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : new Date().toISOString(),
+      staff: Array.isArray(raw?.staff) ? raw.staff : [],
+      workloads: Array.isArray(raw?.workloads) ? raw.workloads : [],
+      leaves: Array.isArray(raw?.leaves) ? raw.leaves : [],
+      ot: Array.isArray(raw?.ot) ? raw.ot : [],
+      auditLogs: Array.isArray(raw?.auditLogs) ? raw.auditLogs.slice(0, 500) : [],
+      settings: raw?.settings && typeof raw.settings === 'object' ? raw.settings : {},
+      groupNotes: Array.isArray(raw?.groupNotes) ? raw.groupNotes : [],
+      tombstones: pruneServerTombstones(raw?.tombstones),
+    };
   }
 
   function loadServerDb(): any {
@@ -511,42 +650,501 @@ async function createAppServer(): Promise<void> {
     return null;
   }
 
-  function writeServerDb(data: any): void {
-    fs.writeFileSync(SERVER_DB_PATH, JSON.stringify(data || {}, null, 2), 'utf8');
+  function getAuthoritativeServerDb(): AuthoritativeServerDb {
+    return normalizeAuthoritativeDb(loadServerDb() || {});
   }
 
-  app.post('/api/db/sync', (req: Request, res: Response) => {
+  function writeServerDb(data: any): void {
+    const normalized = normalizeAuthoritativeDb(data);
+    fs.writeFileSync(SERVER_DB_PATH, JSON.stringify(normalized, null, 2), 'utf8');
+  }
+
+  function buildPublicDbResponse(authDb: AuthoritativeServerDb) {
+    return {
+      version: authDb.version,
+      updatedAt: authDb.updatedAt,
+      db: {
+        staff: authDb.staff,
+        workloads: authDb.workloads,
+        leaves: authDb.leaves,
+        ot: authDb.ot,
+        auditLogs: authDb.auditLogs,
+        settings: authDb.settings,
+      },
+      tombstones: authDb.tombstones,
+    };
+  }
+
+  function broadcastServerDbState(
+    authDb: AuthoritativeServerDb,
+    senderClientId = '',
+    reason = 'mutation'
+  ): void {
+    const message = JSON.stringify({
+      type: 'db:state',
+      reason,
+      senderClientId,
+      ...buildPublicDbResponse(authDb),
+    });
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(message);
+        } catch {
+          // ignore individual socket write failure
+        }
+      }
+    });
+  }
+
+  // Real-Time WebSocket Server on /ws (same port 3000 as HTTP)
+  const wsAliveMap = new WeakMap<WebSocket, boolean>();
+  wss.on('connection', (ws) => {
+    wsAliveMap.set(ws, true);
+    ws.on('pong', () => wsAliveMap.set(ws, true));
+    ws.on('message', (rawMsg) => {
+      try {
+        const parsed = JSON.parse(String(rawMsg || ''));
+        if (parsed?.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+        } else if (parsed?.type === 'sync:request') {
+          const cur = getAuthoritativeServerDb();
+          ws.send(
+            JSON.stringify({
+              type: 'db:state',
+              reason: 'sync_request',
+              senderClientId: '',
+              ...buildPublicDbResponse(cur),
+            })
+          );
+        }
+      } catch {
+        // ignore malformed client socket message
+      }
+    });
+
+    // Immediately send current authoritative state on connection
     try {
-      const dbPayload = req.body;
-      if (dbPayload && typeof dbPayload === 'object') {
-        const prev = loadServerDb();
-        const merged = {
-          ...dbPayload,
-          groupNotes: Array.isArray(dbPayload.groupNotes)
-            ? dbPayload.groupNotes
-            : Array.isArray(prev?.groupNotes)
-            ? prev.groupNotes
-            : [],
-        };
-        if (dbPayload.settings) {
-          if (dbPayload.settings.boobyOwnerName) {
-            serverLineState.boobyOwnerName = String(dbPayload.settings.boobyOwnerName).trim() || 'คุณทรงยศ';
-          }
-          if (dbPayload.settings.boobyOwnerUserId !== undefined) {
-            serverLineState.boobyOwnerUserId = String(dbPayload.settings.boobyOwnerUserId || '').trim();
-          }
-          if (dbPayload.settings.boobyGroupMentionOnly !== undefined) {
-            serverLineState.boobyGroupMentionOnly = Boolean(dbPayload.settings.boobyGroupMentionOnly);
-          }
-          if (dbPayload.settings.gasUrl) {
-            serverLineState.gasUrl = String(dbPayload.settings.gasUrl).trim();
+      const current = getAuthoritativeServerDb();
+      if (current.version > 0) {
+        ws.send(
+          JSON.stringify({
+            type: 'db:state',
+            reason: 'init',
+            senderClientId: '',
+            ...buildPublicDbResponse(current),
+          })
+        );
+      }
+    } catch {
+      // ignore send failure
+    }
+  });
+
+  const wsHeartbeatTimer = setInterval(() => {
+    wss.clients.forEach((client) => {
+      if (wsAliveMap.get(client) === false) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      wsAliveMap.set(client, false);
+      try {
+        client.ping();
+      } catch {
+        // ignore
+      }
+    });
+  }, 25_000);
+  wss.on('close', () => clearInterval(wsHeartbeatTimer));
+
+  // GET authoritative DB snapshot (used on initial mount & WebSocket reconnect catch-up)
+  app.get('/api/db', (_req: Request, res: Response) => {
+    try {
+      const current = getAuthoritativeServerDb();
+      res.json({ ok: true, ...buildPublicDbResponse(current) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+    }
+  });
+
+  // POST idempotent atomic domain mutation -> increments version, persists server-db.json, broadcasts immediately to all WebSocket clients
+  app.post('/api/db/mutate', (req: Request, res: Response) => {
+    try {
+      const body = (req.body || {}) as {
+        clientId?: string;
+        action?: string;
+        payload?: any;
+      };
+      const clientId = String(body.clientId || '').trim();
+      const action = String(body.action || '').trim();
+      const payload = body.payload || {};
+      if (!action) {
+        res.status(400).json({ ok: false, error: 'Missing mutation action' });
+        return;
+      }
+
+      const cur = getAuthoritativeServerDb();
+      const next: AuthoritativeServerDb = {
+        ...cur,
+        staff: [...cur.staff],
+        workloads: [...cur.workloads],
+        leaves: [...cur.leaves],
+        ot: [...cur.ot],
+        auditLogs: [...cur.auditLogs],
+        settings: { ...cur.settings },
+        tombstones: {
+          workloads: { ...cur.tombstones.workloads },
+          leaves: { ...cur.tombstones.leaves },
+          ot: { ...cur.tombstones.ot },
+        },
+      };
+
+      const appendAuditIfNew = (auditEntry: any) => {
+        if (!auditEntry || !auditEntry.id) return;
+        if (!next.auditLogs.some((a) => a?.id === auditEntry.id)) {
+          next.auditLogs = [auditEntry, ...next.auditLogs].slice(0, 500);
+        }
+      };
+
+      const addUniqueWorkloads = (items: any[]) => {
+        const added: any[] = [];
+        for (const item of items) {
+          if (!item || !item.date || !item.clinic) continue;
+          const dup = next.workloads.some(
+            (ex) =>
+              (ex.id && item.id && ex.id === item.id) ||
+              (String(ex.date || '').trim() === String(item.date || '').trim() &&
+                String(ex.shift || '').trim() === String(item.shift || '').trim() &&
+                String(ex.clinic || '').trim() === String(item.clinic || '').trim() &&
+                String(ex.recordType || 'STANDARD') === String(item.recordType || 'STANDARD'))
+          );
+          if (!dup) {
+            added.push(item);
+            delete next.tombstones.workloads[serverWorkloadKey(item)];
+            if (item.id) delete next.tombstones.workloads[`id:${item.id}`];
           }
         }
-        writeServerDb(merged);
-        res.json({ ok: true, message: 'Database synced to server successfully' });
-      } else {
-        res.status(400).json({ ok: false, error: 'Invalid database payload' });
+        if (added.length > 0) {
+          next.workloads = [...added, ...next.workloads];
+        }
+      };
+
+      const addUniqueLeaves = (items: any[]) => {
+        const added: any[] = [];
+        for (const item of items) {
+          if (!item || !item.staffName || !item.startDate) continue;
+          const lKey = serverLeaveKey(item);
+          const dup = next.leaves.some(
+            (ex) => (ex.id && item.id && ex.id === item.id) || serverLeaveKey(ex) === lKey
+          );
+          if (!dup) {
+            added.push(item);
+            delete next.tombstones.leaves[lKey];
+            if (item.id) delete next.tombstones.leaves[`id:${item.id}`];
+          }
+        }
+        if (added.length > 0) {
+          next.leaves = [...added, ...next.leaves];
+        }
+      };
+
+      const addUniqueOt = (items: any[]) => {
+        const added: any[] = [];
+        for (const item of items) {
+          if (!item || !item.staffName || !item.date) continue;
+          const oKey = serverOtKey(item);
+          const dup = next.ot.some(
+            (ex) =>
+              (ex.id && item.id && ex.id === item.id) ||
+              serverOtKey(ex) === oKey ||
+              (String(ex.date || '').trim() === String(item.date || '').trim() &&
+                String(ex.shift || '').trim() === String(item.shift || '').trim() &&
+                String(ex.staffName || '').trim().replace(/\s+/g, ' ') ===
+                  String(item.staffName || '').trim().replace(/\s+/g, ' '))
+          );
+          if (!dup) {
+            added.push(item);
+            delete next.tombstones.ot[oKey];
+            if (item.id) delete next.tombstones.ot[`id:${item.id}`];
+          }
+        }
+        if (added.length > 0) {
+          next.ot = [...added, ...next.ot];
+        }
+      };
+
+      switch (action) {
+        case 'addWorkloads': {
+          if (Array.isArray(payload.workloads)) addUniqueWorkloads(payload.workloads);
+          if (Array.isArray(payload.leaves)) addUniqueLeaves(payload.leaves);
+          if (Array.isArray(payload.ot)) addUniqueOt(payload.ot);
+          break;
+        }
+        case 'updateWorkload': {
+          const updated = payload.updated;
+          const target = payload.target;
+          if (updated) {
+            const idx = next.workloads.findIndex(
+              (w) => (updated.id && w.id === updated.id) || (target && serverWorkloadKey(w) === serverWorkloadKey(target))
+            );
+            if (idx >= 0) next.workloads[idx] = updated;
+            else next.workloads.unshift(updated);
+            if (target) {
+              const oldKey = serverWorkloadKey(target);
+              if (oldKey !== serverWorkloadKey(updated)) {
+                next.tombstones.workloads[oldKey] = Date.now();
+              }
+            }
+            delete next.tombstones.workloads[serverWorkloadKey(updated)];
+            if (updated.id) delete next.tombstones.workloads[`id:${updated.id}`];
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'deleteWorkload': {
+          const delId = String(payload.id || payload.target?.id || '').trim();
+          const target = payload.target || next.workloads.find((w) => w.id === delId);
+          next.workloads = next.workloads.filter(
+            (w) => !(delId && w.id === delId) && !(target && serverWorkloadKey(w) === serverWorkloadKey(target))
+          );
+          if (target) {
+            next.tombstones.workloads[serverWorkloadKey(target)] = Date.now();
+          }
+          if (delId) {
+            next.tombstones.workloads[`id:${delId}`] = Date.now();
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'addLeave': {
+          if (payload.leave) addUniqueLeaves([payload.leave]);
+          break;
+        }
+        case 'updateLeave': {
+          const updated = payload.updated;
+          const target = payload.target;
+          if (updated) {
+            const idx = next.leaves.findIndex(
+              (l) => (updated.id && l.id === updated.id) || (target && serverLeaveKey(l) === serverLeaveKey(target))
+            );
+            if (idx >= 0) next.leaves[idx] = updated;
+            else next.leaves.unshift(updated);
+            if (target) {
+              const oldKey = serverLeaveKey(target);
+              if (oldKey !== serverLeaveKey(updated)) {
+                next.tombstones.leaves[oldKey] = Date.now();
+              }
+            }
+            delete next.tombstones.leaves[serverLeaveKey(updated)];
+            if (updated.id) delete next.tombstones.leaves[`id:${updated.id}`];
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'deleteLeave': {
+          const delId = String(payload.id || payload.target?.id || '').trim();
+          const target = payload.target || next.leaves.find((l) => l.id === delId);
+          next.leaves = next.leaves.filter(
+            (l) => !(delId && l.id === delId) && !(target && serverLeaveKey(l) === serverLeaveKey(target))
+          );
+          if (target) {
+            next.tombstones.leaves[serverLeaveKey(target)] = Date.now();
+          }
+          if (delId) {
+            next.tombstones.leaves[`id:${delId}`] = Date.now();
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'addOt': {
+          if (Array.isArray(payload.records)) addUniqueOt(payload.records);
+          break;
+        }
+        case 'updateOt': {
+          const updated = payload.updated;
+          const target = payload.target;
+          if (updated) {
+            const idx = next.ot.findIndex(
+              (o) => (updated.id && o.id === updated.id) || (target && serverOtKey(o) === serverOtKey(target))
+            );
+            if (idx >= 0) next.ot[idx] = updated;
+            else next.ot.unshift(updated);
+            if (target) {
+              const oldKey = serverOtKey(target);
+              if (oldKey !== serverOtKey(updated)) {
+                next.tombstones.ot[oldKey] = Date.now();
+              }
+            }
+            delete next.tombstones.ot[serverOtKey(updated)];
+            if (updated.id) delete next.tombstones.ot[`id:${updated.id}`];
+          }
+          if (Array.isArray(payload.staffList)) {
+            next.staff = payload.staffList;
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'deleteOt': {
+          const delId = String(payload.id || payload.target?.id || '').trim();
+          const target = payload.target || next.ot.find((o) => o.id === delId);
+          next.ot = next.ot.filter(
+            (o) => !(delId && o.id === delId) && !(target && serverOtKey(o) === serverOtKey(target))
+          );
+          if (target) {
+            next.tombstones.ot[serverOtKey(target)] = Date.now();
+          }
+          if (delId) {
+            next.tombstones.ot[`id:${delId}`] = Date.now();
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'syncStaff': {
+          if (Array.isArray(payload.staff)) next.staff = payload.staff;
+          if (Array.isArray(payload.ot)) next.ot = payload.ot;
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'saveSettings': {
+          if (payload.settings && typeof payload.settings === 'object') {
+            next.settings = { ...next.settings, ...payload.settings };
+            syncServerLineStateFromSettings(next.settings);
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'saveUnitCostCenter': {
+          const cleanClinic = String(payload.clinic || '').trim();
+          const cleanCode = String(payload.costCenter || '').trim();
+          if (cleanClinic === 'ALL') {
+            next.settings = {
+              ...next.settings,
+              defaultCostCenter: cleanCode || next.settings.defaultCostCenter || '2012000000',
+            };
+          } else if (cleanClinic) {
+            const nextMap = { ...(next.settings.clinicCostCenters || {}) };
+            if (cleanCode) nextMap[cleanClinic] = cleanCode;
+            else delete nextMap[cleanClinic];
+            next.settings = { ...next.settings, clinicCostCenters: nextMap };
+          }
+          break;
+        }
+        case 'resetAll': {
+          const cleanDb = payload.db || {};
+          next.staff = Array.isArray(cleanDb.staff) ? cleanDb.staff : [];
+          next.workloads = Array.isArray(cleanDb.workloads) ? cleanDb.workloads : [];
+          next.leaves = Array.isArray(cleanDb.leaves) ? cleanDb.leaves : [];
+          next.ot = Array.isArray(cleanDb.ot) ? cleanDb.ot : [];
+          next.auditLogs = Array.isArray(cleanDb.auditLogs) ? cleanDb.auditLogs : [];
+          next.settings = cleanDb.settings && typeof cleanDb.settings === 'object' ? cleanDb.settings : next.settings;
+          next.tombstones = { workloads: {}, leaves: {}, ot: {} };
+          syncServerLineStateFromSettings(next.settings);
+          break;
+        }
+        default: {
+          res.status(400).json({ ok: false, error: `Unknown mutation action: ${action}` });
+          return;
+        }
       }
+
+      next.version = cur.version + 1;
+      next.updatedAt = new Date().toISOString();
+      next.tombstones = pruneServerTombstones(next.tombstones);
+      writeServerDb(next);
+      broadcastServerDbState(next, clientId, action);
+      res.json({ ok: true, ...buildPublicDbResponse(next) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+    }
+  });
+
+  // Protected sync endpoint: prevents stale clients from blindly overwriting newer server state
+  app.post('/api/db/sync', (req: Request, res: Response) => {
+    try {
+      const body = req.body;
+      if (!body || typeof body !== 'object') {
+        res.status(400).json({ ok: false, error: 'Invalid database payload' });
+        return;
+      }
+
+      const isWrapped = 'db' in body && body.db && typeof body.db === 'object';
+      const incomingDb = isWrapped ? body.db : body;
+      const clientId = isWrapped ? String(body.clientId || '') : '';
+      const baseVersion = isWrapped && body.baseVersion !== undefined ? Number(body.baseVersion) : undefined;
+      const forceOverwrite = isWrapped ? Boolean(body.forceOverwrite) : false;
+      const mergeFromRemote = isWrapped ? Boolean(body.mergeFromRemote) : false;
+      const incomingTombstones = isWrapped ? body.tombstones : undefined;
+
+      const cur = getAuthoritativeServerDb();
+      const mergedTombstones = mergeServerTombstones(cur.tombstones, incomingTombstones);
+
+      // Guard: if server already has newer state (version > 0) and client has stale/missing baseVersion without forceOverwrite,
+      // reject blind overwrite and return authoritative server snapshot instead!
+      if (
+        cur.version > 0 &&
+        !forceOverwrite &&
+        (baseVersion === undefined || !Number.isFinite(baseVersion) || baseVersion < cur.version)
+      ) {
+        res.json({
+          ok: true,
+          staleRejected: true,
+          ...buildPublicDbResponse(cur),
+        });
+        return;
+      }
+
+      const incomingStaff = Array.isArray(incomingDb.staff) ? incomingDb.staff : cur.staff;
+      const incomingWorkloads = (Array.isArray(incomingDb.workloads) ? incomingDb.workloads : cur.workloads).filter(
+        (w: any) => !mergedTombstones.workloads[serverWorkloadKey(w)] && !(w?.id && mergedTombstones.workloads[`id:${w.id}`])
+      );
+      const incomingLeaves = (Array.isArray(incomingDb.leaves) ? incomingDb.leaves : cur.leaves).filter(
+        (l: any) => !mergedTombstones.leaves[serverLeaveKey(l)] && !(l?.id && mergedTombstones.leaves[`id:${l.id}`])
+      );
+      const incomingOt = (Array.isArray(incomingDb.ot) ? incomingDb.ot : cur.ot).filter(
+        (o: any) => !mergedTombstones.ot[serverOtKey(o)] && !(o?.id && mergedTombstones.ot[`id:${o.id}`])
+      );
+      const incomingAuditLogs = Array.isArray(incomingDb.auditLogs)
+        ? incomingDb.auditLogs.slice(0, 500)
+        : cur.auditLogs;
+      const incomingSettings =
+        incomingDb.settings && typeof incomingDb.settings === 'object' ? incomingDb.settings : cur.settings;
+
+      // Avoid empty bump when mergeFromRemote didn't change anything
+      if (mergeFromRemote && cur.version > 0) {
+        const same =
+          JSON.stringify(cur.staff) === JSON.stringify(incomingStaff) &&
+          JSON.stringify(cur.workloads) === JSON.stringify(incomingWorkloads) &&
+          JSON.stringify(cur.leaves) === JSON.stringify(incomingLeaves) &&
+          JSON.stringify(cur.ot) === JSON.stringify(incomingOt) &&
+          JSON.stringify(cur.settings) === JSON.stringify(incomingSettings) &&
+          JSON.stringify(cur.auditLogs) === JSON.stringify(incomingAuditLogs);
+        if (same) {
+          res.json({ ok: true, unchanged: true, ...buildPublicDbResponse(cur) });
+          return;
+        }
+      }
+
+      const next: AuthoritativeServerDb = {
+        version: cur.version + 1,
+        updatedAt: new Date().toISOString(),
+        staff: incomingStaff,
+        workloads: incomingWorkloads,
+        leaves: incomingLeaves,
+        ot: incomingOt,
+        auditLogs: incomingAuditLogs,
+        settings: incomingSettings,
+        groupNotes: Array.isArray(incomingDb.groupNotes) ? incomingDb.groupNotes : cur.groupNotes,
+        tombstones: mergedTombstones,
+      };
+
+      syncServerLineStateFromSettings(next.settings);
+      writeServerDb(next);
+      broadcastServerDbState(next, clientId, mergeFromRemote ? 'sheets_sync' : 'seed_sync');
+      res.json({ ok: true, ...buildPublicDbResponse(next) });
     } catch (err) {
       res.status(500).json({ ok: false, error: String(err instanceof Error ? err.message : err) });
     }
@@ -2632,6 +3230,52 @@ async function createAppServer(): Promise<void> {
                         `• เกณฑ์ NHPPD: ทั่วไป ${generalNhppd} / คัดกรอง ${screeningNhppd} (Std ${stdHr} ชม.)` +
                         (!matchedClinic && loadLines.length > 0 ? `\n${asksLowest ? '📉 คลินิกภาระงานต่ำสุด' : '🔥 คลินิกภาระงานสูงสุด'}:\n${loadLines.join('\n')}` : '')
                     );
+
+                    const eyeOutRows = matchedWl.filter(
+                      (r: { w: any; wClinic: string; wShift: string }) =>
+                        r.wClinic === 'จักษุวิทยา' && r.wShift !== 'ในเวลา 08:00-16:00'
+                    );
+                    if (
+                      eyeOutRows.length > 0 &&
+                      (matchedClinic === 'จักษุวิทยา' ||
+                        shiftFilter === 'OUT_TIME_ALL' ||
+                        (shiftFilter && shiftFilter !== 'ในเวลา 08:00-16:00'))
+                    ) {
+                      let eyeActualPt = 0;
+                      let eyeExpense = 0;
+                      let eyeActiveShifts = 0;
+                      eyeOutRows.forEach((r: { w: any; pt: number }) => {
+                        const noteTxt = String(r.w?.note || '');
+                        const offDuty = Boolean(r.w?.isOffDuty) || /\[OFF_DUTY(?::|])/.test(noteTxt);
+                        if (offDuty) return;
+                        eyeActiveShifts += 1;
+                        eyeActualPt += r.pt;
+                        const nurses = (Number(r.w?.hn) || 0) + (Number(r.w?.rn) || 0);
+                        const pn = Number(r.w?.pn) || 0;
+                        const clk = Number(r.w?.clerk) || 0;
+                        const na = Number(r.w?.na !== undefined ? r.w?.na : r.w?.pca) || 0;
+                        const sw = Number(r.w?.serviceWorker) || 0;
+                        const tech = clk === 0 && na > 0 ? clk + na : clk;
+                        eyeExpense += nurses * 600 + pn * 380 + tech * 300 + sw * 300;
+                      });
+                      const eyeTargetPt = eyeExpense / 150;
+                      const eyeProdPct = eyeTargetPt > 0 ? (eyeActualPt / eyeTargetPt) * 100 : 0;
+                      const eyeDiff = eyeActualPt - eyeTargetPt;
+                      const eyeCostPerPt = eyeActualPt > 0 ? eyeExpense / eyeActualPt : 0;
+                      const eyeStatus =
+                        eyeExpense === 0
+                          ? 'ไม่มีค่าตอบแทน'
+                          : eyeProdPct >= 100
+                          ? '🟢 ผ่านเกณฑ์คุ้มทุน (≥100%)'
+                          : '🔴 ต่ำกว่าเกณฑ์คุ้มทุน (<100%)';
+                      sections.push(
+                        `👁️ Productivity เฉพาะ OPD จักษุวิทยา (นอกเวลาราชการ) ประจำ${wlHeader}:\n` +
+                          `• Productivity จักษุฯ นอกเวลา: ${eyeProdPct.toFixed(1)}% — ${eyeStatus}\n` +
+                          `• ผู้รับบริการจริง: ${eyeActualPt.toLocaleString()} ราย (${eyeActiveShifts} เวร) | ควรรับขั้นต่ำ (÷150): ${eyeTargetPt.toFixed(2)} คน\n` +
+                          `• รายจ่ายค่าตอบแทนรวม: ${eyeExpense.toLocaleString()} บาท | ส่วนต่าง: ${eyeDiff >= 0 ? '+' : ''}${eyeDiff.toFixed(2)} คน` +
+                          (eyeActualPt > 0 ? `\n• ต้นทุนจริง: ${eyeCostPerPt.toFixed(1)} บ./ราย (เกณฑ์ 150 บ./ราย)` : '')
+                      );
+                    }
                   }
                 }
               }
@@ -3020,8 +3664,8 @@ async function createAppServer(): Promise<void> {
   }
 
   const port = Number(process.env.PORT) || 3000;
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`PCMC OPD server listening on http://0.0.0.0:${port}`);
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`PCMC OPD server (HTTP + WebSocket) listening on http://0.0.0.0:${port}`);
   });
 }
 

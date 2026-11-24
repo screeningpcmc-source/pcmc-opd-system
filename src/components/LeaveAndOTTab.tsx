@@ -652,7 +652,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   };
 
   // --- Sub-Tab 3: Fiscal Summary Filter States ---
-  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(2570);
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(() =>
+    todayParts.m >= 10 ? todayParts.y + 543 + 1 : todayParts.y + 543
+  );
   const [shiftFilter, setShiftFilter] = useState<'ALL' | 'IN_TIME' | 'OT'>('ALL');
   const [clinicFilter, setClinicFilter] = useState<string>('ALL');
   const [fiscalPositionFilter, setFiscalPositionFilter] = useState<string>('ALL');
@@ -1522,16 +1524,18 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       const fromLocal = (localUnitCostCenters[otPayClinic] || '').trim();
       if (fromLocal) return fromLocal;
     } else {
+      const fromSettingsAll = (settings?.defaultCostCenter || '').trim();
+      if (fromSettingsAll) return fromSettingsAll;
       const fromLocalAll = (localUnitCostCenters['ALL'] || '').trim();
       if (fromLocalAll) return fromLocalAll;
     }
-    return (settings?.defaultCostCenter || '').trim() || DEFAULT_OT_COST_CENTER;
+    return DEFAULT_OT_COST_CENTER;
   }, [otPayClinic, settings, localUnitCostCenters]);
 
   useEffect(() => {
     // Load remembered Cost Center whenever unit selection or persisted settings change
     if (otPayClinic === 'ALL') {
-      const remembered = (localUnitCostCenters['ALL'] || settings?.defaultCostCenter || '').trim();
+      const remembered = ((settings?.defaultCostCenter || '').trim() || localUnitCostCenters['ALL'] || '').trim();
       setOtPayCostCenterOverride(remembered && remembered !== DEFAULT_OT_COST_CENTER ? remembered : '');
     } else {
       const remembered = (
@@ -1626,30 +1630,52 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       }
     >();
 
+    let excludedShiftCount = 0;
+    let excludedShiftHours = 0;
+    let excludedInTimeHolidayCount = 0;
+    let excludedInTimeHolidayHours = 0;
+    const excludedDaySet = new Set<number>();
+    const excludedHolidayDaySet = new Set<number>();
+
     otRecords.forEach((o) => {
       if (!(o.date || '').startsWith(monthPrefix)) return;
+      const parsedWork = parseOtWorkClinic(o.workClinic);
+      if (otPayClinic !== 'ALL' && parsedWork.clinic !== otPayClinic) return;
+
+      const dayNum = Number((o.date || '').slice(8, 10));
+      const isValidDay = Number.isFinite(dayNum) && dayNum >= 1 && dayNum <= daysInMonth;
+      const hrs = getEffectiveOtHours(o, settings?.stdHr);
+
       if (otPayShiftScope === 'OUT_TIME') {
         if (
           o.shift !== 'นอกเวลาเย็น 16:00-20:00' &&
           o.shift !== 'นอกเวลาวันหยุด 08:00-12:00'
         ) {
+          excludedShiftCount += 1;
+          excludedShiftHours = Math.round((excludedShiftHours + hrs) * 100) / 100;
+          if (isValidDay) {
+            excludedDaySet.add(dayNum);
+            if (o.shift === 'OT ในเวลาราชการ 08:00-16:00' && dayColumns[dayNum - 1]?.isShaded) {
+              excludedInTimeHolidayCount += 1;
+              excludedInTimeHolidayHours = Math.round((excludedInTimeHolidayHours + hrs) * 100) / 100;
+              excludedHolidayDaySet.add(dayNum);
+            }
+          }
           return;
         }
       } else if (otPayShiftScope !== 'ALL_OT' && o.shift !== otPayShiftScope) {
+        excludedShiftCount += 1;
+        excludedShiftHours = Math.round((excludedShiftHours + hrs) * 100) / 100;
+        if (isValidDay) excludedDaySet.add(dayNum);
         return;
       }
 
-      const parsedWork = parseOtWorkClinic(o.workClinic);
-      if (otPayClinic !== 'ALL' && parsedWork.clinic !== otPayClinic) return;
-
-      const dayNum = Number((o.date || '').slice(8, 10));
-      if (!Number.isFinite(dayNum) || dayNum < 1 || dayNum > daysInMonth) return;
+      if (!isValidDay) return;
 
       const cleanName = (o.staffName || '').trim();
       const normPos = normalizeStaffPosition(o.position);
       const posLabel = formatOtPaySheetPositionLabel(normPos);
       const groupKey = `${cleanName}::${posLabel}`;
-      const hrs = getEffectiveOtHours(o, settings?.stdHr);
       const matchedStaff = staffByName.get(cleanName);
       const staffCode = o.isExternal ? '' : getStaffEmployeeCode(matchedStaff);
       const empCode = staffCode || (o.employeeCode || '').trim();
@@ -1730,6 +1756,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       grandTotalNet,
       bahtText: numberToThaiBahtText(grandTotalGross),
       missingCodeCount,
+      excludedShiftCount,
+      excludedShiftHours,
+      excludedInTimeHolidayCount,
+      excludedInTimeHolidayHours,
+      excludedDays: Array.from(excludedDaySet).sort((a, b) => a - b),
+      excludedHolidayDays: Array.from(excludedHolidayDaySet).sort((a, b) => a - b),
     };
   }, [
     otPayYearBE,
@@ -5106,6 +5138,30 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
                 หมายเหตุ: พบรายชื่อที่ยังไม่มีรหัสบุคลากร {otPaymentReportData.missingCodeCount} ราย — สามารถเพิ่มรหัสบุคลากรและปรับอัตราค่าตอบแทน OT ได้ที่{' '}
                 <strong>เมนู 5: จัดการบุคลากร &amp; ตั้งค่า</strong>
+              </div>
+            )}
+
+            {otPaymentReportData.excludedShiftCount > 0 && otPayShiftScope !== 'ALL_OT' && (
+              <div className="text-[11px] text-indigo-950 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <span className="font-bold">พบข้อมูลเวรในปฏิทินที่ยังไม่แสดงในตารางเบิกเงินนี้:</span>{' '}
+                  มีรายการกะอื่น (เช่น{' '}
+                  <strong>OT ในเวลาราชการ 08:00-16:00</strong>
+                  {otPaymentReportData.excludedInTimeHolidayCount > 0
+                    ? ` ในวันหยุด/เสาร์-อาทิตย์ วันที่ ${otPaymentReportData.excludedHolidayDays.join(', ')}`
+                    : otPaymentReportData.excludedDays.length > 0
+                    ? ` วันที่ ${otPaymentReportData.excludedDays.join(', ')}`
+                    : ''}
+                  ) จำนวน <strong>{otPaymentReportData.excludedShiftCount} รายการ</strong> (รวม{' '}
+                  <strong>{otPaymentReportData.excludedShiftHours} ชม.</strong>) ถูกกรองออกตามตัวเลือก &quot;ประเภทเวร OT&quot;
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOtPayShiftScope('ALL_OT')}
+                  className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold shrink-0 cursor-pointer shadow-2xs"
+                >
+                  แสดงรวมทุกประเภท OT (+{otPaymentReportData.excludedShiftCount} รายการ)
+                </button>
               </div>
             )}
           </div>

@@ -121,6 +121,12 @@ import {
   sendLineMessageViaServerProxy,
   uploadLineReportJpegViaAppsScript,
   saveUnitCostCenterViaAppsScript,
+  fetchServerDatabaseSnapshot,
+  pushServerMutation,
+  pushServerSync,
+  applyServerTombstonesLocally,
+  normalizeIncomingServerDb,
+  ServerSnapshotResponse,
   LineAutomationStatusInfo,
   AppDatabase
 } from './services/sheetsService';
@@ -177,6 +183,8 @@ export default function App() {
   const tabInstanceIdRef = useRef<string>(`tab-${Math.random().toString(36).slice(2)}-${Date.now()}`);
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
   const suppressNextBroadcastRef = useRef<boolean>(false);
+  const serverVersionRef = useRef<number>(0);
+  const wsRef = useRef<WebSocket | null>(null);
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -200,8 +208,261 @@ export default function App() {
     }
   }, [db]);
 
-  // Same-browser cross-tab real-time sync (BroadcastChannel + storage fallback)
+  const applyAuthoritativeServerSnapshot = useCallback(
+    (
+      snapshot: ServerSnapshotResponse | null | undefined,
+      source: 'init' | 'ws' | 'self_ws' | 'sync' | 'mutate'
+    ): boolean => {
+      if (!snapshot || !snapshot.ok) return false;
+      applyServerTombstonesLocally(snapshot.tombstones);
+
+      const incomingVer = Number(snapshot.version) || 0;
+      if (source === 'self_ws') {
+        if (incomingVer > serverVersionRef.current) {
+          serverVersionRef.current = incomingVer;
+        }
+        return true;
+      }
+
+      if (source === 'mutate') {
+        const prevVer = serverVersionRef.current;
+        if (incomingVer > prevVer) {
+          serverVersionRef.current = incomingVer;
+        }
+        // Only hydrate if server skipped ahead due to concurrent edits from other machines
+        if (!(prevVer > 0 && incomingVer > prevVer + 1)) {
+          return true;
+        }
+      } else {
+        if (incomingVer <= 0) return false;
+        if (source !== 'init' && incomingVer <= serverVersionRef.current) {
+          return false;
+        }
+        if (source === 'init' && incomingVer < serverVersionRef.current) {
+          return false;
+        }
+        serverVersionRef.current = incomingVer;
+      }
+
+      const hydrated = normalizeIncomingServerDb(snapshot.db, dbRef.current);
+
+      const boxW = getPendingOutboxWorkloads();
+      const wIds = new Set(hydrated.workloads.map((w) => w.id));
+      const wKeys = new Set(hydrated.workloads.map(getWorkloadKey));
+      const syncedW = boxW.filter((w) => wIds.has(w.id) || wKeys.has(getWorkloadKey(w)));
+      if (syncedW.length > 0) markWorkloadOutboxSynced(syncedW);
+      const pendingW = boxW.filter((w) => !wIds.has(w.id) && !wKeys.has(getWorkloadKey(w)));
+
+      const boxL = getPendingOutboxLeaves();
+      const lIds = new Set(hydrated.leaves.map((l) => l.id));
+      const lKeys = new Set(hydrated.leaves.map(getLeaveKey));
+      const syncedL = boxL.filter((l) => lIds.has(l.id) || lKeys.has(getLeaveKey(l)));
+      if (syncedL.length > 0) markLeaveOutboxSynced(syncedL);
+      const pendingL = boxL.filter((l) => !lIds.has(l.id) && !lKeys.has(getLeaveKey(l)));
+
+      const boxO = getPendingOutboxOt();
+      const oIds = new Set(hydrated.ot.map((o) => o.id));
+      const oKeys = new Set(hydrated.ot.map(getOtKey));
+      const syncedO = boxO.filter((o) => oIds.has(o.id) || oKeys.has(getOtKey(o)));
+      if (syncedO.length > 0) markOtOutboxSynced(syncedO);
+      const pendingO = boxO.filter((o) => !oIds.has(o.id) && !oKeys.has(getOtKey(o)));
+
+      const mergedDb: AppDatabase = {
+        ...hydrated,
+        workloads: pendingW.length > 0 ? [...pendingW, ...hydrated.workloads] : hydrated.workloads,
+        leaves: pendingL.length > 0 ? [...pendingL, ...hydrated.leaves] : hydrated.leaves,
+        ot: pendingO.length > 0 ? [...pendingO, ...hydrated.ot] : hydrated.ot,
+      };
+
+      suppressNextBroadcastRef.current = true;
+      dbRef.current = mergedDb;
+      setDb(mergedDb);
+      lastSyncEpochRef.current = Date.now();
+      setLastSyncedAt(
+        new Date().toLocaleTimeString('th-TH', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
+      return true;
+    },
+    []
+  );
+
+  const propagateServerMutation = useCallback(
+    async (action: string, payload: any) => {
+      const res = await pushServerMutation({
+        clientId: tabInstanceIdRef.current,
+        action,
+        payload,
+      });
+      if (res && res.ok) {
+        applyAuthoritativeServerSnapshot(res, 'mutate');
+      }
+    },
+    [applyAuthoritativeServerSnapshot]
+  );
+
+  // Real-time multi-machine WebSocket (/ws) + authoritative /api/db hydration + same-browser cross-tab sync
   useEffect(() => {
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    let pingTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let hasConnectedOnce = false;
+
+    const replayOfflineOutbox = async (currentDb: AppDatabase) => {
+      const wIds = new Set(currentDb.workloads.map((w) => w.id));
+      const wKeys = new Set(currentDb.workloads.map(getWorkloadKey));
+      const pendingW = getPendingOutboxWorkloads().filter(
+        (w) => !wIds.has(w.id) && !wKeys.has(getWorkloadKey(w))
+      );
+
+      const lIds = new Set(currentDb.leaves.map((l) => l.id));
+      const lKeys = new Set(currentDb.leaves.map(getLeaveKey));
+      const pendingL = getPendingOutboxLeaves().filter(
+        (l) => !lIds.has(l.id) && !lKeys.has(getLeaveKey(l))
+      );
+
+      const oIds = new Set(currentDb.ot.map((o) => o.id));
+      const oKeys = new Set(currentDb.ot.map(getOtKey));
+      const pendingO = getPendingOutboxOt().filter(
+        (o) => !oIds.has(o.id) && !oKeys.has(getOtKey(o))
+      );
+
+      if (pendingW.length > 0 || pendingL.length > 0 || pendingO.length > 0) {
+        const res = await pushServerMutation({
+          clientId: tabInstanceIdRef.current,
+          action: 'addWorkloads',
+          payload: { workloads: pendingW, leaves: pendingL, ot: pendingO },
+        });
+        if (res && res.ok && !disposed) {
+          if (pendingW.length > 0) markWorkloadOutboxSynced(pendingW);
+          if (pendingL.length > 0) markLeaveOutboxSynced(pendingL);
+          if (pendingO.length > 0) markOtOutboxSynced(pendingO);
+          applyAuthoritativeServerSnapshot(res, 'mutate');
+        }
+      }
+    };
+
+    const hydrateFromServer = async () => {
+      const snap = await fetchServerDatabaseSnapshot();
+      if (disposed || !snap || !snap.ok) return;
+      if (snap.version > 0) {
+        applyAuthoritativeServerSnapshot(snap, 'init');
+        await replayOfflineOutbox(dbRef.current);
+      } else {
+        const seedRes = await pushServerSync({
+          clientId: tabInstanceIdRef.current,
+          baseVersion: 0,
+          forceOverwrite: true,
+          db: dbRef.current,
+        });
+        if (!disposed && seedRes && seedRes.ok) {
+          serverVersionRef.current = Math.max(serverVersionRef.current, Number(seedRes.version) || 1);
+        }
+      }
+    };
+
+    void hydrateFromServer();
+
+    const connectWebSocket = () => {
+      if (disposed || typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (disposed) {
+            ws.close();
+            return;
+          }
+          reconnectAttempt = 0;
+          if (pingTimer !== null) window.clearInterval(pingTimer);
+          pingTimer = window.setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: 'ping' }));
+              } catch {
+                // ignore
+              }
+            }
+          }, 20_000);
+
+          if (hasConnectedOnce) {
+            void fetchServerDatabaseSnapshot().then(async (snap) => {
+              if (!disposed && snap && snap.ok && snap.version > 0) {
+                applyAuthoritativeServerSnapshot(snap, 'ws');
+                await replayOfflineOutbox(dbRef.current);
+              }
+            });
+          } else {
+            hasConnectedOnce = true;
+            if (serverVersionRef.current === 0) {
+              try {
+                ws.send(JSON.stringify({ type: 'sync:request' }));
+              } catch {
+                // ignore
+              }
+            }
+          }
+        };
+
+        ws.onmessage = (event) => {
+          if (disposed) return;
+          try {
+            const msg = JSON.parse(String(event.data || ''));
+            if (msg?.type === 'db:state') {
+              const isSelf = Boolean(msg.senderClientId && msg.senderClientId === tabInstanceIdRef.current);
+              applyAuthoritativeServerSnapshot(
+                {
+                  ok: true,
+                  version: Number(msg.version) || 0,
+                  updatedAt: msg.updatedAt,
+                  db: msg.db,
+                  tombstones: msg.tombstones,
+                },
+                isSelf ? 'self_ws' : 'ws'
+              );
+            }
+          } catch {
+            // ignore non-JSON messages
+          }
+        };
+
+        ws.onclose = () => {
+          if (pingTimer !== null) {
+            window.clearInterval(pingTimer);
+            pingTimer = null;
+          }
+          if (wsRef.current === ws) wsRef.current = null;
+          if (!disposed) {
+            const delay = Math.min(10_000, 1000 * Math.pow(2, reconnectAttempt));
+            reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
+            reconnectTimer = window.setTimeout(connectWebSocket, delay);
+          }
+        };
+
+        ws.onerror = () => {
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+        };
+      } catch {
+        if (!disposed) {
+          const delay = Math.min(10_000, 1000 * Math.pow(2, reconnectAttempt));
+          reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
+          reconnectTimer = window.setTimeout(connectWebSocket, delay);
+        }
+      }
+    };
+
+    connectWebSocket();
+
     const syncFromSiblingTab = () => {
       if (isSyncInFlightRef.current || adminWriteInFlightRef.current) return;
       const freshLocal = loadLocalDatabase();
@@ -233,6 +494,17 @@ export default function App() {
     window.addEventListener('storage', handleStorage);
 
     return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (pingTimer !== null) window.clearInterval(pingTimer);
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          // ignore
+        }
+        wsRef.current = null;
+      }
       window.removeEventListener('storage', handleStorage);
       try {
         syncChannelRef.current?.close();
@@ -241,7 +513,7 @@ export default function App() {
       }
       syncChannelRef.current = null;
     };
-  }, []);
+  }, [applyAuthoritativeServerSnapshot]);
 
   // Clear any legacy admin unlock state on load and handle ?sheetId= / ?gasUrl= from shared URL
   useEffect(() => {
@@ -259,18 +531,19 @@ export default function App() {
         const shouldUpdateSheet = Boolean(extractedId && extractedId !== db.settings.spreadsheetId);
         const shouldUpdateGas = Boolean(sharedGasParam && sharedGasParam !== (db.settings.gasUrl || ''));
         if (shouldUpdateSheet || shouldUpdateGas) {
-          setDb(prev => ({
-            ...prev,
-            settings: {
-              ...prev.settings,
-              spreadsheetId: extractedId || prev.settings.spreadsheetId,
-              spreadsheetUrl: extractedId
-                ? `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
-                : prev.settings.spreadsheetUrl,
-              gasUrl: sharedGasParam || prev.settings.gasUrl,
-              isUnlinked: false,
-            },
-          }));
+          const updatedSettings: SystemSettings = {
+            ...dbRef.current.settings,
+            spreadsheetId: extractedId || dbRef.current.settings.spreadsheetId,
+            spreadsheetUrl: extractedId
+              ? `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
+              : dbRef.current.settings.spreadsheetUrl,
+            gasUrl: sharedGasParam || dbRef.current.settings.gasUrl,
+            isUnlinked: false,
+          };
+          const nextLinkedDb: AppDatabase = { ...dbRef.current, settings: updatedSettings };
+          dbRef.current = nextLinkedDb;
+          setDb(nextLinkedDb);
+          void propagateServerMutation('saveSettings', { settings: updatedSettings });
           setToastMessage({
             text: `เชื่อมโยงฐานข้อมูล OPD อัตโนมัติเรียบร้อยแล้ว${extractedId ? ` (${extractedId.slice(0, 12)}...)` : ''}`,
             type: 'info',
@@ -456,6 +729,19 @@ export default function App() {
         lastSyncEpochRef.current = Date.now();
         lastSyncedKeyRef.current = syncKey;
         setLastSyncedAt(formatSyncTime());
+        void pushServerSync({
+          clientId: tabInstanceIdRef.current,
+          baseVersion: serverVersionRef.current,
+          mergeFromRemote: true,
+          db: nextDb,
+        }).then((srvRes) => {
+          if (!srvRes || !srvRes.ok) return;
+          if (srvRes.staleRejected) {
+            applyAuthoritativeServerSnapshot(srvRes, 'sync');
+          } else if (!srvRes.unchanged && srvRes.version > serverVersionRef.current) {
+            serverVersionRef.current = srvRes.version;
+          }
+        });
         return true;
       };
 
@@ -572,16 +858,21 @@ export default function App() {
     }
   }, [user, db.settings.spreadsheetId, db.settings.gasUrl, db.settings.autoSync, performBackgroundSync]);
 
-  // Background periodic polling (every 90s when tab visible) & focus catch-up so open tabs never go stale
+  // Background periodic polling (every 20s when tab visible) & focus/WS catch-up so open tabs stay aligned
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       void performBackgroundSync('interval');
-    }, 90_000);
+    }, 20_000);
 
     const handleWakeSync = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      if (Date.now() - lastSyncEpochRef.current > 30_000) {
+      void fetchServerDatabaseSnapshot().then((snap) => {
+        if (snap && snap.ok && snap.version > serverVersionRef.current) {
+          applyAuthoritativeServerSnapshot(snap, 'ws');
+        }
+      });
+      if (Date.now() - lastSyncEpochRef.current > 5_000) {
         void performBackgroundSync('focus');
       }
     };
@@ -593,7 +884,7 @@ export default function App() {
       window.removeEventListener('focus', handleWakeSync);
       document.removeEventListener('visibilitychange', handleWakeSync);
     };
-  }, [performBackgroundSync]);
+  }, [performBackgroundSync, applyAuthoritativeServerSnapshot]);
 
   // Manual Sync with linked Google Spreadsheet — works completely WITHOUT Google Sign-In
   const handleSyncSpreadsheet = async (overrideSheetId?: string) => {
@@ -621,6 +912,19 @@ export default function App() {
         setDb(nextDb);
         lastSyncEpochRef.current = Date.now();
         setLastSyncedAt(formatSyncTime());
+        void pushServerSync({
+          clientId: tabInstanceIdRef.current,
+          baseVersion: serverVersionRef.current,
+          mergeFromRemote: true,
+          db: nextDb,
+        }).then((srvRes) => {
+          if (!srvRes || !srvRes.ok) return;
+          if (srvRes.staleRejected) {
+            applyAuthoritativeServerSnapshot(srvRes, 'sync');
+          } else if (!srvRes.unchanged && srvRes.version > serverVersionRef.current) {
+            serverVersionRef.current = srvRes.version;
+          }
+        });
         return true;
       };
 
@@ -765,14 +1069,15 @@ export default function App() {
         db.settings
       );
 
-      setDb(prev => ({
-        ...prev,
-        settings: {
-          ...prev.settings,
-          spreadsheetId,
-          spreadsheetUrl,
-        }
-      }));
+      const updatedSettings: SystemSettings = {
+        ...dbRef.current.settings,
+        spreadsheetId,
+        spreadsheetUrl,
+      };
+      const nextLinkedDb = { ...dbRef.current, settings: updatedSettings };
+      dbRef.current = nextLinkedDb;
+      setDb(nextLinkedDb);
+      void propagateServerMutation('saveSettings', { settings: updatedSettings });
 
       showToast('สร้างฐานข้อมูล Google Sheets เรียบร้อยแล้ว!', 'success');
     } catch (err: any) {
@@ -975,6 +1280,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('addWorkloads', {
+      workloads: [entry],
+      leaves: newLeaveEntries,
+      ot: newOtEntries,
+    });
 
     const offStaffSavedCount = getWorkloadOffDutyStaff(entry).length;
     showToast(
@@ -1197,6 +1507,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('addWorkloads', {
+      workloads: entries,
+      leaves: newLeaveEntries,
+      ot: newOtEntries,
+    });
 
     const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
     const batchOffStaffCount = entries.reduce((sum, e) => sum + getWorkloadOffDutyStaff(e).length, 0);
@@ -1719,6 +2034,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('updateWorkload', {
+      target: prevItem,
+      updated: stamped,
+      auditEntry,
+    });
     showToast(`อัปเดตข้อมูลภาระงานห้องตรวจ ${updated.clinic} พร้อมบันทึกเหตุผลแล้ว`, 'success');
     enqueueAdminSync(
       'workloads',
@@ -1782,6 +2102,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('deleteWorkload', {
+      id,
+      target,
+      auditEntry,
+    });
     showToast('ลบรายการภาระงานพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
     enqueueAdminSync(
       'workloads',
@@ -1839,6 +2164,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('addLeave', { leave });
     showToast(`บันทึกวันลา ${leave.staffName} สำเร็จ!`, 'success');
 
     if (dbRef.current.settings.autoSync === false) return;
@@ -1938,6 +2264,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('updateLeave', {
+      target: prevItem,
+      updated: stamped,
+      auditEntry,
+    });
     showToast(`อัปเดตประวัติการลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
     enqueueAdminSync(
       'leaves',
@@ -2001,6 +2332,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('deleteLeave', {
+      id,
+      target,
+      auditEntry,
+    });
     showToast('ลบประวัติการลาพร้อมบันทึกเหตุผลเรียบร้อยแล้ว', 'info');
     enqueueAdminSync(
       'leaves',
@@ -2044,6 +2380,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('addOt', { records: validRecords });
     showToast(`บันทึกเวรนอกเวลาจำนวน ${validRecords.length} คน เรียบร้อยแล้ว!`, 'success');
 
     if (dbRef.current.settings.autoSync === false) return;
@@ -2172,6 +2509,12 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('updateOt', {
+      target: prevItem,
+      updated: stamped,
+      ...(promotedStaffDirtyVer !== null ? { staffList: nextStaffList } : {}),
+      auditEntry,
+    });
     showToast(`อัปเดตเวรนอกเวลา ${stamped.staffName} พร้อมบันทึกเหตุผลแล้ว`, 'success');
     const promotedTarget =
       promotedStaffDirtyVer !== null
@@ -2256,6 +2599,11 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('deleteOt', {
+      id,
+      target,
+      auditEntry,
+    });
     showToast('ลบรายการเวรนอกเวลาพร้อมบันทึกเหตุผลแล้ว', 'info');
     enqueueAdminSync(
       'ot',
@@ -2305,6 +2653,10 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('syncStaff', {
+      staff: nextStaff,
+      ...(otChanged ? { ot: nextOt } : {}),
+    });
     showToast(`เพิ่มเจ้าหน้าที่ ${normalizedStaff.name} เข้าสู่ระบบแล้ว`, 'success');
     enqueueAdminSync('staff', dirtyVer, undefined, {
       staff: {
@@ -2335,6 +2687,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('syncStaff', { staff: nextStaff });
     showToast(`ลบบุคลากร ${target?.name || ''} ออกจากระบบแล้ว`, 'info');
     enqueueAdminSync(
       'staff',
@@ -2408,6 +2761,10 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('syncStaff', {
+      staff: nextStaff,
+      ...(otChanged ? { ot: nextOt } : {}),
+    });
     showToast(`อัปเดตข้อมูลบุคลากร ${normalizedStaff.name} เรียบร้อยแล้ว`, 'success');
     enqueueAdminSync('staff', dirtyVer, undefined, {
       staff: {
@@ -2451,6 +2808,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('syncStaff', { staff: nextStaff });
     showToast(`อัปเดตสถานะเป็น ${status} สำเร็จ`, 'info');
     enqueueAdminSync(
       'staff',
@@ -2488,6 +2846,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('saveSettings', { settings });
     showToast('บันทึกการตั้งค่าเรียบร้อยแล้ว', 'success');
     enqueueAdminSync('settings', dirtyVer, undefined, {
       settings: { changedEntries, opSeq },
@@ -2510,6 +2869,7 @@ export default function App() {
     };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('saveSettings', { settings: nextDb.settings });
     enqueueAdminSync('settings', dirtyVer, undefined, {
       settings: { changedEntries: [], opSeq },
     });
@@ -2569,6 +2929,10 @@ export default function App() {
     const nextDb: AppDatabase = { ...baseDb, settings: nextSettings };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('saveUnitCostCenter', {
+      clinic: cleanClinic,
+      costCenter: cleanCostCenter,
+    });
 
     const gasUrl = (baseDb.settings.gasUrl || '').trim();
     if (gasUrl) {
@@ -2769,6 +3133,7 @@ export default function App() {
       const nextDb: AppDatabase = { ...dbRef.current, settings: finalSettings };
       dbRef.current = nextDb;
       setDb(nextDb);
+      void propagateServerMutation('saveSettings', { settings: finalSettings });
 
       showToast(
         config.enabled
@@ -2839,6 +3204,7 @@ export default function App() {
       const syncedFinal: AppDatabase = { ...res.syncedDb, settings: mergedSettings };
       dbRef.current = syncedFinal;
       setDb(syncedFinal);
+      void propagateServerMutation('saveSettings', { settings: mergedSettings });
     }
 
     showToast(
@@ -3023,6 +3389,7 @@ export default function App() {
       };
       dbRef.current = updatedDb;
       setDb(updatedDb);
+      void propagateServerMutation('saveSettings', { settings: updatedDb.settings });
 
       if (proxyRes.ok) {
         const formatSuffix =
@@ -3301,8 +3668,9 @@ export default function App() {
     const nextDb = { ...latest, settings: updatedSettings };
     dbRef.current = nextDb;
     setDb(nextDb);
+    void propagateServerMutation('saveSettings', { settings: updatedSettings });
     return res.status;
-  }, []);
+  }, [propagateServerMutation]);
 
   // Handler: Reset to clean empty production data
   const handleResetData = () => {
@@ -3324,6 +3692,7 @@ export default function App() {
     const clean = loadLocalDatabase();
     dbRef.current = clean;
     setDb(clean);
+    void propagateServerMutation('resetAll', { db: clean });
     showToast('ล้างข้อมูลทั้งหมดเรียบร้อยแล้ว พร้อมเริ่มต้นใช้งานจริง', 'info');
   };
 

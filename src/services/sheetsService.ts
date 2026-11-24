@@ -1039,22 +1039,268 @@ export const loadLocalDatabase = (): AppDatabase => {
   };
 };
 
-export const syncDatabaseToServer = async (db: AppDatabase): Promise<void> => {
+export interface ServerTombstones {
+  workloads: Record<string, number>;
+  leaves: Record<string, number>;
+  ot: Record<string, number>;
+}
+
+export interface ServerSnapshotResponse {
+  ok: boolean;
+  version: number;
+  updatedAt?: string;
+  staleRejected?: boolean;
+  unchanged?: boolean;
+  db: Partial<AppDatabase>;
+  tombstones?: ServerTombstones;
+}
+
+export const getAllTombstonesSnapshot = (): ServerTombstones => {
+  memTombstones = pruneExpiredTombstones(memTombstones);
+  return {
+    workloads: { ...memTombstones.workloads },
+    leaves: { ...memTombstones.leaves },
+    ot: { ...memTombstones.ot },
+  };
+};
+
+export const applyServerTombstonesLocally = (remoteTombstones?: Partial<ServerTombstones>): void => {
+  if (!remoteTombstones) return;
+  const cleanRemote = pruneExpiredTombstones(remoteTombstones);
+  let changed = false;
+
+  const mergeBucket = (
+    target: Record<string, number>,
+    src: Record<string, number>
+  ) => {
+    Object.entries(src).forEach(([k, ts]) => {
+      if (!target[k] || ts > target[k]) {
+        target[k] = ts;
+        changed = true;
+      }
+    });
+  };
+
+  mergeBucket(memTombstones.workloads, cleanRemote.workloads);
+  mergeBucket(memTombstones.leaves, cleanRemote.leaves);
+  mergeBucket(memTombstones.ot, cleanRemote.ot);
+
+  if (changed) {
+    persistTombstones();
+  }
+
+  // Prune any outbox or recentSaved entries matching tombstones propagated from another machine
+  const box = readPendingOutboxFresh();
+  let boxChanged = false;
+  const nextBoxW = box.workloads.filter(
+    (w) => !(workloadKey(w) in memTombstones.workloads) && !(`id:${w.id}` in memTombstones.workloads)
+  );
+  if (nextBoxW.length !== box.workloads.length) {
+    box.workloads = nextBoxW;
+    boxChanged = true;
+  }
+  const nextBoxL = box.leaves.filter(
+    (l) => !(leaveKey(l) in memTombstones.leaves) && !(`id:${l.id}` in memTombstones.leaves)
+  );
+  if (nextBoxL.length !== box.leaves.length) {
+    box.leaves = nextBoxL;
+    boxChanged = true;
+  }
+  const nextBoxO = box.ot.filter(
+    (o) => !(otKey(o) in memTombstones.ot) && !(`id:${o.id}` in memTombstones.ot)
+  );
+  if (nextBoxO.length !== box.ot.length) {
+    box.ot = nextBoxO;
+    boxChanged = true;
+  }
+  if (boxChanged) {
+    memPendingOutbox = box;
+    persistPendingOutbox();
+  }
+
+  recentSavedWorkloads = recentSavedWorkloads.filter(
+    (x) => !(x.key in memTombstones.workloads) && !(`id:${x.id}` in memTombstones.workloads)
+  );
+  recentSavedLeaves = recentSavedLeaves.filter(
+    (x) => !(x.key in memTombstones.leaves) && !(`id:${x.id}` in memTombstones.leaves)
+  );
+  recentSavedOt = recentSavedOt.filter(
+    (x) => !(x.key in memTombstones.ot) && !(`id:${x.id}` in memTombstones.ot)
+  );
+};
+
+export const normalizeIncomingServerDb = (
+  rawDb: Partial<AppDatabase> | null | undefined,
+  fallbackDb: AppDatabase
+): AppDatabase => {
+  const src = rawDb || {};
+  const rawSettings: any = src.settings && typeof src.settings === 'object' ? src.settings : {};
+  const mergedPremiumClinics =
+    Array.isArray(rawSettings.premiumSubClinics) && rawSettings.premiumSubClinics.length > 0
+      ? rawSettings.premiumSubClinics
+      : fallbackDb.settings.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
+
+  const isUnlinked = Boolean(rawSettings.isUnlinked);
+  const storedSheetId =
+    typeof rawSettings.spreadsheetId === 'string' ? rawSettings.spreadsheetId.trim() : '';
+  const storedSheetUrl =
+    typeof rawSettings.spreadsheetUrl === 'string' ? rawSettings.spreadsheetUrl.trim() : '';
+  const storedGasUrl =
+    typeof rawSettings.gasUrl === 'string' ? rawSettings.gasUrl.trim() : '';
+
+  const mergedSettings: SystemSettings = {
+    ...INITIAL_SETTINGS,
+    ...fallbackDb.settings,
+    ...rawSettings,
+    screeningNhppd:
+      Number(rawSettings.screeningNhppd) > 0
+        ? Number(rawSettings.screeningNhppd)
+        : fallbackDb.settings.screeningNhppd || 0.1,
+    inTimeClinics: ensureReferralInClinicList(
+      Array.isArray(rawSettings.inTimeClinics) && rawSettings.inTimeClinics.length > 0
+        ? rawSettings.inTimeClinics
+        : fallbackDb.settings.inTimeClinics
+    ),
+    outTimeClinics:
+      Array.isArray(rawSettings.outTimeClinics) && rawSettings.outTimeClinics.length > 0
+        ? rawSettings.outTimeClinics
+        : fallbackDb.settings.outTimeClinics,
+    premiumSubClinics: mergedPremiumClinics,
+    leaveTypes:
+      Array.isArray(rawSettings.leaveTypes) && rawSettings.leaveTypes.length > 0
+        ? rawSettings.leaveTypes
+        : fallbackDb.settings.leaveTypes,
+    customHolidays: Array.isArray(rawSettings.customHolidays)
+      ? rawSettings.customHolidays
+      : fallbackDb.settings.customHolidays || [],
+    primaryAdminOwner:
+      typeof rawSettings.primaryAdminOwner === 'string' && rawSettings.primaryAdminOwner.trim()
+        ? rawSettings.primaryAdminOwner.trim()
+        : fallbackDb.settings.primaryAdminOwner || DEFAULT_PRIMARY_ADMIN_OWNER,
+    additionalAdminPins: normalizeAdditionalAdminPins(
+      rawSettings.additionalAdminPins || fallbackDb.settings.additionalAdminPins
+    ),
+    spreadsheetId: isUnlinked
+      ? undefined
+      : storedSheetId || fallbackDb.settings.spreadsheetId || INITIAL_SETTINGS.spreadsheetId,
+    spreadsheetUrl: isUnlinked
+      ? undefined
+      : storedSheetUrl || fallbackDb.settings.spreadsheetUrl || INITIAL_SETTINGS.spreadsheetUrl,
+    gasUrl: isUnlinked
+      ? ''
+      : storedGasUrl || fallbackDb.settings.gasUrl || INITIAL_SETTINGS.gasUrl || '',
+    isUnlinked,
+    autoSync:
+      rawSettings.autoSync !== undefined
+        ? Boolean(rawSettings.autoSync)
+        : fallbackDb.settings.autoSync !== false,
+  };
+
+  const rawStaff = Array.isArray(src.staff) ? src.staff : fallbackDb.staff;
+  const rawWorkloads = Array.isArray(src.workloads) ? src.workloads : fallbackDb.workloads;
+  const rawLeaves = Array.isArray(src.leaves) ? src.leaves : fallbackDb.leaves;
+  const rawOt = Array.isArray(src.ot) ? src.ot : fallbackDb.ot;
+
+  const migratedWorkloads = rawWorkloads.map((w: any) => {
+    const adult = Number(w.adultPt) || 0;
+    const child = Number(w.childPt) || 0;
+    const total = Math.max(Number(w.totalPt) || 0, adult + child);
+    return normalizeWorkloadRecord(
+      {
+        ...w,
+        totalPt: total,
+        na: w.na !== undefined ? Number(w.na) : Number(w.pca || 0),
+      },
+      mergedPremiumClinics
+    );
+  });
+
+  const migratedLeaves = rawLeaves.map((l: any) => ({
+    ...l,
+    position: normalizeStaffPosition(l.position),
+  }));
+
+  const migratedOt = rawOt.map((o: any) => ({
+    ...o,
+    position: normalizeStaffPosition(o.position),
+  }));
+
+  const hydrated = hydrateUnifiedStaffAndOt(
+    rawStaff.map((s: StaffMember) => ({ ...s, position: normalizeStaffPosition(s.position) })),
+    migratedOt
+  );
+
+  return {
+    staff: hydrated.staff,
+    workloads: migratedWorkloads,
+    leaves: migratedLeaves,
+    ot: hydrated.ot,
+    auditLogs: Array.isArray(src.auditLogs) ? src.auditLogs : fallbackDb.auditLogs || [],
+    settings: mergedSettings,
+  };
+};
+
+export const fetchServerDatabaseSnapshot = async (): Promise<ServerSnapshotResponse | null> => {
   try {
-    await fetch('/api/db/sync', {
+    const res = await fetch('/api/db', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as ServerSnapshotResponse;
+    return data && data.ok ? data : null;
+  } catch {
+    return null;
+  }
+};
+
+export const pushServerMutation = async (params: {
+  clientId: string;
+  action: string;
+  payload: any;
+}): Promise<ServerSnapshotResponse | null> => {
+  try {
+    const res = await fetch('/api/db/mutate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(db),
+      body: JSON.stringify(params),
     });
+    if (!res.ok) return null;
+    const data = (await res.json()) as ServerSnapshotResponse;
+    return data && data.ok ? data : null;
   } catch {
-    // ignore
+    return null;
+  }
+};
+
+export const pushServerSync = async (params: {
+  clientId: string;
+  baseVersion?: number;
+  forceOverwrite?: boolean;
+  mergeFromRemote?: boolean;
+  db: AppDatabase;
+}): Promise<ServerSnapshotResponse | null> => {
+  try {
+    const res = await fetch('/api/db/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: params.clientId,
+        baseVersion: params.baseVersion,
+        forceOverwrite: params.forceOverwrite,
+        mergeFromRemote: params.mergeFromRemote,
+        db: params.db,
+        tombstones: getAllTombstonesSnapshot(),
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as ServerSnapshotResponse;
+    return data && data.ok ? data : null;
+  } catch {
+    return null;
   }
 };
 
 export const saveLocalDatabase = (db: AppDatabase): void => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-    void syncDatabaseToServer(db);
   } catch (err) {
     console.error('Error saving local DB:', err);
     try {
@@ -1063,7 +1309,6 @@ export const saveLocalDatabase = (db: AppDatabase): void => {
         auditLogs: (db.auditLogs || []).slice(0, 150),
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmedDb));
-      void syncDatabaseToServer(trimmedDb);
     } catch (retryErr) {
       console.error('Retry saving trimmed local DB failed:', retryErr);
     }
