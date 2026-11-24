@@ -46,6 +46,8 @@ import {
   LineSendFormat,
   resolveLineSendFormat,
   DEFAULT_BOOBY_OWNER_NAME,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -667,13 +669,32 @@ export const getPendingOutboxAuditLogs = (): AuditLogEntry[] => [
   ...readPendingOutboxFresh().auditLogs,
 ];
 
+const inFlightWorkloadSlotKeys = new Set<string>();
+const activeWorkloadAppendPromises = new Set<Promise<unknown>>();
+
+export const isWorkloadSlotInFlight = (w: DailyWorkload): boolean =>
+  inFlightWorkloadSlotKeys.has(getWorkloadSlotKey(w));
+
+export const waitForInFlightWorkloadAppends = async (): Promise<void> => {
+  if (activeWorkloadAppendPromises.size === 0) return;
+  try {
+    await Promise.allSettled(Array.from(activeWorkloadAppendPromises));
+  } catch {
+    // ignore
+  }
+};
+
 export const enqueuePendingOutboxWorkloads = (items: DailyWorkload[]): void => {
   if (!items || items.length === 0) return;
   const box = readPendingOutboxFresh();
   const seenIds = new Set(box.workloads.map((w) => w.id));
+  const seenSlots = new Set(box.workloads.map(getWorkloadSlotKey));
   items.forEach((w) => {
-    if (w && !seenIds.has(w.id)) {
+    if (!w) return;
+    const slotKey = getWorkloadSlotKey(w);
+    if (!seenIds.has(w.id) && !seenSlots.has(slotKey)) {
       seenIds.add(w.id);
+      seenSlots.add(slotKey);
       box.workloads.push(w);
     }
   });
@@ -686,8 +707,12 @@ export const markWorkloadOutboxSynced = (items: DailyWorkload[]): void => {
   const box = readPendingOutboxFresh();
   const removeIds = new Set(items.map((w) => w.id).filter(Boolean));
   const removeKeys = new Set(items.map(workloadKey));
+  const removeSlots = new Set(items.map(getWorkloadSlotKey));
   box.workloads = box.workloads.filter(
-    (w) => !removeIds.has(w.id) && !removeKeys.has(workloadKey(w))
+    (w) =>
+      !removeIds.has(w.id) &&
+      !removeKeys.has(workloadKey(w)) &&
+      !removeSlots.has(getWorkloadSlotKey(w))
   );
   memPendingOutbox = box;
   persistPendingOutbox();
@@ -1009,7 +1034,7 @@ export const loadLocalDatabase = (): AppDatabase => {
 
       const cleanDb: AppDatabase = {
         staff: hydratedLocal.staff,
-        workloads: migratedWorkloads,
+        workloads: deduplicateWorkloads(migratedWorkloads, mergedPremiumClinics),
         leaves: migratedLeaves,
         ot: hydratedLocal.ot,
         auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
@@ -1232,7 +1257,7 @@ export const normalizeIncomingServerDb = (
 
   return {
     staff: hydrated.staff,
-    workloads: migratedWorkloads,
+    workloads: deduplicateWorkloads(migratedWorkloads, mergedPremiumClinics),
     leaves: migratedLeaves,
     ot: hydrated.ot,
     auditLogs: Array.isArray(src.auditLogs) ? src.auditLogs : fallbackDb.auditLogs || [],
@@ -1605,6 +1630,46 @@ export function getWorkloadKey(w: DailyWorkload): string {
   return parts.join('|');
 }
 
+export function getWorkloadSlotKey(w: DailyWorkload): string {
+  const normDate = normalizeWorkloadDateStr(w?.date) || String(w?.date || '').trim();
+  const normShift = normalizeWorkloadShiftStr(w?.shift);
+  const normClinic = String(w?.clinic || '').trim();
+  const recGroup =
+    w?.recordType === 'PREMIUM_SUB' || w?.recordType === 'PREMIUM_POOL'
+      ? w.recordType
+      : 'STANDARD';
+  return `${normDate}|${normShift}|${normClinic}|${recGroup}`;
+}
+
+export function deduplicateWorkloads(
+  items: DailyWorkload[],
+  premiumSubClinics?: string[]
+): DailyWorkload[] {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const bySlot = new Map<string, DailyWorkload>();
+  for (const rawItem of items) {
+    if (!rawItem || !rawItem.date || !rawItem.clinic) continue;
+    const item = normalizeWorkloadRecord(
+      { ...rawItem, totalPt: getEffectiveTotalPt(rawItem) },
+      premiumSubClinics
+    );
+    const slotKey = getWorkloadSlotKey(item);
+    const existing = bySlot.get(slotKey);
+    if (!existing) {
+      bySlot.set(slotKey, item);
+      continue;
+    }
+    const existingEdited = Boolean(existing.lastEditedAt);
+    const itemEdited = Boolean(item.lastEditedAt);
+    if (itemEdited && !existingEdited) {
+      bySlot.set(slotKey, item);
+    } else if (itemEdited && existingEdited && String(item.lastEditedAt) > String(existing.lastEditedAt)) {
+      bySlot.set(slotKey, item);
+    }
+  }
+  return Array.from(bySlot.values());
+}
+
 function workloadKey(w: DailyWorkload): string {
   return getWorkloadKey(w);
 }
@@ -1787,12 +1852,18 @@ export const syncAllWithGoogleSheet = async (
 
   const shouldOverwriteWorkloads = isWorkloadsDirty();
   const sheetWKeys = new Set(sheetWorkloads.map(workloadKey));
+  const sheetWSlots = new Set(sheetWorkloads.map(getWorkloadSlotKey));
   const localWKeys = new Set(db.workloads.map(workloadKey));
   pruneOutboxSyncedAgainstRemote({ remoteWKeys: sheetWKeys });
 
   const workloadsToPush = shouldOverwriteWorkloads
     ? []
-    : getPendingOutboxWorkloads().filter((w) => !sheetWKeys.has(workloadKey(w)));
+    : getPendingOutboxWorkloads().filter(
+        (w) =>
+          !sheetWKeys.has(workloadKey(w)) &&
+          !sheetWSlots.has(getWorkloadSlotKey(w)) &&
+          !isWorkloadSlotInFlight(w)
+      );
   const workloadsPulled = shouldOverwriteWorkloads
     ? []
     : sheetWorkloads.filter((w) => !localWKeys.has(workloadKey(w)));
@@ -1805,7 +1876,7 @@ export const syncAllWithGoogleSheet = async (
     else existingWorkloadQueue.set(k, [w]);
   });
 
-  const mergedWorkloads = (
+  const mergedWorkloads = deduplicateWorkloads(
     shouldOverwriteWorkloads
       ? db.workloads
       : [
@@ -1822,15 +1893,9 @@ export const syncAllWithGoogleSheet = async (
               lastEditedBy: prev.lastEditedBy,
             };
           }),
-        ]
-  )
-    .map((w) =>
-      normalizeWorkloadRecord(
-        { ...w, totalPt: getEffectiveTotalPt(w) },
-        db.settings.premiumSubClinics
-      )
-    )
-    .sort((a, b) => b.date.localeCompare(a.date));
+        ],
+    db.settings.premiumSubClinics
+  ).sort((a, b) => b.date.localeCompare(a.date));
 
   // 3. Parse Leave_Records from sheet & merge cleanly (Sheet + Pending Outbox)
   const sheetLeaves: LeaveRecord[] = leaveRawRows
@@ -2914,9 +2979,10 @@ function mergeRemoteDataRows(
       }
     });
 
-    mergedWorkloads = [...outboxAndJustPushedW, ...sheetWorkloads].sort((a, b) =>
-      b.date.localeCompare(a.date)
-    );
+    mergedWorkloads = deduplicateWorkloads(
+      [...outboxAndJustPushedW, ...sheetWorkloads],
+      remotePremiumClinics
+    ).sort((a, b) => b.date.localeCompare(a.date));
   }
 
   const deletedLKeys = getDeletedLeaveKeySet();
@@ -3393,49 +3459,83 @@ export const appendViaAppsScript = async (
   action: 'appendWorkload' | 'appendLeave' | 'appendOT',
   payload: unknown
 ): Promise<boolean> => {
-  try {
-    const normalizedPayload =
-      action === 'appendWorkload'
-        ? Array.isArray(payload)
-          ? (payload as DailyWorkload[]).map(prepareWorkloadForRemote)
-          : prepareWorkloadForRemote(payload as DailyWorkload)
-        : action === 'appendOT'
-        ? Array.isArray(payload)
-          ? (payload as OTAttendance[]).map(prepareOtForRemote)
-          : prepareOtForRemote(payload as OTAttendance)
-        : payload;
-    const bodyObj =
-      action === 'appendWorkload'
-        ? {
-            action,
-            payload: normalizedPayload,
-            records: Array.isArray(normalizedPayload) ? normalizedPayload : [normalizedPayload],
-          }
-        : { action, payload: normalizedPayload };
-    const res = await fetch(gasUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(bodyObj),
-    });
-    const rawText = await res.text();
-    if (!res.ok) {
-      console.error(`Apps Script HTTP ${res.status} for ${action}:`, rawText.slice(0, 300));
-      return false;
-    }
-    try {
-      const data = JSON.parse(rawText);
-      if (!data?.success) {
-        console.error(`Apps Script rejected ${action}:`, data);
+  const claimedWorkloadSlots: string[] = [];
+  if (action === 'appendWorkload') {
+    const rawItems = (Array.isArray(payload) ? payload : [payload]) as DailyWorkload[];
+    const uniqueItems: DailyWorkload[] = [];
+    const seenBatchSlots = new Set<string>();
+    for (const item of rawItems) {
+      if (!item || !item.date || !item.clinic) continue;
+      const slot = getWorkloadSlotKey(item);
+      if (seenBatchSlots.has(slot) || inFlightWorkloadSlotKeys.has(slot)) {
+        continue;
       }
-      return Boolean(data?.success);
-    } catch {
-      console.error(`Non-JSON response from Apps Script for ${action} (check Web App permission = Anyone):`, rawText.slice(0, 300));
-      return false;
+      seenBatchSlots.add(slot);
+      inFlightWorkloadSlotKeys.add(slot);
+      claimedWorkloadSlots.push(slot);
+      uniqueItems.push(item);
     }
-  } catch (err) {
-    console.error(`Failed to ${action} via Apps Script:`, err);
-    return false;
+    if (uniqueItems.length === 0) {
+      // Nothing new to append because an append for this slot is already in flight
+      return true;
+    }
+    payload = Array.isArray(payload) ? uniqueItems : uniqueItems[0];
   }
+
+  const runPromise = (async (): Promise<boolean> => {
+    try {
+      const normalizedPayload =
+        action === 'appendWorkload'
+          ? Array.isArray(payload)
+            ? (payload as DailyWorkload[]).map(prepareWorkloadForRemote)
+            : prepareWorkloadForRemote(payload as DailyWorkload)
+          : action === 'appendOT'
+          ? Array.isArray(payload)
+            ? (payload as OTAttendance[]).map(prepareOtForRemote)
+            : prepareOtForRemote(payload as OTAttendance)
+          : payload;
+      const bodyObj =
+        action === 'appendWorkload'
+          ? {
+              action,
+              payload: normalizedPayload,
+              records: Array.isArray(normalizedPayload) ? normalizedPayload : [normalizedPayload],
+            }
+          : { action, payload: normalizedPayload };
+      const res = await fetch(gasUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(bodyObj),
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        console.error(`Apps Script HTTP ${res.status} for ${action}:`, rawText.slice(0, 300));
+        return false;
+      }
+      try {
+        const data = JSON.parse(rawText);
+        if (!data?.success) {
+          console.error(`Apps Script rejected ${action}:`, data);
+        }
+        return Boolean(data?.success);
+      } catch {
+        console.error(`Non-JSON response from Apps Script for ${action} (check Web App permission = Anyone):`, rawText.slice(0, 300));
+        return false;
+      }
+    } catch (err) {
+      console.error(`Failed to ${action} via Apps Script:`, err);
+      return false;
+    } finally {
+      claimedWorkloadSlots.forEach((slot) => inFlightWorkloadSlotKeys.delete(slot));
+    }
+  })();
+
+  if (action === 'appendWorkload') {
+    activeWorkloadAppendPromises.add(runPromise);
+    runPromise.finally(() => activeWorkloadAppendPromises.delete(runPromise));
+  }
+
+  return await runPromise;
 };
 
 export const hasPendingAdminDirtyFlags = (): boolean =>
@@ -3460,6 +3560,9 @@ export const syncPublicViaAppsScript = async (
   needsStaffIdUpgrade?: boolean;
 }> => {
   try {
+    // Wait for any in-flight direct workload appends before reading remote Sheet to prevent double-append race!
+    await waitForInFlightWorkloadAppends();
+
     const sep = gasUrl.includes('?') ? '&' : '?';
     const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
       method: 'GET',
@@ -3487,6 +3590,7 @@ export const syncPublicViaAppsScript = async (
     );
 
     const remoteWKeys = new Set(remoteWorkloads.map(workloadKey));
+    const remoteWSlots = new Set(remoteWorkloads.map(getWorkloadSlotKey));
     const remoteLKeys = new Set(remoteLeaves.map(leaveKey));
     const remoteOKeys = new Set(remoteOt.map(otKey));
 
@@ -3495,7 +3599,11 @@ export const syncPublicViaAppsScript = async (
 
     const workloadsToPush = !isWorkloadsDirty()
       ? getPendingOutboxWorkloads().filter(
-          (w) => !deletedWKeys.has(workloadKey(w)) && !remoteWKeys.has(workloadKey(w))
+          (w) =>
+            !deletedWKeys.has(workloadKey(w)) &&
+            !remoteWKeys.has(workloadKey(w)) &&
+            !remoteWSlots.has(getWorkloadSlotKey(w)) &&
+            !isWorkloadSlotInFlight(w)
         )
       : [];
     const leavesToPush = !isLeavesDirty()

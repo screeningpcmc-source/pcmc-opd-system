@@ -47,6 +47,8 @@ import {
   getWorkloadOffDutyReason,
   getWorkloadOffDutyStaff,
   formatOffDutyStaffSummaryText,
+  normalizeWorkloadDateStr,
+  normalizeWorkloadShiftStr,
 } from '../types';
 import {
   formatThaiShortDate,
@@ -197,6 +199,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   // Notes & Reporter (empty by default & required)
   const [note, setNote] = useState<string>('');
   const [reporter, setReporter] = useState<string>(defaultReporter);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const submittingRef = useRef<boolean>(false);
 
   // Off เวรเจ้าหน้าที่ตำแหน่งรายวัน (กรณียอดผู้ป่วยน้อยลง — รองรับทั้งในเวลาและนอกเวลาราชการ)
   const [hasStaffOffDuty, setHasStaffOffDuty] = useState<boolean>(false);
@@ -351,12 +355,14 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   }, [workloads, date, shift]);
 
   const existingPremiumSubClinics = useMemo(() => {
+    const normDate = normalizeWorkloadDateStr(date);
+    const normShift = normalizeWorkloadShiftStr(shift);
     return new Set(
       workloads
         .filter(
           w =>
-            w.date === date &&
-            w.shift === shift &&
+            normalizeWorkloadDateStr(w.date) === normDate &&
+            normalizeWorkloadShiftStr(w.shift) === normShift &&
             (w.recordType === 'PREMIUM_SUB' ||
               ((isPremiumGroupName(w.clinicGroup) || /-Premium$/i.test(w.clinic)) &&
                 !isPremiumPoolClinicName(w.clinic)))
@@ -368,12 +374,14 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const existingDuplicateWorkload = useMemo(() => {
     if (isPremiumClinic) return null;
     const targetClinic = (clinic || '').trim();
-    if (!targetClinic || !date || !shift) return null;
+    const normDate = normalizeWorkloadDateStr(date);
+    const normShift = normalizeWorkloadShiftStr(shift);
+    if (!targetClinic || !normDate || !normShift) return null;
     return (
       workloads.find(
         w =>
-          w.date === date &&
-          w.shift === shift &&
+          normalizeWorkloadDateStr(w.date) === normDate &&
+          normalizeWorkloadShiftStr(w.shift) === normShift &&
           (w.clinic || '').trim() === targetClinic &&
           w.recordType !== 'PREMIUM_SUB' &&
           w.recordType !== 'PREMIUM_POOL'
@@ -1189,8 +1197,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     }, 30);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     setFormError('');
 
     if (existingDuplicateWorkload) {
@@ -1389,17 +1398,28 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
         });
       });
 
-      if (onSaveBatchWorkloads) {
-        onSaveBatchWorkloads(recordsToSave, leaveData, crossCoverageData, trainingData);
-      } else {
-        recordsToSave.forEach((rec, idx) => {
-          onSaveWorkload(
-            rec,
-            idx === 0 ? leaveData : null,
-            idx === 0 ? crossCoverageData : null,
-            idx === 0 ? trainingData : null
+      submittingRef.current = true;
+      setIsSubmitting(true);
+      try {
+        if (onSaveBatchWorkloads) {
+          await Promise.resolve(
+            onSaveBatchWorkloads(recordsToSave, leaveData, crossCoverageData, trainingData)
           );
-        });
+        } else {
+          for (let idx = 0; idx < recordsToSave.length; idx++) {
+            await Promise.resolve(
+              onSaveWorkload(
+                recordsToSave[idx],
+                idx === 0 ? leaveData : null,
+                idx === 0 ? crossCoverageData : null,
+                idx === 0 ? trainingData : null
+              )
+            );
+          }
+        }
+      } finally {
+        submittingRef.current = false;
+        setIsSubmitting(false);
       }
 
       setPremiumInputs({});
@@ -1468,7 +1488,14 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       timestamp: new Date().toISOString(),
     };
 
-    onSaveWorkload(newEntry, leaveData, crossCoverageData, trainingData);
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      await Promise.resolve(onSaveWorkload(newEntry, leaveData, crossCoverageData, trainingData));
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
 
     // Reset sensitive fields & restore active clinic roster defaults
     setHasStaffOffDuty(false);
@@ -3582,7 +3609,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             <div className="mt-auto pt-2 flex justify-end">
               <button
                 type="submit"
-                disabled={Boolean(existingDuplicateWorkload)}
+                disabled={Boolean(existingDuplicateWorkload) || isSubmitting}
                 className={`inline-flex items-center gap-2 px-6 py-2.5 text-white font-semibold text-sm rounded-xl shadow-md transition-all cursor-pointer hover:shadow-lg disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed disabled:shadow-none ${
                   isPremiumClinic
                     ? 'bg-orange-600 hover:bg-orange-500 active:bg-orange-700'
@@ -3593,7 +3620,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
               >
                 <FileCheck2 className="w-4 h-4" />
                 <span>
-                  {existingDuplicateWorkload
+                  {isSubmitting
+                    ? 'กำลังบันทึกข้อมูล...'
+                    : existingDuplicateWorkload
                     ? 'มีข้อมูลภาระงานกะนี้แล้ว (บันทึกซ้ำไม่ได้)'
                     : isPremiumClinic
                     ? 'บันทึกข้อมูลศูนย์ปัญญาภิรมย์ (กำลังคน + ยอดผู้ป่วย)'

@@ -317,6 +317,43 @@ function normalizeTimeServer(raw?: string, fallback = DEFAULT_LINE_AUTO_TIME): s
   return fallback;
 }
 
+function normalizeDateYmdServer(raw: unknown): string {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    let y = Number(iso[1]);
+    if (y >= 2400) y -= 543;
+    return `${y}-${String(Number(iso[2])).padStart(2, '0')}-${String(Number(iso[3])).padStart(2, '0')}`;
+  }
+  const slash = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+  if (slash) {
+    const d = Number(slash[1]);
+    const m = Number(slash[2]);
+    let yr = Number(slash[3]);
+    if (yr < 100) yr += yr >= 55 ? 2500 - 543 : 2000;
+    else if (yr >= 2400) yr -= 543;
+    return `${yr}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  return s;
+}
+
+function normalizeShiftStrServer(raw: unknown): string {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function canonicalLineScheduleKeyServer(scheduleId?: string, time?: string, shift?: string): string {
+  const idClean = String(scheduleId || '').trim().toLowerCase();
+  if (idClean === 'sch-regular' || idClean === 'workday_reg') return 'WORKDAY_REG';
+  if (idClean === 'sch-ot-weekday' || idClean === 'workday_evening') return 'WORKDAY_EVENING';
+  if (idClean === 'sch-ot-holiday' || idClean === 'holiday_morning') return 'HOLIDAY_MORNING';
+  const normTime = time ? normalizeTimeServer(time, '') : '';
+  const normShift = normalizeShiftStrServer(shift);
+  if (normTime && normShift) return `${normTime}|${normShift}`;
+  if (idClean) return idClean.toUpperCase();
+  return 'DEFAULT';
+}
+
 const THAI_FIXED_HOLIDAYS_MD = new Set([
   '01-01', '04-06', '04-13', '04-14', '04-15', '05-04', '06-03',
   '07-28', '08-12', '10-13', '10-23', '12-05', '12-10', '12-31',
@@ -492,7 +529,59 @@ async function createAppServer(): Promise<void> {
   });
 
   const SERVER_DB_PATH = path.join(process.cwd(), 'server-db.json');
+  const LINE_AUTO_STATE_PATH = path.join(process.cwd(), 'line-auto-state.json');
   const SERVER_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const LINE_CLAIM_TTL_MS = 90_000;
+
+  interface LineAutoDailyState {
+    completedKeys: Record<string, { at: string; withImage: boolean; statusText?: string }>;
+    completedImageKeys: Record<string, string>;
+  }
+
+  const lineInFlightClaims = new Map<
+    string,
+    { claimToken: string; clientId: string; wantImage: boolean; expiresAt: number }
+  >();
+
+  function loadLineAutoState(): LineAutoDailyState {
+    try {
+      if (fs.existsSync(LINE_AUTO_STATE_PATH)) {
+        const raw = JSON.parse(fs.readFileSync(LINE_AUTO_STATE_PATH, 'utf8'));
+        return {
+          completedKeys: raw?.completedKeys && typeof raw.completedKeys === 'object' ? raw.completedKeys : {},
+          completedImageKeys:
+            raw?.completedImageKeys && typeof raw.completedImageKeys === 'object' ? raw.completedImageKeys : {},
+        };
+      }
+    } catch {
+      // ignore corrupted state file
+    }
+    return { completedKeys: {}, completedImageKeys: {} };
+  }
+
+  function saveLineAutoState(state: LineAutoDailyState): void {
+    try {
+      const cutoffDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      const cutoffYmd = getBangkokDateParts(cutoffDate).ymd;
+      const keepRecent = <T>(obj: Record<string, T>): Record<string, T> => {
+        const out: Record<string, T> = {};
+        for (const [k, v] of Object.entries(obj || {})) {
+          const ymdPart = k.split('|').pop() || '';
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(ymdPart) || ymdPart >= cutoffYmd) {
+            out[k] = v;
+          }
+        }
+        return out;
+      };
+      const cleaned: LineAutoDailyState = {
+        completedKeys: keepRecent(state.completedKeys),
+        completedImageKeys: keepRecent(state.completedImageKeys),
+      };
+      fs.writeFileSync(LINE_AUTO_STATE_PATH, JSON.stringify(cleaned, null, 2), 'utf8');
+    } catch {
+      // ignore write failures
+    }
+  }
 
   interface ServerGroupNote {
     id: string;
@@ -558,12 +647,66 @@ async function createAppServer(): Promise<void> {
     };
   }
 
+  function serverWorkloadSlotKey(w: any): string {
+    const normDate = normalizeDateYmdServer(w?.date);
+    const normShift = normalizeShiftStrServer(w?.shift);
+    const normClinic = String(w?.clinic || '').trim();
+    const rawType = String(w?.recordType || 'STANDARD').trim().toUpperCase();
+    const typeGroup =
+      rawType === 'PREMIUM_SUB'
+        ? 'PREMIUM_SUB'
+        : rawType === 'PREMIUM_POOL'
+        ? 'PREMIUM_POOL'
+        : 'STANDARD';
+    return `${normDate}|${normShift}|${normClinic}|${typeGroup}`;
+  }
+
+  function deduplicateServerWorkloads(items: any[]): any[] {
+    if (!Array.isArray(items)) return [];
+    const seenIds = new Set<string>();
+    const bySlot = new Map<string, number>();
+    const result: any[] = [];
+    const score = (w: any): number => {
+      const pt = Math.max(Number(w?.totalPt || 0), Number(w?.adultPt || 0) + Number(w?.childPt || 0));
+      const staff =
+        Number(w?.hn || 0) +
+        Number(w?.rn || 0) +
+        Number(w?.pn || 0) +
+        Number(w?.na !== undefined ? w.na : w?.pca || 0);
+      return (
+        (w?.id ? 10 : 0) +
+        (pt > 0 ? 5 : 0) +
+        (staff > 0 ? 5 : 0) +
+        (String(w?.reporter || '').trim() ? 2 : 0) +
+        (String(w?.note || '').trim() ? 1 : 0)
+      );
+    };
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const cleanId = String(item.id || '').trim();
+      if (cleanId && seenIds.has(cleanId)) continue;
+      const slot = serverWorkloadSlotKey(item);
+      if (bySlot.has(slot)) {
+        const idx = bySlot.get(slot)!;
+        if (score(item) > score(result[idx])) {
+          result[idx] = item;
+        }
+        if (cleanId) seenIds.add(cleanId);
+        continue;
+      }
+      if (cleanId) seenIds.add(cleanId);
+      bySlot.set(slot, result.length);
+      result.push(item);
+    }
+    return result;
+  }
+
   function serverWorkloadKey(w: any): string {
     const total = Math.max(Number(w?.totalPt || 0), Number(w?.adultPt || 0) + Number(w?.childPt || 0));
     const na = w?.na !== undefined ? Number(w.na || 0) : Number(w?.pca || 0);
     return [
-      String(w?.date || '').trim(),
-      String(w?.shift || '').trim(),
+      normalizeDateYmdServer(w?.date),
+      normalizeShiftStrServer(w?.shift),
       String(w?.clinic || '').trim(),
       total,
       Number(w?.adultPt || 0),
@@ -582,8 +725,8 @@ async function createAppServer(): Promise<void> {
 
   function serverLeaveKey(l: any): string {
     return [
-      String(l?.startDate || '').trim(),
-      String(l?.endDate || l?.startDate || '').trim(),
+      normalizeDateYmdServer(l?.startDate),
+      normalizeDateYmdServer(l?.endDate || l?.startDate),
       String(l?.staffName || '').trim(),
       String(l?.clinic || '').trim(),
       String(l?.leaveType || '').trim(),
@@ -594,8 +737,8 @@ async function createAppServer(): Promise<void> {
 
   function serverOtKey(o: any): string {
     return [
-      String(o?.date || '').trim(),
-      String(o?.shift || '').trim(),
+      normalizeDateYmdServer(o?.date),
+      normalizeShiftStrServer(o?.shift),
       String(o?.staffName || '').trim(),
       String(o?.homeClinic || '').trim(),
       String(o?.workClinic || '').trim(),
@@ -604,6 +747,42 @@ async function createAppServer(): Promise<void> {
 
   function syncServerLineStateFromSettings(settings: any): void {
     if (!settings || typeof settings !== 'object') return;
+    if (settings.lineAutoEnabled !== undefined) {
+      serverLineState.enabled = Boolean(settings.lineAutoEnabled);
+    }
+    if (settings.lineAutoTime) {
+      serverLineState.time = normalizeTimeServer(String(settings.lineAutoTime), DEFAULT_LINE_AUTO_TIME);
+    }
+    if (
+      settings.lineAutoReportDayMode === 'TODAY' ||
+      settings.lineAutoReportDayMode === 'YESTERDAY' ||
+      settings.lineAutoReportDayMode === 'LATEST_WITH_DATA'
+    ) {
+      serverLineState.reportDayMode = settings.lineAutoReportDayMode;
+    }
+    if (settings.lineAutoShift) {
+      serverLineState.shift = String(settings.lineAutoShift).trim() || DEFAULT_LINE_AUTO_SHIFT;
+    }
+    if (settings.lineTargetId) {
+      serverLineState.targetId = String(settings.lineTargetId).trim();
+    }
+    if (Array.isArray(settings.lineTargetGroups) && settings.lineTargetGroups.length > 0) {
+      serverLineState.targetGroups = settings.lineTargetGroups;
+    }
+    if (Array.isArray(settings.lineSchedules) && settings.lineSchedules.length > 0) {
+      serverLineState.schedules = settings.lineSchedules.map((s: any) => ({
+        ...s,
+        time: normalizeTimeServer(s?.time, DEFAULT_LINE_AUTO_TIME),
+      }));
+    }
+    if (settings.lineSendFormat !== undefined || settings.lineSendAsImage !== undefined) {
+      const resolvedFmt = normalizeSendFormatServer(
+        settings.lineSendFormat,
+        settings.lineSendAsImage !== undefined ? Boolean(settings.lineSendAsImage) : undefined
+      );
+      serverLineState.sendFormat = resolvedFmt;
+      serverLineState.sendAsImage = resolvedFmt !== 'TEXT_ONLY';
+    }
     if (settings.boobyOwnerName) {
       serverLineState.boobyOwnerName = String(settings.boobyOwnerName).trim() || 'คุณทรงยศ';
     }
@@ -620,16 +799,18 @@ async function createAppServer(): Promise<void> {
 
   function normalizeAuthoritativeDb(raw: any): AuthoritativeServerDb {
     const rawVer = Number(raw?.version);
+    const rawWorkloads = Array.isArray(raw?.workloads) ? raw.workloads : [];
+    const dedupedWorkloads = deduplicateServerWorkloads(rawWorkloads);
     const hasSeedData =
-      Array.isArray(raw?.workloads) && raw.workloads.length > 0 ||
-      Array.isArray(raw?.leaves) && raw.leaves.length > 0 ||
-      Array.isArray(raw?.ot) && raw.ot.length > 0 ||
-      Array.isArray(raw?.staff) && raw.staff.length > 0;
+      dedupedWorkloads.length > 0 ||
+      (Array.isArray(raw?.leaves) && raw.leaves.length > 0) ||
+      (Array.isArray(raw?.ot) && raw.ot.length > 0) ||
+      (Array.isArray(raw?.staff) && raw.staff.length > 0);
     return {
       version: Number.isFinite(rawVer) && rawVer > 0 ? Math.floor(rawVer) : hasSeedData ? 1 : 0,
       updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : new Date().toISOString(),
       staff: Array.isArray(raw?.staff) ? raw.staff : [],
-      workloads: Array.isArray(raw?.workloads) ? raw.workloads : [],
+      workloads: dedupedWorkloads,
       leaves: Array.isArray(raw?.leaves) ? raw.leaves : [],
       ot: Array.isArray(raw?.ot) ? raw.ot : [],
       auditLogs: Array.isArray(raw?.auditLogs) ? raw.auditLogs.slice(0, 500) : [],
@@ -657,6 +838,18 @@ async function createAppServer(): Promise<void> {
   function writeServerDb(data: any): void {
     const normalized = normalizeAuthoritativeDb(data);
     fs.writeFileSync(SERVER_DB_PATH, JSON.stringify(normalized, null, 2), 'utf8');
+  }
+
+  // Hydrate LINE state from persisted server-db.json & line-auto-state.json on startup
+  try {
+    const bootDb = loadServerDb();
+    if (bootDb?.settings) syncServerLineStateFromSettings(bootDb.settings);
+    const bootLineState = loadLineAutoState();
+    for (const k of Object.keys(bootLineState.completedKeys)) {
+      serverLineState.lastTriggeredBangkokKeys[k] = true;
+    }
+  } catch {
+    // ignore startup hydration failures
   }
 
   function buildPublicDbResponse(authDb: AuthoritativeServerDb) {
@@ -812,21 +1005,20 @@ async function createAppServer(): Promise<void> {
 
       const addUniqueWorkloads = (items: any[]) => {
         const added: any[] = [];
+        const existingSlots = new Set(next.workloads.map((ex) => serverWorkloadSlotKey(ex)));
+        const existingIds = new Set(next.workloads.map((ex) => String(ex?.id || '').trim()).filter(Boolean));
         for (const item of items) {
           if (!item || !item.date || !item.clinic) continue;
-          const dup = next.workloads.some(
-            (ex) =>
-              (ex.id && item.id && ex.id === item.id) ||
-              (String(ex.date || '').trim() === String(item.date || '').trim() &&
-                String(ex.shift || '').trim() === String(item.shift || '').trim() &&
-                String(ex.clinic || '').trim() === String(item.clinic || '').trim() &&
-                String(ex.recordType || 'STANDARD') === String(item.recordType || 'STANDARD'))
-          );
-          if (!dup) {
-            added.push(item);
-            delete next.tombstones.workloads[serverWorkloadKey(item)];
-            if (item.id) delete next.tombstones.workloads[`id:${item.id}`];
+          const cleanId = String(item.id || '').trim();
+          const slot = serverWorkloadSlotKey(item);
+          if ((cleanId && existingIds.has(cleanId)) || existingSlots.has(slot)) {
+            continue;
           }
+          added.push(item);
+          if (cleanId) existingIds.add(cleanId);
+          existingSlots.add(slot);
+          delete next.tombstones.workloads[serverWorkloadKey(item)];
+          if (cleanId) delete next.tombstones.workloads[`id:${cleanId}`];
         }
         if (added.length > 0) {
           next.workloads = [...added, ...next.workloads];
@@ -1098,8 +1290,10 @@ async function createAppServer(): Promise<void> {
       }
 
       const incomingStaff = Array.isArray(incomingDb.staff) ? incomingDb.staff : cur.staff;
-      const incomingWorkloads = (Array.isArray(incomingDb.workloads) ? incomingDb.workloads : cur.workloads).filter(
-        (w: any) => !mergedTombstones.workloads[serverWorkloadKey(w)] && !(w?.id && mergedTombstones.workloads[`id:${w.id}`])
+      const incomingWorkloads = deduplicateServerWorkloads(
+        (Array.isArray(incomingDb.workloads) ? incomingDb.workloads : cur.workloads).filter(
+          (w: any) => !mergedTombstones.workloads[serverWorkloadKey(w)] && !(w?.id && mergedTombstones.workloads[`id:${w.id}`])
+        )
       );
       const incomingLeaves = (Array.isArray(incomingDb.leaves) ? incomingDb.leaves : cur.leaves).filter(
         (l: any) => !mergedTombstones.leaves[serverLeaveKey(l)] && !(l?.id && mergedTombstones.leaves[`id:${l.id}`])
@@ -3404,6 +3598,99 @@ async function createAppServer(): Promise<void> {
     })();
   });
 
+  app.post('/api/line/auto-claim', (req: Request, res: Response) => {
+    const body = (req.body || {}) as {
+      clientId?: string;
+      scheduleId?: string;
+      time?: string;
+      shift?: string;
+      ymd?: string;
+      wantImage?: boolean;
+    };
+    const bkk = getBangkokDateParts();
+    const cleanYmd = /^\d{4}-\d{2}-\d{2}$/.test(String(body.ymd || '').trim())
+      ? String(body.ymd).trim()
+      : bkk.ymd;
+    const cleanClientId = String(body.clientId || '').trim().slice(0, 120) || 'browser';
+    const wantImage = Boolean(body.wantImage);
+    const canonKey = canonicalLineScheduleKeyServer(body.scheduleId, body.time, body.shift);
+    const dayKey = `${canonKey}|${cleanYmd}`;
+
+    const autoState = loadLineAutoState();
+    const alreadyDone = wantImage
+      ? Boolean(autoState.completedImageKeys[dayKey])
+      : Boolean(autoState.completedKeys[dayKey]);
+    if (alreadyDone) {
+      res.json({ ok: true, claimed: false, alreadyCompleted: true });
+      return;
+    }
+
+    const nowMs = Date.now();
+    const existingClaim = lineInFlightClaims.get(dayKey);
+    if (existingClaim && existingClaim.expiresAt > nowMs && existingClaim.clientId !== cleanClientId) {
+      res.json({ ok: true, claimed: false, alreadyCompleted: false });
+      return;
+    }
+
+    const claimToken = `${nowMs}-${Math.random().toString(36).slice(2, 10)}`;
+    lineInFlightClaims.set(dayKey, {
+      claimToken,
+      clientId: cleanClientId,
+      wantImage,
+      expiresAt: nowMs + LINE_CLAIM_TTL_MS,
+    });
+    res.json({ ok: true, claimed: true, claimToken });
+  });
+
+  app.post('/api/line/auto-complete', (req: Request, res: Response) => {
+    const body = (req.body || {}) as {
+      scheduleId?: string;
+      time?: string;
+      shift?: string;
+      ymd?: string;
+      claimToken?: string;
+      ok?: boolean;
+      sentWithImage?: boolean;
+      statusText?: string;
+    };
+    const bkk = getBangkokDateParts();
+    const cleanYmd = /^\d{4}-\d{2}-\d{2}$/.test(String(body.ymd || '').trim())
+      ? String(body.ymd).trim()
+      : bkk.ymd;
+    const canonKey = canonicalLineScheduleKeyServer(body.scheduleId, body.time, body.shift);
+    const dayKey = `${canonKey}|${cleanYmd}`;
+    const existingClaim = lineInFlightClaims.get(dayKey);
+    if (!existingClaim || existingClaim.claimToken === String(body.claimToken || '').trim() || existingClaim.expiresAt <= Date.now()) {
+      lineInFlightClaims.delete(dayKey);
+    }
+
+    if (Boolean(body.ok)) {
+      const autoState = loadLineAutoState();
+      const sentAt = bkk.timestamp;
+      const sentWithImage = Boolean(body.sentWithImage);
+      const statusText = String(body.statusText || '').trim().slice(0, 300);
+      autoState.completedKeys[dayKey] = {
+        at: sentAt,
+        withImage: sentWithImage,
+        ...(statusText ? { statusText } : {}),
+      };
+      if (sentWithImage) {
+        autoState.completedImageKeys[dayKey] = sentAt;
+      }
+      saveLineAutoState(autoState);
+      serverLineState.lastTriggeredBangkokKeys[dayKey] = true;
+      if (body.scheduleId) {
+        serverLineState.lastTriggeredBangkokKeys[`${String(body.scheduleId).trim()}|${cleanYmd}`] = true;
+      }
+      serverLineState.lastSentAt = sentAt;
+      if (statusText) {
+        serverLineState.lastStatus = statusText;
+      }
+    }
+
+    res.json({ ok: true });
+  });
+
   app.post('/api/line/send', async (req: Request, res: Response) => {
     const body = (req.body || {}) as {
       targetId?: string;
@@ -3495,6 +3782,32 @@ async function createAppServer(): Promise<void> {
     }
     if (body.boobyGroupMentionOnly !== undefined) {
       serverLineState.boobyGroupMentionOnly = Boolean(body.boobyGroupMentionOnly);
+    }
+
+    // Persist LINE configuration inside server-db.json settings if database exists so restarts retain settings
+    try {
+      const existingDb = loadServerDb();
+      if (existingDb && typeof existingDb === 'object') {
+        const mergedSettings = {
+          ...(existingDb.settings || {}),
+          lineAutoEnabled: serverLineState.enabled,
+          lineAutoTime: serverLineState.time,
+          lineAutoReportDayMode: serverLineState.reportDayMode,
+          lineAutoShift: serverLineState.shift,
+          lineTargetId: serverLineState.targetId,
+          lineTargetGroups: serverLineState.targetGroups,
+          lineSchedules: serverLineState.schedules,
+          lineSendAsImage: serverLineState.sendAsImage,
+          lineSendFormat: serverLineState.sendFormat,
+          ...(serverLineState.gasUrl ? { gasUrl: serverLineState.gasUrl } : {}),
+          boobyOwnerName: serverLineState.boobyOwnerName,
+          boobyOwnerUserId: serverLineState.boobyOwnerUserId,
+          boobyGroupMentionOnly: serverLineState.boobyGroupMentionOnly,
+        };
+        writeServerDb({ ...existingDb, settings: mergedSettings });
+      }
+    } catch {
+      // ignore persistence failure
     }
 
     const token = getLineAccessToken();
@@ -3604,29 +3917,54 @@ async function createAppServer(): Promise<void> {
       return (h || 0) * 60 + (m || 0);
     };
     const nowMins = toMins(bkk.hm);
+    const autoState = loadLineAutoState();
 
     for (const sch of activeSchedules) {
       if (!matchesDayRuleServer(bkk.ymd, sch.dayRule || 'ALL_DAYS')) continue;
-      const diff = nowMins - toMins(sch.time);
-      // Fire backup after primary GAS grace period or if server DB already has matching data in 1..20m window
-      if (diff < 1 || diff > 20) continue;
-      const key = `${sch.id}|${bkk.ymd}`;
-      if (serverLineState.lastTriggeredBangkokKeys[key]) continue;
+      const schTime = normalizeTimeServer(sch.time, DEFAULT_LINE_AUTO_TIME);
+      const diff = nowMins - toMins(schTime);
+      // Full catch-up window aligned with client/GAS
+      if (diff < 1 || diff > 75) continue;
+
+      const canonKey = canonicalLineScheduleKeyServer(sch.id, schTime, sch.shift);
+      const dayKey = `${canonKey}|${bkk.ymd}`;
+      const rawKey = `${sch.id}|${bkk.ymd}`;
+      if (
+        autoState.completedKeys[dayKey] ||
+        serverLineState.lastTriggeredBangkokKeys[dayKey] ||
+        serverLineState.lastTriggeredBangkokKeys[rawKey]
+      ) {
+        continue;
+      }
+
+      // Skip if a browser client currently holds an active claim for rendering/uploading .jpeg
+      const activeClaim = lineInFlightClaims.get(dayKey);
+      if (activeClaim && activeClaim.expiresAt > Date.now()) continue;
+
+      const schedSendFormat: ServerLineSendFormat =
+        sch.sendAsImage === false ? 'TEXT_ONLY' : serverLineState.sendFormat;
+      // Respect IMAGE_ONLY: server has no headless Chromium, so never send a plain-text fallback
+      if (schedSendFormat === 'IMAGE_ONLY') continue;
+
+      // Give open browser clients a 10-minute priority window to render & upload .jpeg before server fallback sends text
+      if (schedSendFormat === 'BOTH' && diff < 10) continue;
 
       if (diff < 15) {
         const sdb = loadServerDb();
         const wRows: any[] = Array.isArray(sdb?.workloads) ? sdb.workloads : [];
+        const schShiftNorm = normalizeShiftStrServer(sch.shift);
         const hasTodayShiftData = wRows.some(
           (w: any) =>
-            String(w?.date || '').trim() === bkk.ymd &&
-            (sch.shift === 'ALL' || String(w?.shift || '').replace(/\s+/g, ' ').trim() === sch.shift)
+            normalizeDateYmdServer(w?.date) === bkk.ymd &&
+            (schShiftNorm === 'ALL' || normalizeShiftStrServer(w?.shift) === schShiftNorm)
         );
         if (!hasTodayShiftData) continue; // Let GAS/browser finish grace window rather than pushing premature 0-clinic report
       }
-      serverLineState.lastTriggeredBangkokKeys[key] = true;
+      serverLineState.lastTriggeredBangkokKeys[dayKey] = true;
+      serverLineState.lastTriggeredBangkokKeys[rawKey] = true;
 
       try {
-        await fetch(serverLineState.gasUrl, {
+        const gasRes = await fetch(serverLineState.gasUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
@@ -3638,10 +3976,23 @@ async function createAppServer(): Promise<void> {
               reportDayMode: sch.reportDayMode,
               shift: sch.shift,
               scheduleId: sch.id,
+              scheduleTime: schTime,
+              sendFormat: schedSendFormat,
               channelAccessToken: token,
             },
           }),
         });
+        if (gasRes.ok) {
+          const parsed = (await gasRes.json()) as { success?: boolean; statusText?: string };
+          if (parsed && parsed.success !== false) {
+            autoState.completedKeys[dayKey] = {
+              at: bkk.timestamp,
+              withImage: false,
+              statusText: String(parsed.statusText || 'ส่งรายงานสำรองอัตโนมัติ (Server/GAS)').slice(0, 300),
+            };
+            saveLineAutoState(autoState);
+          }
+        }
       } catch {
         // Best-effort backup trigger; primary 24/7 cron runs inside Google Apps Script
       }

@@ -126,6 +126,7 @@ import {
   pushServerSync,
   applyServerTombstonesLocally,
   normalizeIncomingServerDb,
+  getWorkloadSlotKey,
   ServerSnapshotResponse,
   LineAutomationStatusInfo,
   AppDatabase
@@ -185,6 +186,8 @@ export default function App() {
   const suppressNextBroadcastRef = useRef<boolean>(false);
   const serverVersionRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
+  const savingWorkloadSlotsRef = useRef<Set<string>>(new Set());
+  const lineAutoCheckInFlightRef = useRef<boolean>(false);
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -249,9 +252,14 @@ export default function App() {
       const boxW = getPendingOutboxWorkloads();
       const wIds = new Set(hydrated.workloads.map((w) => w.id));
       const wKeys = new Set(hydrated.workloads.map(getWorkloadKey));
-      const syncedW = boxW.filter((w) => wIds.has(w.id) || wKeys.has(getWorkloadKey(w)));
+      const wSlots = new Set(hydrated.workloads.map(getWorkloadSlotKey));
+      const syncedW = boxW.filter(
+        (w) => wIds.has(w.id) || wKeys.has(getWorkloadKey(w)) || wSlots.has(getWorkloadSlotKey(w))
+      );
       if (syncedW.length > 0) markWorkloadOutboxSynced(syncedW);
-      const pendingW = boxW.filter((w) => !wIds.has(w.id) && !wKeys.has(getWorkloadKey(w)));
+      const pendingW = boxW.filter(
+        (w) => !wIds.has(w.id) && !wKeys.has(getWorkloadKey(w)) && !wSlots.has(getWorkloadSlotKey(w))
+      );
 
       const boxL = getPendingOutboxLeaves();
       const lIds = new Set(hydrated.leaves.map((l) => l.id));
@@ -1135,18 +1143,11 @@ export default function App() {
     crossCoverageData?: WorkloadCrossCoveragePayload | WorkloadCrossCoveragePayload[] | null,
     trainingData?: WorkloadTrainingPayload[] | null
   ) => {
-    const isDuplicateStandardWorkload =
-      entry.recordType !== 'PREMIUM_SUB' &&
-      entry.recordType !== 'PREMIUM_POOL' &&
-      dbRef.current.workloads.some(
-        w =>
-          w.date === entry.date &&
-          w.shift === entry.shift &&
-          (w.clinic || '').trim() === (entry.clinic || '').trim() &&
-          w.recordType !== 'PREMIUM_SUB' &&
-          w.recordType !== 'PREMIUM_POOL'
-      );
-    if (isDuplicateStandardWorkload) {
+    const entrySlotKey = getWorkloadSlotKey(entry);
+    const isDuplicateWorkloadSlot =
+      savingWorkloadSlotsRef.current.has(entrySlotKey) ||
+      dbRef.current.workloads.some((w) => getWorkloadSlotKey(w) === entrySlotKey);
+    if (isDuplicateWorkloadSlot) {
       showToast(
         `ไม่สามารถบันทึกซ้ำได้: แผนก ${entry.clinic} วันที่ ${formatThaiShortDate(entry.date)} กะเวลา "${entry.shift}" มีข้อมูลในระบบแล้ว`,
         'error'
@@ -1154,205 +1155,210 @@ export default function App() {
       return;
     }
 
-    const newLeaveEntries: LeaveRecord[] = [];
-    const newOtEntries: OTAttendance[] = [];
+    savingWorkloadSlotsRef.current.add(entrySlotKey);
+    try {
+      const newLeaveEntries: LeaveRecord[] = [];
+      const newOtEntries: OTAttendance[] = [];
 
-    if (leaveData) {
-      const existingLeaves = dbRef.current.leaves;
-      const skippedNames: string[] = [];
-      leaveData.forEach((ld, idx) => {
-        const cleanName = (ld.staffName || '').trim();
-        const isDuplicateInDb = existingLeaves.some(l => {
-          if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
-          const sDate = (l.startDate || '').trim();
-          const eDate = (l.endDate || l.startDate || '').trim();
-          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+      if (leaveData) {
+        const existingLeaves = dbRef.current.leaves;
+        const skippedNames: string[] = [];
+        leaveData.forEach((ld, idx) => {
+          const cleanName = (ld.staffName || '').trim();
+          const isDuplicateInDb = existingLeaves.some(l => {
+            if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
+            const sDate = (l.startDate || '').trim();
+            const eDate = (l.endDate || l.startDate || '').trim();
+            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+          });
+          if (isDuplicateInDb) {
+            skippedNames.push(cleanName);
+            return;
+          }
+          const staff = db.staff.find(s => s.name === ld.staffName);
+          const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
+          const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
+          newLeaveEntries.push({
+            id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
+            startDate: entry.date,
+            endDate: entry.date,
+            staffName: ld.staffName,
+            position: staff ? staff.position : 'RN',
+            clinic: staff ? staff.homeClinic : entry.clinic,
+            leaveType: ld.leaveType,
+            days: numericDays,
+            note: formattedNote,
+          });
         });
-        if (isDuplicateInDb) {
-          skippedNames.push(cleanName);
-          return;
+        if (skippedNames.length > 0) {
+          showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
         }
-        const staff = db.staff.find(s => s.name === ld.staffName);
-        const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
-        const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
-        newLeaveEntries.push({
-          id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
-          startDate: entry.date,
-          endDate: entry.date,
-          staffName: ld.staffName,
-          position: staff ? staff.position : 'RN',
-          clinic: staff ? staff.homeClinic : entry.clinic,
-          leaveType: ld.leaveType,
-          days: numericDays,
-          note: formattedNote,
-        });
-      });
-      if (skippedNames.length > 0) {
-        showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
       }
-    }
 
-    if (trainingData) {
-      const existingLeaves = dbRef.current.leaves;
-      trainingData.forEach((td, idx) => {
-        const cleanName = (td.staffName || '').trim();
-        const isDuplicateInDb = existingLeaves.some(l => {
-          if (!isTrainingLeaveType(l.leaveType)) return false;
-          const sDate = (l.startDate || '').trim();
-          const eDate = (l.endDate || l.startDate || '').trim();
-          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+      if (trainingData) {
+        const existingLeaves = dbRef.current.leaves;
+        trainingData.forEach((td, idx) => {
+          const cleanName = (td.staffName || '').trim();
+          const isDuplicateInDb = existingLeaves.some(l => {
+            if (!isTrainingLeaveType(l.leaveType)) return false;
+            const sDate = (l.startDate || '').trim();
+            const eDate = (l.endDate || l.startDate || '').trim();
+            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
+          });
+          if (isDuplicateInDb) return;
+          const staff = db.staff.find(s => s.name === td.staffName);
+          const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
+          const rawNote =
+            [td.topic, td.note].filter(Boolean).join(' — ') ||
+            `ไปอบรม/ประชุม (บันทึกจาก ${entry.clinic})`;
+          newLeaveEntries.push({
+            id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
+            startDate: entry.date,
+            endDate: entry.date,
+            staffName: td.staffName,
+            position: staff ? staff.position : 'RN',
+            clinic: staff ? staff.homeClinic : entry.clinic,
+            leaveType: 'ไปอบรม/ประชุม',
+            days: numericDays,
+            note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
+          });
         });
-        if (isDuplicateInDb) return;
-        const staff = db.staff.find(s => s.name === td.staffName);
-        const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
-        const rawNote =
-          [td.topic, td.note].filter(Boolean).join(' — ') ||
-          `ไปอบรม/ประชุม (บันทึกจาก ${entry.clinic})`;
-        newLeaveEntries.push({
-          id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
-          startDate: entry.date,
-          endDate: entry.date,
-          staffName: td.staffName,
-          position: staff ? staff.position : 'RN',
-          clinic: staff ? staff.homeClinic : entry.clinic,
-          leaveType: 'ไปอบรม/ประชุม',
-          days: numericDays,
-          note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
-        });
+      }
+
+      const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
+        ? crossCoverageData
+        : crossCoverageData
+          ? [crossCoverageData]
+          : [];
+
+      crossList.forEach((cc, idx) => {
+        if (!cc.staffName || !cc.targetClinic) return;
+        const staff = db.staff.find(s => s.name === cc.staffName);
+        const amount = cc.amount === 0.5 ? 0.5 : 1;
+        const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
+        const resolvedHome =
+          cc.homeClinic ||
+          (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : entry.clinic));
+        const resolvedShift =
+          cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : entry.shift);
+        const candidateOt: OTAttendance = {
+          id: `OT-CROSS-${Date.now()}-${idx}`,
+          date: entry.date,
+          shift: resolvedShift,
+          staffName: cc.staffName,
+          position: cc.position || (staff ? staff.position : 'RN'),
+          homeClinic: resolvedHome,
+          workClinic: workClinicVal,
+          ...(cc.isExternal
+            ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
+            : {}),
+        };
+        const dupInDbOrBatch =
+          dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
+          newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
+        if (!dupInDbOrBatch) {
+          newOtEntries.push(candidateOt);
+        }
       });
-    }
 
-    const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
-      ? crossCoverageData
-      : crossCoverageData
-        ? [crossCoverageData]
-        : [];
+      clearWorkloadTombstone(entry);
+      markWorkloadsRecentlySaved([entry]);
+      enqueuePendingOutboxWorkloads([entry]);
+      if (newLeaveEntries.length > 0) {
+        markLeavesRecentlySaved(newLeaveEntries);
+        enqueuePendingOutboxLeaves(newLeaveEntries);
+      }
+      if (newOtEntries.length > 0) {
+        markOtRecentlySaved(newOtEntries);
+        enqueuePendingOutboxOt(newOtEntries);
+      }
 
-    crossList.forEach((cc, idx) => {
-      if (!cc.staffName || !cc.targetClinic) return;
-      const staff = db.staff.find(s => s.name === cc.staffName);
-      const amount = cc.amount === 0.5 ? 0.5 : 1;
-      const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
-      const resolvedHome =
-        cc.homeClinic ||
-        (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : entry.clinic));
-      const resolvedShift =
-        cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : entry.shift);
-      const candidateOt: OTAttendance = {
-        id: `OT-CROSS-${Date.now()}-${idx}`,
-        date: entry.date,
-        shift: resolvedShift,
-        staffName: cc.staffName,
-        position: cc.position || (staff ? staff.position : 'RN'),
-        homeClinic: resolvedHome,
-        workClinic: workClinicVal,
-        ...(cc.isExternal
-          ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
-          : {}),
+      mutationSeqRef.current += 1;
+      const baseDb = dbRef.current;
+      const nextDb = {
+        ...baseDb,
+        workloads: [entry, ...baseDb.workloads],
+        leaves: [...newLeaveEntries, ...baseDb.leaves],
+        ot: [...newOtEntries, ...baseDb.ot],
       };
-      const dupInDbOrBatch =
-        dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
-        newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
-      if (!dupInDbOrBatch) {
-        newOtEntries.push(candidateOt);
-      }
-    });
+      dbRef.current = nextDb;
+      setDb(nextDb);
+      void propagateServerMutation('addWorkloads', {
+        workloads: [entry],
+        leaves: newLeaveEntries,
+        ot: newOtEntries,
+      });
 
-    clearWorkloadTombstone(entry);
-    markWorkloadsRecentlySaved([entry]);
-    enqueuePendingOutboxWorkloads([entry]);
-    if (newLeaveEntries.length > 0) {
-      markLeavesRecentlySaved(newLeaveEntries);
-      enqueuePendingOutboxLeaves(newLeaveEntries);
-    }
-    if (newOtEntries.length > 0) {
-      markOtRecentlySaved(newOtEntries);
-      enqueuePendingOutboxOt(newOtEntries);
-    }
+      const offStaffSavedCount = getWorkloadOffDutyStaff(entry).length;
+      showToast(
+        isOffDutyWorkload(entry)
+          ? `บันทึกสถานะ Off เวรห้องตรวจ ${entry.clinic} สำเร็จ!`
+          : offStaffSavedCount > 0
+          ? `บันทึกภาระงานห้องตรวจ ${entry.clinic} (Off เวรรายวัน ${offStaffSavedCount} คน) สำเร็จ!`
+          : `บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`,
+        'success'
+      );
 
-    mutationSeqRef.current += 1;
-    const baseDb = dbRef.current;
-    const nextDb = {
-      ...baseDb,
-      workloads: [entry, ...baseDb.workloads],
-      leaves: [...newLeaveEntries, ...baseDb.leaves],
-      ot: [...newOtEntries, ...baseDb.ot],
-    };
-    dbRef.current = nextDb;
-    setDb(nextDb);
-    void propagateServerMutation('addWorkloads', {
-      workloads: [entry],
-      leaves: newLeaveEntries,
-      ot: newOtEntries,
-    });
+      // Auto-Sync on Save (append-only, batched & parallelized) to Google Sheets when Auto-Sync is enabled
+      if (dbRef.current.settings.autoSync === false) return;
+      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
-    const offStaffSavedCount = getWorkloadOffDutyStaff(entry).length;
-    showToast(
-      isOffDutyWorkload(entry)
-        ? `บันทึกสถานะ Off เวรห้องตรวจ ${entry.clinic} สำเร็จ!`
-        : offStaffSavedCount > 0
-        ? `บันทึกภาระงานห้องตรวจ ${entry.clinic} (Off เวรรายวัน ${offStaffSavedCount} คน) สำเร็จ!`
-        : `บันทึกภาระงานห้องตรวจ ${entry.clinic} สำเร็จ!`,
-      'success'
-    );
-
-    // Auto-Sync on Save (append-only, batched & parallelized) to Google Sheets when Auto-Sync is enabled
-    if (dbRef.current.settings.autoSync === false) return;
-    const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
-
-    if (targetGasUrl) {
-      const [wOk, lOk, oOk] = await Promise.all([
-        appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
-          if (ok) markWorkloadOutboxSynced([entry]);
-          return ok;
-        }),
-        newLeaveEntries.length > 0
-          ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-              if (ok) markLeaveOutboxSynced(newLeaveEntries);
-              return ok;
-            })
-          : Promise.resolve(true),
-        newOtEntries.length > 0
-          ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-              if (ok) markOtOutboxSynced(newOtEntries);
-              return ok;
-            })
-          : Promise.resolve(true),
-      ]);
-      if (wOk && lOk && oOk) {
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
-      }
-    } else if (targetSheetId) {
-      const token = await getAccessToken();
-      if (token) {
-        await Promise.all([
-          appendDailyWorkloadToSheet(token, targetSheetId, entry).then((ok) => {
+      if (targetGasUrl) {
+        const [wOk, lOk, oOk] = await Promise.all([
+          appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
             if (ok) markWorkloadOutboxSynced([entry]);
+            return ok;
           }),
-          ...newLeaveEntries.map((l) =>
-            appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
-              if (ok) markLeaveOutboxSynced([l]);
-            })
-          ),
-          ...newOtEntries.map((o) =>
-            appendOTToSheet(token, targetSheetId, o).then((ok) => {
-              if (ok) markOtOutboxSynced([o]);
-            })
-          ),
+          newLeaveEntries.length > 0
+            ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+                if (ok) markLeaveOutboxSynced(newLeaveEntries);
+                return ok;
+              })
+            : Promise.resolve(true),
+          newOtEntries.length > 0
+            ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+                if (ok) markOtOutboxSynced(newOtEntries);
+                return ok;
+              })
+            : Promise.resolve(true),
         ]);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
+        if (wOk && lOk && oOk) {
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          void performBackgroundSync('edit');
+        } else {
+          showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
+        }
+      } else if (targetSheetId) {
+        const token = await getAccessToken();
+        if (token) {
+          await Promise.all([
+            appendDailyWorkloadToSheet(token, targetSheetId, entry).then((ok) => {
+              if (ok) markWorkloadOutboxSynced([entry]);
+            }),
+            ...newLeaveEntries.map((l) =>
+              appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+                if (ok) markLeaveOutboxSynced([l]);
+              })
+            ),
+            ...newOtEntries.map((o) =>
+              appendOTToSheet(token, targetSheetId, o).then((ok) => {
+                if (ok) markOtOutboxSynced([o]);
+              })
+            ),
+          ]);
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          void performBackgroundSync('edit');
+        } else {
+          showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        }
       } else {
-        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
       }
-    } else {
-      showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
+    } finally {
+      savingWorkloadSlotsRef.current.delete(entrySlotKey);
     }
   };
 
@@ -1364,15 +1370,11 @@ export default function App() {
     trainingData?: WorkloadTrainingPayload[] | null
   ) => {
     if (!entries || entries.length === 0) return;
-    const dupBatchEntry = entries.find(incoming =>
-      dbRef.current.workloads.some(
-        existing =>
-          existing.date === incoming.date &&
-          existing.shift === incoming.shift &&
-          (existing.clinic || '').trim() === (incoming.clinic || '').trim() &&
-          (existing.recordType || 'STANDARD') === (incoming.recordType || 'STANDARD')
-      )
-    );
+    const existingSlots = new Set(dbRef.current.workloads.map(getWorkloadSlotKey));
+    const dupBatchEntry = entries.find((incoming) => {
+      const slot = getWorkloadSlotKey(incoming);
+      return savingWorkloadSlotsRef.current.has(slot) || existingSlots.has(slot);
+    });
     if (dupBatchEntry) {
       showToast(
         `ไม่สามารถบันทึกซ้ำได้: แผนก ${dupBatchEntry.clinic} วันที่ ${formatThaiShortDate(dupBatchEntry.date)} กะเวลา "${dupBatchEntry.shift}" มีข้อมูลในระบบแล้ว`,
@@ -1380,207 +1382,214 @@ export default function App() {
       );
       return;
     }
-    const primaryEntry = entries[0];
-    const newLeaveEntries: LeaveRecord[] = [];
-    const newOtEntries: OTAttendance[] = [];
 
-    if (leaveData) {
-      const existingLeaves = dbRef.current.leaves;
-      const skippedNames: string[] = [];
-      leaveData.forEach((ld, idx) => {
-        const cleanName = (ld.staffName || '').trim();
-        const isDuplicateInDb = existingLeaves.some(l => {
-          if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
-          const sDate = (l.startDate || '').trim();
-          const eDate = (l.endDate || l.startDate || '').trim();
-          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+    const batchSlots = entries.map(getWorkloadSlotKey);
+    batchSlots.forEach((s) => savingWorkloadSlotsRef.current.add(s));
+    try {
+      const primaryEntry = entries[0];
+      const newLeaveEntries: LeaveRecord[] = [];
+      const newOtEntries: OTAttendance[] = [];
+
+      if (leaveData) {
+        const existingLeaves = dbRef.current.leaves;
+        const skippedNames: string[] = [];
+        leaveData.forEach((ld, idx) => {
+          const cleanName = (ld.staffName || '').trim();
+          const isDuplicateInDb = existingLeaves.some(l => {
+            if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
+            const sDate = (l.startDate || '').trim();
+            const eDate = (l.endDate || l.startDate || '').trim();
+            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+          });
+          if (isDuplicateInDb) {
+            skippedNames.push(cleanName);
+            return;
+          }
+          const staff = db.staff.find(s => s.name === ld.staffName);
+          const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
+          const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
+          newLeaveEntries.push({
+            id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
+            startDate: primaryEntry.date,
+            endDate: primaryEntry.date,
+            staffName: ld.staffName,
+            position: staff ? staff.position : 'RN',
+            clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
+            leaveType: ld.leaveType,
+            days: numericDays,
+            note: formattedNote,
+          });
         });
-        if (isDuplicateInDb) {
-          skippedNames.push(cleanName);
-          return;
+        if (skippedNames.length > 0) {
+          showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
         }
-        const staff = db.staff.find(s => s.name === ld.staffName);
-        const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
-        const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
-        newLeaveEntries.push({
-          id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
-          startDate: primaryEntry.date,
-          endDate: primaryEntry.date,
-          staffName: ld.staffName,
-          position: staff ? staff.position : 'RN',
-          clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
-          leaveType: ld.leaveType,
-          days: numericDays,
-          note: formattedNote,
-        });
-      });
-      if (skippedNames.length > 0) {
-        showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
       }
-    }
 
-    if (trainingData) {
-      const existingLeaves = dbRef.current.leaves;
-      trainingData.forEach((td, idx) => {
-        const cleanName = (td.staffName || '').trim();
-        const isDuplicateInDb = existingLeaves.some(l => {
-          if (!isTrainingLeaveType(l.leaveType)) return false;
-          const sDate = (l.startDate || '').trim();
-          const eDate = (l.endDate || l.startDate || '').trim();
-          return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+      if (trainingData) {
+        const existingLeaves = dbRef.current.leaves;
+        trainingData.forEach((td, idx) => {
+          const cleanName = (td.staffName || '').trim();
+          const isDuplicateInDb = existingLeaves.some(l => {
+            if (!isTrainingLeaveType(l.leaveType)) return false;
+            const sDate = (l.startDate || '').trim();
+            const eDate = (l.endDate || l.startDate || '').trim();
+            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
+          });
+          if (isDuplicateInDb) return;
+          const staff = db.staff.find(s => s.name === td.staffName);
+          const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
+          const rawNote =
+            [td.topic, td.note].filter(Boolean).join(' — ') ||
+            `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`;
+          newLeaveEntries.push({
+            id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
+            startDate: primaryEntry.date,
+            endDate: primaryEntry.date,
+            staffName: td.staffName,
+            position: staff ? staff.position : 'RN',
+            clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
+            leaveType: 'ไปอบรม/ประชุม',
+            days: numericDays,
+            note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
+          });
         });
-        if (isDuplicateInDb) return;
-        const staff = db.staff.find(s => s.name === td.staffName);
-        const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
-        const rawNote =
-          [td.topic, td.note].filter(Boolean).join(' — ') ||
-          `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`;
-        newLeaveEntries.push({
-          id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
-          startDate: primaryEntry.date,
-          endDate: primaryEntry.date,
-          staffName: td.staffName,
-          position: staff ? staff.position : 'RN',
-          clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
-          leaveType: 'ไปอบรม/ประชุม',
-          days: numericDays,
-          note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
-        });
+      }
+
+      const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
+        ? crossCoverageData
+        : crossCoverageData
+          ? [crossCoverageData]
+          : [];
+
+      crossList.forEach((cc, idx) => {
+        if (!cc.staffName || !cc.targetClinic) return;
+        const staff = db.staff.find(s => s.name === cc.staffName);
+        const amount = cc.amount === 0.5 ? 0.5 : 1;
+        const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
+        const resolvedHome =
+          cc.homeClinic ||
+          (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP));
+        const resolvedShift =
+          cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : primaryEntry.shift);
+        const candidateOt: OTAttendance = {
+          id: `OT-CROSS-${Date.now()}-${idx}`,
+          date: primaryEntry.date,
+          shift: resolvedShift,
+          staffName: cc.staffName,
+          position: cc.position || (staff ? staff.position : 'RN'),
+          homeClinic: resolvedHome,
+          workClinic: workClinicVal,
+          ...(cc.isExternal
+            ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
+            : {}),
+        };
+        const dupInDbOrBatch =
+          dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
+          newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
+        if (!dupInDbOrBatch) {
+          newOtEntries.push(candidateOt);
+        }
       });
-    }
 
-    const crossList: WorkloadCrossCoveragePayload[] = Array.isArray(crossCoverageData)
-      ? crossCoverageData
-      : crossCoverageData
-        ? [crossCoverageData]
-        : [];
+      entries.forEach(clearWorkloadTombstone);
+      markWorkloadsRecentlySaved(entries);
+      enqueuePendingOutboxWorkloads(entries);
+      if (newLeaveEntries.length > 0) {
+        markLeavesRecentlySaved(newLeaveEntries);
+        enqueuePendingOutboxLeaves(newLeaveEntries);
+      }
+      if (newOtEntries.length > 0) {
+        markOtRecentlySaved(newOtEntries);
+        enqueuePendingOutboxOt(newOtEntries);
+      }
 
-    crossList.forEach((cc, idx) => {
-      if (!cc.staffName || !cc.targetClinic) return;
-      const staff = db.staff.find(s => s.name === cc.staffName);
-      const amount = cc.amount === 0.5 ? 0.5 : 1;
-      const workClinicVal = formatOtWorkClinicValue(cc.targetClinic, amount, cc.periodLabel);
-      const resolvedHome =
-        cc.homeClinic ||
-        (cc.isExternal ? (cc.affiliation || 'ภายนอก OPD') : (staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP));
-      const resolvedShift =
-        cc.shift || (cc.isExternal ? 'OT ในเวลาราชการ 08:00-16:00' : primaryEntry.shift);
-      const candidateOt: OTAttendance = {
-        id: `OT-CROSS-${Date.now()}-${idx}`,
-        date: primaryEntry.date,
-        shift: resolvedShift,
-        staffName: cc.staffName,
-        position: cc.position || (staff ? staff.position : 'RN'),
-        homeClinic: resolvedHome,
-        workClinic: workClinicVal,
-        ...(cc.isExternal
-          ? { isExternal: true, affiliation: cc.affiliation || resolvedHome }
-          : {}),
+      mutationSeqRef.current += 1;
+      const baseDb = dbRef.current;
+      const nextDb = {
+        ...baseDb,
+        workloads: [...entries, ...baseDb.workloads],
+        leaves: [...newLeaveEntries, ...baseDb.leaves],
+        ot: [...newOtEntries, ...baseDb.ot],
       };
-      const dupInDbOrBatch =
-        dbRef.current.ot.some(o => isOtDuplicateConflict(o, candidateOt)) ||
-        newOtEntries.some(o => isOtDuplicateConflict(o, candidateOt));
-      if (!dupInDbOrBatch) {
-        newOtEntries.push(candidateOt);
-      }
-    });
+      dbRef.current = nextDb;
+      setDb(nextDb);
+      void propagateServerMutation('addWorkloads', {
+        workloads: entries,
+        leaves: newLeaveEntries,
+        ot: newOtEntries,
+      });
 
-    entries.forEach(clearWorkloadTombstone);
-    markWorkloadsRecentlySaved(entries);
-    enqueuePendingOutboxWorkloads(entries);
-    if (newLeaveEntries.length > 0) {
-      markLeavesRecentlySaved(newLeaveEntries);
-      enqueuePendingOutboxLeaves(newLeaveEntries);
-    }
-    if (newOtEntries.length > 0) {
-      markOtRecentlySaved(newOtEntries);
-      enqueuePendingOutboxOt(newOtEntries);
-    }
+      const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
+      const batchOffStaffCount = entries.reduce((sum, e) => sum + getWorkloadOffDutyStaff(e).length, 0);
+      const offSuffix = batchOffStaffCount > 0 ? ` (Off เวรรายวัน ${batchOffStaffCount} คน)` : '';
+      showToast(
+        isOffDutyWorkload(primaryEntry)
+          ? `บันทึกสถานะ Off เวร ${PREMIUM_CLINIC_GROUP} สำเร็จ!`
+          : subCount > 0
+          ? `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} (${subCount} แผนกย่อย)${offSuffix} สำเร็จ!`
+          : `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP}${offSuffix} สำเร็จ!`,
+        'success'
+      );
 
-    mutationSeqRef.current += 1;
-    const baseDb = dbRef.current;
-    const nextDb = {
-      ...baseDb,
-      workloads: [...entries, ...baseDb.workloads],
-      leaves: [...newLeaveEntries, ...baseDb.leaves],
-      ot: [...newOtEntries, ...baseDb.ot],
-    };
-    dbRef.current = nextDb;
-    setDb(nextDb);
-    void propagateServerMutation('addWorkloads', {
-      workloads: entries,
-      leaves: newLeaveEntries,
-      ot: newOtEntries,
-    });
+      if (dbRef.current.settings.autoSync === false) return;
+      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
-    const subCount = entries.filter(e => e.recordType === 'PREMIUM_SUB').length;
-    const batchOffStaffCount = entries.reduce((sum, e) => sum + getWorkloadOffDutyStaff(e).length, 0);
-    const offSuffix = batchOffStaffCount > 0 ? ` (Off เวรรายวัน ${batchOffStaffCount} คน)` : '';
-    showToast(
-      isOffDutyWorkload(primaryEntry)
-        ? `บันทึกสถานะ Off เวร ${PREMIUM_CLINIC_GROUP} สำเร็จ!`
-        : subCount > 0
-        ? `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP} (${subCount} แผนกย่อย)${offSuffix} สำเร็จ!`
-        : `บันทึกข้อมูล ${PREMIUM_CLINIC_GROUP}${offSuffix} สำเร็จ!`,
-      'success'
-    );
-
-    if (dbRef.current.settings.autoSync === false) return;
-    const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-    const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
-
-    if (targetGasUrl) {
-      const [wOk, lOk, oOk] = await Promise.all([
-        appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
-          if (ok) markWorkloadOutboxSynced(entries);
-          return ok;
-        }),
-        newLeaveEntries.length > 0
-          ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-              if (ok) markLeaveOutboxSynced(newLeaveEntries);
-              return ok;
-            })
-          : Promise.resolve(true),
-        newOtEntries.length > 0
-          ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-              if (ok) markOtOutboxSynced(newOtEntries);
-              return ok;
-            })
-          : Promise.resolve(true),
-      ]);
-      if (wOk && lOk && oOk) {
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
-      } else {
-        showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
-      }
-    } else if (targetSheetId) {
-      const token = await getAccessToken();
-      if (token) {
-        await Promise.all([
-          appendDailyWorkloadToSheet(token, targetSheetId, entries).then((ok) => {
+      if (targetGasUrl) {
+        const [wOk, lOk, oOk] = await Promise.all([
+          appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
             if (ok) markWorkloadOutboxSynced(entries);
+            return ok;
           }),
-          ...newLeaveEntries.map((l) =>
-            appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
-              if (ok) markLeaveOutboxSynced([l]);
-            })
-          ),
-          ...newOtEntries.map((o) =>
-            appendOTToSheet(token, targetSheetId, o).then((ok) => {
-              if (ok) markOtOutboxSynced([o]);
-            })
-          ),
+          newLeaveEntries.length > 0
+            ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
+                if (ok) markLeaveOutboxSynced(newLeaveEntries);
+                return ok;
+              })
+            : Promise.resolve(true),
+          newOtEntries.length > 0
+            ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
+                if (ok) markOtOutboxSynced(newOtEntries);
+                return ok;
+              })
+            : Promise.resolve(true),
         ]);
-        lastSyncEpochRef.current = Date.now();
-        setLastSyncedAt(formatSyncTime());
-        void performBackgroundSync('edit');
+        if (wOk && lOk && oOk) {
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          void performBackgroundSync('edit');
+        } else {
+          showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet รอบถัดไปอัตโนมัติ)', 'info');
+        }
+      } else if (targetSheetId) {
+        const token = await getAccessToken();
+        if (token) {
+          await Promise.all([
+            appendDailyWorkloadToSheet(token, targetSheetId, entries).then((ok) => {
+              if (ok) markWorkloadOutboxSynced(entries);
+            }),
+            ...newLeaveEntries.map((l) =>
+              appendLeaveToSheet(token, targetSheetId, l).then((ok) => {
+                if (ok) markLeaveOutboxSynced([l]);
+              })
+            ),
+            ...newOtEntries.map((o) =>
+              appendOTToSheet(token, targetSheetId, o).then((ok) => {
+                if (ok) markOtOutboxSynced([o]);
+              })
+            ),
+          ]);
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          void performBackgroundSync('edit');
+        } else {
+          showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        }
       } else {
-        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+        showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
       }
-    } else {
-      showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อมต่อ Google Sheets ในหน้า Admin)', 'info');
+    } finally {
+      batchSlots.forEach((s) => savingWorkloadSlotsRef.current.delete(s));
     }
   };
 
@@ -3461,13 +3470,15 @@ export default function App() {
     return { ok: false, error: gasErr };
   };
 
-  // Client-side multi-schedule Bangkok-time auto-scheduler (always syncs live Sheets data first + 15-min grace for late saves)
-  useEffect(() => {
-    const checkSchedules = async () => {
-      const curDb = dbRef.current;
-      const st = curDb.settings;
-      if (!st.lineAutoEnabled) return;
+  // Client-side multi-schedule Bangkok-time auto-scheduler (always syncs live Sheets data first + coordinated .jpeg upload & delivery)
+  const checkLineSchedules = useCallback(async () => {
+    if (lineAutoCheckInFlightRef.current) return;
+    const curDb = dbRef.current;
+    const st = curDb.settings;
+    if (!st.lineAutoEnabled) return;
 
+    lineAutoCheckInFlightRef.current = true;
+    try {
       const fmt = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Asia/Bangkok',
         year: 'numeric',
@@ -3504,7 +3515,8 @@ export default function App() {
         if (!sch.enabled) return false;
         const schTime = normalizeLineTimeString(sch.time, DEFAULT_LINE_AUTO_TIME);
         const diff = nowMins - toMins(schTime);
-        if (diff < 0 || diff > 15) return false;
+        // Full 75-minute catch-up window (matching Code.gs & surviving 15-min grace wait!)
+        if (diff < 0 || diff > 75) return false;
         if (!doesDateMatchLineDayRule(bkkYmd, sch.dayRule, customHolidays)) return false;
         return !dedupeMap[`${sch.id}|${bkkYmd}`];
       });
@@ -3513,7 +3525,9 @@ export default function App() {
       // Always fetch fresh workloads from Google Sheets BEFORE rendering .jpeg & counting rows!
       const freshDb = await fetchLatestDbForLineSend(curDb);
       const freshSt = freshDb.settings;
+      if (!freshSt.lineAutoEnabled) return;
       const premSubs = freshSt.premiumSubClinics || [...DEFAULT_PREMIUM_SUB_CLINICS];
+      const globalSendFormat = resolveLineSendFormat(freshSt.lineSendFormat, freshSt.lineSendAsImage);
 
       for (const sch of dueSchedules) {
         const dedupeKey = `${sch.id}|${bkkYmd}`;
@@ -3541,11 +3555,44 @@ export default function App() {
           continue;
         }
 
-        dedupeMap[dedupeKey] = new Date().toISOString();
+        const schedSendFormat: LineSendFormat =
+          sch.sendAsImage === false ? 'TEXT_ONLY' : globalSendFormat;
+        const wantImage = schedSendFormat !== 'TEXT_ONLY';
+
+        // Coordinate across open tabs/machines via server claim lock so multiple browsers never double-send
+        let claimToken = '';
+        let serverClaimAvailable = false;
         try {
-          localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
+          const claimRes = await fetch('/api/line/auto-claim', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              clientId: tabInstanceIdRef.current,
+              scheduleId: sch.id,
+              time: schTime,
+              shift: sch.shift,
+              ymd: bkkYmd,
+              wantImage,
+            }),
+          });
+          if (claimRes.ok) {
+            serverClaimAvailable = true;
+            const claimJson = await claimRes.json();
+            if (!claimJson?.claimed) {
+              if (claimJson?.alreadyCompleted) {
+                dedupeMap[dedupeKey] = new Date().toISOString();
+                try {
+                  localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
+                } catch {
+                  // ignore
+                }
+              }
+              continue;
+            }
+            claimToken = String(claimJson.claimToken || '');
+          }
         } catch {
-          // ignore
+          // Proceed standalone if backend unavailable
         }
 
         const msg = buildDailyCensusLineMessage({
@@ -3565,11 +3612,11 @@ export default function App() {
           )
         );
         const gasUrl = (freshSt.gasUrl || '').trim();
-        const schedSendFormat = resolveLineSendFormat(freshSt.lineSendFormat, freshSt.lineSendAsImage);
         let imageUrl = '';
         let previewImageUrl = '';
+        let renderedBase64 = '';
 
-        if (schedSendFormat !== 'TEXT_ONLY' && gasUrl) {
+        if (wantImage) {
           try {
             const rendered = renderDailyCensusReportJpegDataUrl({
               workloads: freshDb.workloads,
@@ -3577,21 +3624,27 @@ export default function App() {
               shiftFilter: sch.shift,
               premiumSubClinics: premSubs,
             });
-            const up = await uploadLineReportJpegViaAppsScript({
-              gasUrl,
-              base64Jpeg: rendered.base64,
-              filename: `OPD_Census_${targetDate}_${sch.id}.jpeg`,
-            });
-            if (up.ok && up.imageUrl) {
-              imageUrl = up.imageUrl;
-              previewImageUrl = up.previewImageUrl || up.imageUrl;
+            renderedBase64 = rendered.base64;
+            if (gasUrl) {
+              const up = await uploadLineReportJpegViaAppsScript({
+                gasUrl,
+                base64Jpeg: rendered.base64,
+                filename: `OPD_Census_${targetDate}_${sch.id}.jpeg`,
+              });
+              if (up.ok && up.imageUrl) {
+                imageUrl = up.imageUrl;
+                previewImageUrl = up.previewImageUrl || up.imageUrl;
+              }
             }
           } catch {
-            // proceed with text fallback if image render/upload fails
+            // proceed with fallback below
           }
         }
 
         let sentViaGas = false;
+        let alreadySentWithImageOnGas = false;
+        let sentOk = false;
+
         if (gasUrl) {
           try {
             const gasRes = await fetch(gasUrl, {
@@ -3601,6 +3654,7 @@ export default function App() {
                 action: 'sendAutoScheduledLineReport',
                 payload: {
                   scheduleId: sch.id,
+                  scheduleTime: schTime,
                   scheduleLabel: sch.label,
                   targetIds,
                   targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
@@ -3611,35 +3665,90 @@ export default function App() {
                   clientClinicCount: matchingRows.length,
                   sendFormat: schedSendFormat,
                   ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
+                  ...(!imageUrl && renderedBase64 ? { imageBase64: renderedBase64 } : {}),
                 },
               }),
             });
             if (gasRes.ok) {
               const gasJson = await gasRes.json();
-              if (gasJson?.success) sentViaGas = true;
+              if (gasJson?.alreadySentWithImage) {
+                alreadySentWithImageOnGas = true;
+              } else if (gasJson?.success && !gasJson?.skipped) {
+                sentViaGas = true;
+                sentOk = true;
+                if (gasJson?.imageUrl) {
+                  imageUrl = String(gasJson.imageUrl);
+                }
+              }
             }
           } catch {
             // fallback to server proxy below
           }
         }
 
-        if (!sentViaGas) {
-          await sendLineMessageViaServerProxy({
+        if (!sentViaGas && !alreadySentWithImageOnGas) {
+          const proxyRes = await sendLineMessageViaServerProxy({
             targetId: targetIds[0] || DEFAULT_LINE_GROUP_ID,
             targetIds,
             message: msg,
             sendFormat: schedSendFormat,
             ...(imageUrl ? { imageUrl, previewImageUrl } : {}),
           });
+          if (proxyRes.ok) {
+            sentOk = true;
+          }
+        }
+
+        if (serverClaimAvailable) {
+          try {
+            await fetch('/api/line/auto-complete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                scheduleId: sch.id,
+                time: schTime,
+                shift: sch.shift,
+                ymd: bkkYmd,
+                claimToken,
+                ok: sentOk || alreadySentWithImageOnGas,
+                sentWithImage: Boolean((sentOk && (imageUrl || renderedBase64)) || alreadySentWithImageOnGas),
+                statusText: sentOk ? `ส่งรายงานอัตโนมัติ (${sch.label || schTime}) สำเร็จ` : undefined,
+              }),
+            });
+          } catch {
+            // ignore
+          }
+        }
+
+        // Only lock local dedupe key after confirmed delivery (or confirmed prior image send) so transient errors auto-retry
+        if (sentOk || alreadySentWithImageOnGas) {
+          dedupeMap[dedupeKey] = new Date().toISOString();
+          try {
+            localStorage.setItem('pcmc_line_client_auto_dedupe_v1', JSON.stringify(dedupeMap));
+          } catch {
+            // ignore
+          }
         }
       }
-    };
+    } finally {
+      lineAutoCheckInFlightRef.current = false;
+    }
+  }, [fetchLatestDbForLineSend]);
 
+  useEffect(() => {
+    void checkLineSchedules();
     const timerId = window.setInterval(() => {
-      void checkSchedules();
+      void checkLineSchedules();
     }, 30_000);
     return () => window.clearInterval(timerId);
-  }, [fetchLatestDbForLineSend]);
+  }, [
+    checkLineSchedules,
+    db.settings.lineAutoEnabled,
+    db.settings.lineSchedules,
+    db.settings.lineSendFormat,
+    db.settings.lineSendAsImage,
+    db.workloads.length,
+  ]);
 
   const handleFetchLineStatus = useCallback(async (): Promise<LineAutomationStatusInfo | null> => {
     const baseDb = dbRef.current;

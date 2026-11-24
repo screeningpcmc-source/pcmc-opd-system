@@ -670,10 +670,53 @@ function appendWorkloadFromApi_(payload) {
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
   ensureWorkloadColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = (firstHeader === 'Record_ID');
+  var off = hasId ? 1 : 0;
+
+  var existingIds = {};
+  var existingSlots = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var colCount = Math.min(sheet.getLastColumn(), off + 18);
+    var existingRows = sheet.getRange(2, 1, lastRow - 1, colCount).getValues();
+    for (var i = 0; i < existingRows.length; i++) {
+      var r = existingRows[i];
+      if (hasId) {
+        var exId = String(r[0] || '').trim();
+        if (exId) existingIds[exId] = true;
+      }
+      var exDate = normalizeSheetDateGas_(r[off]);
+      var exShift = String(r[off + 1] || '').replace(/\s+/g, ' ').trim();
+      var exClinic = String(r[off + 2] || '').trim();
+      var exRawType = String(r[off + 17] || 'STANDARD').trim().toUpperCase();
+      var exTypeGroup = (exRawType === 'PREMIUM_SUB') ? 'PREMIUM_SUB' : ((exRawType === 'PREMIUM_POOL') ? 'PREMIUM_POOL' : 'STANDARD');
+      if (exDate && exClinic) {
+        existingSlots[exDate + '|' + exShift + '|' + exClinic + '|' + exTypeGroup] = true;
+      }
+    }
+  }
+
   var rowsToAppend = [];
+  var validInputCount = 0;
+  var skippedDuplicates = 0;
 
   list.forEach(function(entry) {
     if (!entry || !entry.date || !entry.clinic) return;
+    validInputCount += 1;
+
+    var entryId = String(entry.id || '').trim();
+    var normDate = normalizeSheetDateGas_(entry.date);
+    var normShift = String(entry.shift || '').replace(/\s+/g, ' ').trim();
+    var normClinic = String(entry.clinic || '').trim();
+    var rawType = String(entry.recordType || 'STANDARD').trim().toUpperCase();
+    var typeGroup = (rawType === 'PREMIUM_SUB') ? 'PREMIUM_SUB' : ((rawType === 'PREMIUM_POOL') ? 'PREMIUM_POOL' : 'STANDARD');
+    var slotKey = normDate + '|' + normShift + '|' + normClinic + '|' + typeGroup;
+
+    if ((entryId && existingIds[entryId]) || (normDate && normClinic && existingSlots[slotKey])) {
+      skippedDuplicates += 1;
+      return;
+    }
+
     var adultPt = Number(entry.adultPt || 0);
     var childPt = Number(entry.childPt || 0);
     var totalPt = Math.max(Number(entry.totalPt || 0), adultPt + childPt);
@@ -697,20 +740,27 @@ function appendWorkloadFromApi_(payload) {
       String(entry.poolId || ''),
       String(entry.recordType || 'STANDARD')
     ];
-    if (firstHeader === 'Record_ID') {
-      var recId = entry.id || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    if (hasId) {
+      var recId = entryId || ('REC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      existingIds[recId] = true;
       rowsToAppend.push([recId].concat(baseRow));
     } else {
       rowsToAppend.push(baseRow);
     }
+    if (normDate && normClinic) {
+      existingSlots[slotKey] = true;
+    }
   });
 
-  if (rowsToAppend.length === 0) {
+  if (validInputCount === 0) {
     return { success: false, error: 'ข้อมูลภาระงานไม่ครบถ้วน' };
+  }
+  if (rowsToAppend.length === 0) {
+    return { success: true, appended: 0, skippedDuplicates: skippedDuplicates };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
   SpreadsheetApp.flush();
-  return { success: true, appended: rowsToAppend.length };
+  return { success: true, appended: rowsToAppend.length, skippedDuplicates: skippedDuplicates };
 }
 
 function appendLeaveFromApi_(payload) {
@@ -719,10 +769,52 @@ function appendLeaveFromApi_(payload) {
     'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
   ]);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = (firstHeader === 'Leave_ID');
+  var off = hasId ? 1 : 0;
+
+  var existingIds = {};
+  var existingKeys = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var colCount = Math.min(sheet.getLastColumn(), off + 8);
+    var existingRows = sheet.getRange(2, 1, lastRow - 1, colCount).getValues();
+    for (var i = 0; i < existingRows.length; i++) {
+      var r = existingRows[i];
+      if (hasId) {
+        var exId = String(r[0] || '').trim();
+        if (exId) existingIds[exId] = true;
+      }
+      var lKey = [
+        normalizeSheetDateGas_(r[off]),
+        normalizeSheetDateGas_(r[off + 1] || r[off]),
+        String(r[off + 2] || '').replace(/\s+/g, ' ').trim(),
+        String(r[off + 5] || '').trim(),
+        Number(r[off + 6] || 1)
+      ].join('|');
+      existingKeys[lKey] = true;
+    }
+  }
+
   var rowsToAppend = [];
+  var validInputCount = 0;
+  var skippedDuplicates = 0;
 
   list.forEach(function(leave) {
     if (!leave || !leave.startDate || !leave.staffName) return;
+    validInputCount += 1;
+    var leaveId = String(leave.id || '').trim();
+    var lKey = [
+      normalizeSheetDateGas_(leave.startDate),
+      normalizeSheetDateGas_(leave.endDate || leave.startDate),
+      String(leave.staffName || '').replace(/\s+/g, ' ').trim(),
+      String(leave.leaveType || 'ลาป่วย').trim(),
+      Number(leave.days || 1)
+    ].join('|');
+    if ((leaveId && existingIds[leaveId]) || existingKeys[lKey]) {
+      skippedDuplicates += 1;
+      return;
+    }
+
     var baseRow = [
       String(leave.startDate || ''),
       String(leave.endDate || leave.startDate || ''),
@@ -733,20 +825,25 @@ function appendLeaveFromApi_(payload) {
       Number(leave.days || 1),
       String(leave.note || '')
     ];
-    if (firstHeader === 'Leave_ID') {
-      var lvId = leave.id || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    if (hasId) {
+      var lvId = leaveId || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      existingIds[lvId] = true;
       rowsToAppend.push([lvId].concat(baseRow));
     } else {
       rowsToAppend.push(baseRow);
     }
+    existingKeys[lKey] = true;
   });
 
-  if (rowsToAppend.length === 0) {
+  if (validInputCount === 0) {
     return { success: false, error: 'ข้อมูลวันลาไม่ครบถ้วน' };
+  }
+  if (rowsToAppend.length === 0) {
+    return { success: true, appended: 0, skippedDuplicates: skippedDuplicates };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
   SpreadsheetApp.flush();
-  return { success: true, appended: rowsToAppend.length };
+  return { success: true, appended: rowsToAppend.length, skippedDuplicates: skippedDuplicates };
 }
 
 function appendOTFromApi_(payload) {
@@ -756,10 +853,48 @@ function appendOTFromApi_(payload) {
   ]);
   ensureOtColumns_(sheet);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = (firstHeader === 'OT_ID');
+  var off = hasId ? 1 : 0;
+
+  var existingIds = {};
+  var existingKeys = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var colCount = Math.min(sheet.getLastColumn(), off + 8);
+    var existingRows = sheet.getRange(2, 1, lastRow - 1, colCount).getValues();
+    for (var i = 0; i < existingRows.length; i++) {
+      var r = existingRows[i];
+      if (hasId) {
+        var exId = String(r[0] || '').trim();
+        if (exId) existingIds[exId] = true;
+      }
+      var oKey = [
+        normalizeSheetDateGas_(r[off]),
+        String(r[off + 1] || '').replace(/\s+/g, ' ').trim(),
+        String(r[off + 2] || '').replace(/\s+/g, ' ').trim()
+      ].join('|');
+      existingKeys[oKey] = true;
+    }
+  }
+
   var rowsToAppend = [];
+  var validInputCount = 0;
+  var skippedDuplicates = 0;
 
   list.forEach(function(ot) {
     if (!ot || !ot.date || !ot.staffName) return;
+    validInputCount += 1;
+    var rawOtId = String(ot.id || '').trim();
+    var oKey = [
+      normalizeSheetDateGas_(ot.date),
+      String(ot.shift || '').replace(/\s+/g, ' ').trim(),
+      String(ot.staffName || '').replace(/\s+/g, ' ').trim()
+    ].join('|');
+    if ((rawOtId && existingIds[rawOtId]) || existingKeys[oKey]) {
+      skippedDuplicates += 1;
+      return;
+    }
+
     var baseRow = [
       String(ot.date || ''),
       String(ot.shift || ''),
@@ -770,20 +905,25 @@ function appendOTFromApi_(payload) {
       ot.hours !== undefined && ot.hours !== null && ot.hours !== '' ? Number(ot.hours) : '',
       String(ot.employeeCode || '')
     ];
-    if (firstHeader === 'OT_ID') {
-      var otId = ot.id || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+    if (hasId) {
+      var otId = rawOtId || ('OT-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
+      existingIds[otId] = true;
       rowsToAppend.push([otId].concat(baseRow));
     } else {
       rowsToAppend.push(baseRow);
     }
+    existingKeys[oKey] = true;
   });
 
-  if (rowsToAppend.length === 0) {
+  if (validInputCount === 0) {
     return { success: false, error: 'ข้อมูลเวรนอกเวลาไม่ครบถ้วน' };
+  }
+  if (rowsToAppend.length === 0) {
+    return { success: true, appended: 0, skippedDuplicates: skippedDuplicates };
   }
   sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
   SpreadsheetApp.flush();
-  return { success: true, appended: rowsToAppend.length };
+  return { success: true, appended: rowsToAppend.length, skippedDuplicates: skippedDuplicates };
 }
 
 var DEFAULT_ADMIN_PIN_HASHES = [
@@ -2177,6 +2317,7 @@ function getLineSchedulesFromSettingsMap_(settingsMap) {
             dayRule: String(s.dayRule || 'ALL_DAYS'),
             shift: String(s.shift || 'ในเวลา 08:00-16:00'),
             reportDayMode: String(s.reportDayMode || 'TODAY'),
+            sendAsImage: s.sendAsImage !== false,
             enabled: s.enabled !== false
           };
         });
@@ -2294,7 +2435,12 @@ function removeLineTriggersGas_() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     var fn = triggers[i].getHandlerFunction();
-    if (fn === 'runLineDailyCensusTrigger_' || fn === 'runLineDailyBackupTrigger_' || fn === 'runLineDailyCensusTrigger') {
+    if (
+      fn === 'runLineDailyCensusTrigger_' ||
+      fn === 'runLineDailyBackupTrigger_' ||
+      fn === 'runLineGraceRetryTrigger_' ||
+      fn === 'runLineDailyCensusTrigger'
+    ) {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
@@ -4851,6 +4997,19 @@ function resolveAutoReportTargetDateGas_(mode, bkkTodayYmd) {
   return bkkTodayYmd;
 }
 
+function canonicalLineScheduleKeyGas_(specificSchedule, extraPayload) {
+  var rawId = String((specificSchedule && specificSchedule.id) || (extraPayload && extraPayload.scheduleId) || '').trim().toLowerCase();
+  if (rawId === 'sch-regular' || rawId === 'workday_reg') return 'WORKDAY_REG';
+  if (rawId === 'sch-ot-weekday' || rawId === 'workday_evening') return 'WORKDAY_EVENING';
+  if (rawId === 'sch-ot-holiday' || rawId === 'holiday_morning') return 'HOLIDAY_MORNING';
+  var rawTime = String((specificSchedule && specificSchedule.time) || (extraPayload && extraPayload.scheduleTime) || '').trim();
+  var parsedTime = rawTime ? parseLineAutoTimeGas_(rawTime).formatted : '';
+  var rawShift = String((specificSchedule && specificSchedule.shift) || (extraPayload && extraPayload.shift) || '').replace(/\s+/g, ' ').trim();
+  if (parsedTime && rawShift) return parsedTime + '|' + rawShift;
+  if (rawId) return rawId.toUpperCase();
+  return 'DEFAULT';
+}
+
 function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload) {
   var settingsMap = readSettingsMapGas_();
   var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
@@ -4881,19 +5040,34 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
   var targetDate = normalizeSheetDateGas_(String((extraPayload && extraPayload.date) || '').trim()) ||
     resolveAutoReportTargetDateGas_(reportDayMode, bkk.ymd);
 
-  var scheduleKey = specificSchedule && specificSchedule.id ? String(specificSchedule.id) : 'DEFAULT';
+  var scheduleKey = canonicalLineScheduleKeyGas_(specificSchedule, extraPayload);
   var dedupePropKey = 'LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey;
+  var dedupeImgPropKey = 'LINE_LAST_TRIGGER_BKK_IMG_' + scheduleKey;
+  var clientHasImg = Boolean(extraPayload && (extraPayload.imageUrl || extraPayload.imageBase64));
+
   if (sourceTag !== 'MANUAL') {
-    var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty(dedupePropKey) || '').trim();
-    if (lastSentTriggerDay === bkk.ymd) {
-      return { success: true, skipped: true, reason: 'Already sent today (' + bkk.ymd + ' / ' + scheduleKey + ')' };
+    var props = PropertiesService.getScriptProperties();
+    var lastSentImgDay = String(props.getProperty(dedupeImgPropKey) || '').trim();
+    if (lastSentImgDay === bkk.ymd) {
+      return {
+        success: true,
+        skipped: true,
+        alreadySentWithImage: true,
+        reason: 'Already sent with image today (' + bkk.ymd + ' / ' + scheduleKey + ')'
+      };
+    }
+    if (!(sourceTag === 'CLIENT_AUTO' && clientHasImg)) {
+      var lastSentTriggerDay = String(props.getProperty(dedupePropKey) || '').trim();
+      if (lastSentTriggerDay === bkk.ymd) {
+        return { success: true, skipped: true, reason: 'Already sent today (' + bkk.ymd + ' / ' + scheduleKey + ')' };
+      }
     }
   }
 
   var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
   var resolvedSendFormat = normalizeLineSendFormatGas_(
     (extraPayload && extraPayload.sendFormat) || settingsMap['Line_Send_Format'],
-    legacyImgPref
+    (specificSchedule && specificSchedule.sendAsImage !== undefined) ? Boolean(specificSchedule.sendAsImage) : legacyImgPref
   );
 
   // ALWAYS compute live report directly from Google Sheets first to prevent stale 0-clinic client tabs from overriding live data!
@@ -4911,7 +5085,7 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
   var imageUrl = '';
   var previewImageUrl = '';
   var textToSend = report.text;
-  var allowFallbackText = (sourceTag === 'AUTO_TRIGGER' || sourceTag === 'AUTO_BACKUP' || sourceTag === 'AUTO_RETRY');
+  var allowFallbackText = (sourceTag === 'AUTO_EXACT' || sourceTag === 'AUTO_TRIGGER' || sourceTag === 'AUTO_BACKUP' || sourceTag === 'AUTO_RETRY');
 
   if (clientReportedEmpty && report.clinicCount > 0) {
     // Discard stale client 0-clinic JPEG & text; send authoritative Google Sheets report text instead
@@ -4946,8 +5120,12 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
 
   if (pushRes.ok) {
     if (sourceTag !== 'MANUAL') {
-      PropertiesService.getScriptProperties().setProperty(dedupePropKey, bkk.ymd);
-      PropertiesService.getScriptProperties().setProperty('LINE_LAST_TRIGGER_BKK_DAY', bkk.ymd);
+      var propsOk = PropertiesService.getScriptProperties();
+      propsOk.setProperty(dedupePropKey, bkk.ymd);
+      propsOk.setProperty('LINE_LAST_TRIGGER_BKK_DAY', bkk.ymd);
+      if (imageUrl) {
+        propsOk.setProperty(dedupeImgPropKey, bkk.ymd);
+      }
     }
     var schedTag = specificSchedule && specificSchedule.label ? (' [' + specificSchedule.label + ']') : '';
     var imgTag = imageUrl ? ' + ภาพ.jpeg' : '';
@@ -4957,7 +5135,14 @@ function sendScheduledCensusReportGas_(sourceTag, specificSchedule, extraPayload
       ['Line_Last_Sent_Report_Date', targetDate],
       ['Line_Last_Status', okStatus]
     ]);
-    return { success: true, targetDate: targetDate, statusText: okStatus, sentAt: nowThai, sentCount: pushRes.sentCount };
+    return {
+      success: true,
+      targetDate: targetDate,
+      statusText: okStatus,
+      sentAt: nowThai,
+      sentCount: pushRes.sentCount,
+      imageUrl: imageUrl
+    };
   } else {
     var errStatus = 'ส่งไม่สำเร็จ: ' + pushRes.error;
     upsertSettingsEntriesGas_([
@@ -4984,6 +5169,7 @@ function runDueLineSchedulesGas_(sourceTag) {
   var bkk = getBangkokDatePartsGas_(new Date());
   var nowMins = hhmmToMinsGas_(bkk.hm);
   var needsRetry = false;
+  var legacyImgPref = String(settingsMap['Line_Send_As_Image'] || 'true').toLowerCase() !== 'false';
 
   for (var i = 0; i < schedules.length; i++) {
     var sch = schedules[i];
@@ -4993,9 +5179,30 @@ function runDueLineSchedulesGas_(sourceTag) {
     var diff = nowMins - schMins;
     // Allow 2 mins early and up to 75 mins catch-up window
     if (diff >= -2 && diff <= 75) {
-      var scheduleKey = sch.id ? String(sch.id) : 'DEFAULT';
-      var lastSentTriggerDay = String(PropertiesService.getScriptProperties().getProperty('LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey) || '').trim();
-      if (lastSentTriggerDay === bkk.ymd) continue;
+      var scheduleKey = canonicalLineScheduleKeyGas_(sch, null);
+      var props = PropertiesService.getScriptProperties();
+      var lastSentImgDay = String(props.getProperty('LINE_LAST_TRIGGER_BKK_IMG_' + scheduleKey) || '').trim();
+      var lastSentTriggerDay = String(props.getProperty('LINE_LAST_TRIGGER_BKK_DAY_' + scheduleKey) || '').trim();
+      if (lastSentImgDay === bkk.ymd || lastSentTriggerDay === bkk.ymd) continue;
+
+      var schedSendFormat = normalizeLineSendFormatGas_(
+        settingsMap['Line_Send_Format'],
+        (sch.sendAsImage !== undefined) ? Boolean(sch.sendAsImage) : legacyImgPref
+      );
+      if (sch.sendAsImage === false) {
+        schedSendFormat = 'TEXT_ONLY';
+      }
+
+      // If IMAGE_ONLY is selected, Apps Script cron cannot render HTML5 Canvas .jpeg headlessly; never fire plain-text fallback
+      if (schedSendFormat === 'IMAGE_ONLY') {
+        continue;
+      }
+
+      // Give open browser clients a 10-minute priority window to render & upload .jpeg before GAS sends text backup!
+      if (schedSendFormat !== 'TEXT_ONLY' && diff < 10) {
+        needsRetry = true;
+        continue;
+      }
 
       var targetDate = resolveAutoReportTargetDateGas_(sch.reportDayMode || settingsMap['Line_Auto_Report_Day'] || 'TODAY', bkk.ymd);
       var liveCheck = buildDailyCensusLineMessageGas_(targetDate, sch.shift || 'ในเวลา 08:00-16:00', settingsMap);
@@ -5023,13 +5230,14 @@ function runLineDailyCensusTrigger_() {
     if (enabled) {
       var existing = ScriptApp.getProjectTriggers();
       for (var i = 0; i < existing.length; i++) {
-        if (existing[i].getHandlerFunction() === 'runLineDailyCensusTrigger_') {
+        var fn = existing[i].getHandlerFunction();
+        if (fn === 'runLineDailyCensusTrigger_' || fn === 'runLineGraceRetryTrigger_') {
           ScriptApp.deleteTrigger(existing[i]);
         }
       }
       if (dueResult.needsRetry) {
-        // Schedule a 10-minute grace retry so late entries saved right after 15:55 / 20:00 / 12:30 get picked up cleanly
-        ScriptApp.newTrigger('runLineDailyBackupTrigger_')
+        // Schedule a 10-minute grace retry so client browsers can send .jpeg first and late saves get picked up cleanly
+        ScriptApp.newTrigger('runLineGraceRetryTrigger_')
           .timeBased()
           .after(10 * 60 * 1000)
           .create();
@@ -5048,6 +5256,31 @@ function runLineDailyCensusTrigger_() {
         syncLineAutomationTriggers_(true, timeStr, settingsMap);
       }
     }
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function runLineGraceRetryTrigger_() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var existing = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].getHandlerFunction() === 'runLineGraceRetryTrigger_') {
+        ScriptApp.deleteTrigger(existing[i]);
+      }
+    }
+    var settingsMap = readSettingsMapGas_();
+    var enabled = String(settingsMap['Line_Auto_Enabled'] || '').toLowerCase() === 'true';
+    if (!enabled) return;
+    var retryRes = runDueLineSchedulesGas_('AUTO_BACKUP') || { needsRetry: false };
+    if (retryRes.needsRetry) {
+      ScriptApp.newTrigger('runLineGraceRetryTrigger_')
+        .timeBased()
+        .after(6 * 60 * 1000)
+        .create();
+    }
+  } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
 }
@@ -5153,10 +5386,10 @@ function sendAutoScheduledLineReportFromClientApi_(payload) {
   if (!enabled) {
     return { success: false, error: 'ระบบส่งรายงานอัตโนมัติปิดอยู่' };
   }
-  var bkk = getBangkokDatePartsGas_(new Date());
   var schedId = String((payload && payload.scheduleId) || 'CLIENT_AUTO').trim();
   var sch = {
     id: schedId,
+    time: String((payload && payload.scheduleTime) || '').trim(),
     label: String((payload && payload.scheduleLabel) || 'อัตโนมัติ (ภาพ .jpeg)'),
     shift: String((payload && payload.shift) || settingsMap['Line_Auto_Shift'] || 'ในเวลา 08:00-16:00'),
     reportDayMode: String((payload && payload.reportDayMode) || settingsMap['Line_Auto_Report_Day'] || 'TODAY')
