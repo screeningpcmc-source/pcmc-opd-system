@@ -48,6 +48,10 @@ import {
   getWorkloadOffDutyStaff,
   normalizeWorkloadDateStr,
   normalizeWorkloadShiftStr,
+  deduplicateLeaves,
+  isLeaveDuplicateConflict,
+  normalizeLeaveDateStr,
+  normalizeStaffNameKey,
   DEFAULT_BOOBY_OWNER_NAME
 } from './types';
 import { 
@@ -197,6 +201,7 @@ export default function App() {
   const serverVersionRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
   const savingWorkloadSlotsRef = useRef<Set<string>>(new Set());
+  const savingLeaveSlotsRef = useRef<Set<string>>(new Set());
   const lineAutoCheckInFlightRef = useRef<boolean>(false);
   const hasMountedTabRef = useRef<boolean>(false);
 
@@ -284,9 +289,19 @@ export default function App() {
       const boxL = getPendingOutboxLeaves();
       const lIds = new Set(hydrated.leaves.map((l) => l.id));
       const lKeys = new Set(hydrated.leaves.map(getLeaveKey));
-      const syncedL = boxL.filter((l) => lIds.has(l.id) || lKeys.has(getLeaveKey(l)));
+      const syncedL = boxL.filter(
+        (l) =>
+          lIds.has(l.id) ||
+          lKeys.has(getLeaveKey(l)) ||
+          hydrated.leaves.some((hl) => isLeaveDuplicateConflict(hl, l))
+      );
       if (syncedL.length > 0) markLeaveOutboxSynced(syncedL);
-      const pendingL = boxL.filter((l) => !lIds.has(l.id) && !lKeys.has(getLeaveKey(l)));
+      const pendingL = boxL.filter(
+        (l) =>
+          !lIds.has(l.id) &&
+          !lKeys.has(getLeaveKey(l)) &&
+          !hydrated.leaves.some((hl) => isLeaveDuplicateConflict(hl, l))
+      );
 
       const boxO = getPendingOutboxOt();
       const oIds = new Set(hydrated.ot.map((o) => o.id));
@@ -298,7 +313,9 @@ export default function App() {
       const mergedDb: AppDatabase = {
         ...hydrated,
         workloads: pendingW.length > 0 ? [...pendingW, ...hydrated.workloads] : hydrated.workloads,
-        leaves: pendingL.length > 0 ? [...pendingL, ...hydrated.leaves] : hydrated.leaves,
+        leaves: deduplicateLeaves(
+          pendingL.length > 0 ? [...pendingL, ...hydrated.leaves] : hydrated.leaves
+        ),
         ot: pendingO.length > 0 ? [...pendingO, ...hydrated.ot] : hydrated.ot,
       };
 
@@ -328,6 +345,7 @@ export default function App() {
       if (res && res.ok) {
         applyAuthoritativeServerSnapshot(res, 'mutate');
       }
+      return res;
     },
     [applyAuthoritativeServerSnapshot]
   );
@@ -350,7 +368,10 @@ export default function App() {
       const lIds = new Set(currentDb.leaves.map((l) => l.id));
       const lKeys = new Set(currentDb.leaves.map(getLeaveKey));
       const pendingL = getPendingOutboxLeaves().filter(
-        (l) => !lIds.has(l.id) && !lKeys.has(getLeaveKey(l))
+        (l) =>
+          !lIds.has(l.id) &&
+          !lKeys.has(getLeaveKey(l)) &&
+          !currentDb.leaves.some((cl) => isLeaveDuplicateConflict(cl, l))
       );
 
       const oIds = new Set(currentDb.ot.map((o) => o.id));
@@ -1505,32 +1526,32 @@ export default function App() {
       if (leaveData) {
         const existingLeaves = dbRef.current.leaves;
         const skippedNames: string[] = [];
+        const entryDateNorm = normalizeLeaveDateStr(entry.date) || entry.date;
         leaveData.forEach((ld, idx) => {
-          const cleanName = (ld.staffName || '').trim();
-          const isDuplicateInDb = existingLeaves.some(l => {
-            if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
-            const sDate = (l.startDate || '').trim();
-            const eDate = (l.endDate || l.startDate || '').trim();
-            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
-          });
-          if (isDuplicateInDb) {
-            skippedNames.push(cleanName);
-            return;
-          }
-          const staff = db.staff.find(s => s.name === ld.staffName);
+          const cleanName = normalizeStaffNameKey(ld.staffName);
+          if (!cleanName) return;
+          const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
           const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
-          newLeaveEntries.push({
-            id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
-            startDate: entry.date,
-            endDate: entry.date,
-            staffName: ld.staffName,
+          const candidate: LeaveRecord = {
+            id: `LV-AUTO-${Date.now()}-${idx}-${cleanName}`,
+            startDate: entryDateNorm,
+            endDate: entryDateNorm,
+            staffName: cleanName,
             position: staff ? staff.position : 'RN',
             clinic: staff ? staff.homeClinic : entry.clinic,
             leaveType: ld.leaveType,
             days: numericDays,
             note: formattedNote,
-          });
+          };
+          const isDuplicateInDb =
+            existingLeaves.some(l => isLeaveDuplicateConflict(l, candidate)) ||
+            newLeaveEntries.some(l => isLeaveDuplicateConflict(l, candidate));
+          if (isDuplicateInDb) {
+            skippedNames.push(cleanName);
+            return;
+          }
+          newLeaveEntries.push(candidate);
         });
         if (skippedNames.length > 0) {
           showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
@@ -1539,31 +1560,31 @@ export default function App() {
 
       if (trainingData) {
         const existingLeaves = dbRef.current.leaves;
+        const entryDateNorm = normalizeLeaveDateStr(entry.date) || entry.date;
         trainingData.forEach((td, idx) => {
-          const cleanName = (td.staffName || '').trim();
-          const isDuplicateInDb = existingLeaves.some(l => {
-            if (!isTrainingLeaveType(l.leaveType)) return false;
-            const sDate = (l.startDate || '').trim();
-            const eDate = (l.endDate || l.startDate || '').trim();
-            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && entry.date >= sDate && entry.date <= eDate;
-          });
-          if (isDuplicateInDb) return;
-          const staff = db.staff.find(s => s.name === td.staffName);
+          const cleanName = normalizeStaffNameKey(td.staffName);
+          if (!cleanName) return;
+          const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
           const rawNote =
             [td.topic, td.note].filter(Boolean).join(' — ') ||
             `ไปอบรม/ประชุม (บันทึกจาก ${entry.clinic})`;
-          newLeaveEntries.push({
-            id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
-            startDate: entry.date,
-            endDate: entry.date,
-            staffName: td.staffName,
+          const candidate: LeaveRecord = {
+            id: `TRN-AUTO-${Date.now()}-${idx}-${cleanName}`,
+            startDate: entryDateNorm,
+            endDate: entryDateNorm,
+            staffName: cleanName,
             position: staff ? staff.position : 'RN',
             clinic: staff ? staff.homeClinic : entry.clinic,
             leaveType: 'ไปอบรม/ประชุม',
             days: numericDays,
             note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
-          });
+          };
+          const isDuplicateInDb =
+            existingLeaves.some(l => isLeaveDuplicateConflict(l, candidate)) ||
+            newLeaveEntries.some(l => isLeaveDuplicateConflict(l, candidate));
+          if (isDuplicateInDb) return;
+          newLeaveEntries.push(candidate);
         });
       }
 
@@ -1620,7 +1641,7 @@ export default function App() {
       const nextDb = {
         ...baseDb,
         workloads: [entry, ...baseDb.workloads],
-        leaves: [...newLeaveEntries, ...baseDb.leaves],
+        leaves: deduplicateLeaves([...newLeaveEntries, ...baseDb.leaves]),
         ot: [...newOtEntries, ...baseDb.ot],
       };
       dbRef.current = nextDb;
@@ -1733,32 +1754,32 @@ export default function App() {
       if (leaveData) {
         const existingLeaves = dbRef.current.leaves;
         const skippedNames: string[] = [];
+        const primaryDateNorm = normalizeLeaveDateStr(primaryEntry.date) || primaryEntry.date;
         leaveData.forEach((ld, idx) => {
-          const cleanName = (ld.staffName || '').trim();
-          const isDuplicateInDb = existingLeaves.some(l => {
-            if (isTrainingLeaveType(l.leaveType) !== isTrainingLeaveType(ld.leaveType)) return false;
-            const sDate = (l.startDate || '').trim();
-            const eDate = (l.endDate || l.startDate || '').trim();
-            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
-          });
-          if (isDuplicateInDb) {
-            skippedNames.push(cleanName);
-            return;
-          }
-          const staff = db.staff.find(s => s.name === ld.staffName);
+          const cleanName = normalizeStaffNameKey(ld.staffName);
+          if (!cleanName) return;
+          const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
           const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
-          newLeaveEntries.push({
-            id: `LV-AUTO-${Date.now()}-${idx}-${ld.staffName}`,
-            startDate: primaryEntry.date,
-            endDate: primaryEntry.date,
-            staffName: ld.staffName,
+          const candidate: LeaveRecord = {
+            id: `LV-AUTO-${Date.now()}-${idx}-${cleanName}`,
+            startDate: primaryDateNorm,
+            endDate: primaryDateNorm,
+            staffName: cleanName,
             position: staff ? staff.position : 'RN',
             clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
             leaveType: ld.leaveType,
             days: numericDays,
             note: formattedNote,
-          });
+          };
+          const isDuplicateInDb =
+            existingLeaves.some(l => isLeaveDuplicateConflict(l, candidate)) ||
+            newLeaveEntries.some(l => isLeaveDuplicateConflict(l, candidate));
+          if (isDuplicateInDb) {
+            skippedNames.push(cleanName);
+            return;
+          }
+          newLeaveEntries.push(candidate);
         });
         if (skippedNames.length > 0) {
           showToast(`ข้ามรายการลาซ้ำในวันเดียวกัน (${skippedNames.join(', ')}) เนื่องจากมีอยู่ในฐานข้อมูลแล้ว`, 'error');
@@ -1767,31 +1788,31 @@ export default function App() {
 
       if (trainingData) {
         const existingLeaves = dbRef.current.leaves;
+        const primaryDateNorm = normalizeLeaveDateStr(primaryEntry.date) || primaryEntry.date;
         trainingData.forEach((td, idx) => {
-          const cleanName = (td.staffName || '').trim();
-          const isDuplicateInDb = existingLeaves.some(l => {
-            if (!isTrainingLeaveType(l.leaveType)) return false;
-            const sDate = (l.startDate || '').trim();
-            const eDate = (l.endDate || l.startDate || '').trim();
-            return (l.staffName || '').trim() === cleanName && Boolean(sDate) && primaryEntry.date >= sDate && primaryEntry.date <= eDate;
-          });
-          if (isDuplicateInDb) return;
-          const staff = db.staff.find(s => s.name === td.staffName);
+          const cleanName = normalizeStaffNameKey(td.staffName);
+          if (!cleanName) return;
+          const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(td.days) === 0.5 ? 0.5 : 1;
           const rawNote =
             [td.topic, td.note].filter(Boolean).join(' — ') ||
             `ไปอบรม/ประชุม (บันทึกจาก ${PREMIUM_CLINIC_GROUP})`;
-          newLeaveEntries.push({
-            id: `TRN-AUTO-${Date.now()}-${idx}-${td.staffName}`,
-            startDate: primaryEntry.date,
-            endDate: primaryEntry.date,
-            staffName: td.staffName,
+          const candidate: LeaveRecord = {
+            id: `TRN-AUTO-${Date.now()}-${idx}-${cleanName}`,
+            startDate: primaryDateNorm,
+            endDate: primaryDateNorm,
+            staffName: cleanName,
             position: staff ? staff.position : 'RN',
             clinic: staff ? staff.homeClinic : PREMIUM_CLINIC_GROUP,
             leaveType: 'ไปอบรม/ประชุม',
             days: numericDays,
             note: formatLeaveNoteWithPeriod(rawNote, numericDays, td.periodLabel),
-          });
+          };
+          const isDuplicateInDb =
+            existingLeaves.some(l => isLeaveDuplicateConflict(l, candidate)) ||
+            newLeaveEntries.some(l => isLeaveDuplicateConflict(l, candidate));
+          if (isDuplicateInDb) return;
+          newLeaveEntries.push(candidate);
         });
       }
 
@@ -1848,7 +1869,7 @@ export default function App() {
       const nextDb = {
         ...baseDb,
         workloads: [...entries, ...baseDb.workloads],
-        leaves: [...newLeaveEntries, ...baseDb.leaves],
+        leaves: deduplicateLeaves([...newLeaveEntries, ...baseDb.leaves]),
         ot: [...newOtEntries, ...baseDb.ot],
       };
       dbRef.current = nextDb;
@@ -2456,82 +2477,91 @@ export default function App() {
 
   // Handler: Save Leave (Data Entry: allowed via GAS or OAuth)
   const handleSaveLeave = async (leave: LeaveRecord) => {
-    const cleanName = (leave.staffName || '').trim().replace(/\s+/g, ' ');
-    const lStart = (leave.startDate || '').trim();
-    const lEnd = (leave.endDate || lStart).trim();
-    const isTrain = isTrainingLeaveType(leave.leaveType);
-    const lDays = Number(leave.days) || 1;
-    const lPeriod = parseLeavePeriodFromNote(leave.note);
-    const conflict = dbRef.current.leaves.find(existing => {
-      if ((existing.staffName || '').trim().replace(/\s+/g, ' ') !== cleanName) return false;
-      const exStart = (existing.startDate || '').trim();
-      const exEnd = (existing.endDate || exStart).trim();
-      if (!(Boolean(exStart) && exStart <= lEnd && exEnd >= lStart)) return false;
-      if (isTrain === isTrainingLeaveType(existing.leaveType)) return true;
-      const exDays = Number(existing.days) || 1;
-      const exPeriod = parseLeavePeriodFromNote(existing.note);
-      if (
-        exStart === exEnd &&
-        lStart === lEnd &&
-        exDays === 0.5 &&
-        lDays === 0.5 &&
-        exPeriod &&
-        lPeriod &&
-        exPeriod !== lPeriod
-      ) {
-        return false;
-      }
-      return true;
-    });
+    const cleanName = normalizeStaffNameKey(leave.staffName);
+    const lStart = normalizeLeaveDateStr(leave.startDate);
+    const lEnd = normalizeLeaveDateStr(leave.endDate || leave.startDate) || lStart;
+    const normalizedLeave: LeaveRecord = {
+      ...leave,
+      staffName: cleanName,
+      startDate: lStart <= lEnd ? lStart : lEnd,
+      endDate: lStart <= lEnd ? lEnd : lStart,
+    };
+    const slotKey = getLeaveKey(normalizedLeave);
+
+    if (savingLeaveSlotsRef.current.has(slotKey)) {
+      showToast(`กำลังบันทึกข้อมูลวันลาของ ${cleanName} อยู่ กรุณารอสักครู่ (ป้องกันการบันทึกซ้ำ)`, 'info');
+      return;
+    }
+
+    const conflict = dbRef.current.leaves.find(existing =>
+      isLeaveDuplicateConflict(existing, normalizedLeave)
+    );
     if (conflict) {
       showToast(
-        `ไม่สามารถบันทึกซ้ำได้: ${cleanName} มีรายการ "${conflict.leaveType}" ในวันที่ซ้ำซ้อน (${conflict.startDate}) อยู่ในฐานข้อมูลแล้ว`,
+        `ไม่สามารถบันทึกซ้ำได้: ${cleanName} มีรายการ "${conflict.leaveType}" ในวันที่ซ้ำซ้อน (${formatThaiLeaveRange(conflict.startDate, conflict.endDate)}) อยู่ในฐานข้อมูลแล้ว`,
         'error'
       );
       return;
     }
 
-    clearLeaveTombstone(leave);
-    markLeavesRecentlySaved([leave]);
-    enqueuePendingOutboxLeaves([leave]);
-    mutationSeqRef.current += 1;
-    const baseDb = dbRef.current;
-    const nextDb = {
-      ...baseDb,
-      leaves: [leave, ...baseDb.leaves],
-    };
-    dbRef.current = nextDb;
-    setDb(nextDb);
-    showToast(`บันทึกวันลา ${leave.staffName} สำเร็จ!`, 'success');
+    savingLeaveSlotsRef.current.add(slotKey);
+    try {
+      clearLeaveTombstone(normalizedLeave);
+      markLeavesRecentlySaved([normalizedLeave]);
+      enqueuePendingOutboxLeaves([normalizedLeave]);
+      mutationSeqRef.current += 1;
+      const baseDb = dbRef.current;
+      const nextDb = {
+        ...baseDb,
+        leaves: deduplicateLeaves([normalizedLeave, ...baseDb.leaves]),
+      };
+      dbRef.current = nextDb;
+      setDb(nextDb);
+      showToast(`บันทึกวันลา ${normalizedLeave.staffName} สำเร็จ!`, 'success');
 
-    await enqueueSheetOperation(async () => {
-      await propagateServerMutation('addLeave', { leave });
-
-      const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
-      const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
-
-      if (targetGasUrl) {
-        const appendRes = await appendViaAppsScriptDetailed(targetGasUrl, 'appendLeave', leave);
-        if (appendRes.ok) markLeaveOutboxSynced([leave]);
-        const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-        if (!appendRes.ok && !syncRes.accessible) {
+      await enqueueSheetOperation(async () => {
+        const srvRes = await propagateServerMutation('addLeave', { leave: normalizedLeave });
+        if (srvRes && (srvRes as any).duplicateRejected) {
+          markLeaveOutboxSynced([normalizedLeave]);
+          removeLeaveRecentlySaved(normalizedLeave);
+          const cleanServerDb = normalizeIncomingServerDb(srvRes.db, dbRef.current);
+          dbRef.current = cleanServerDb;
+          setDb(cleanServerDb);
           showToast(
-            `บันทึกวันลาในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${appendRes.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets'}`,
+            `ไม่สามารถบันทึกซ้ำได้: ${cleanName} มีประวัติการลาในวันที่ซ้ำซ้อนอยู่แล้ว (ซิงค์ข้อมูลล่าสุดให้ตรงกันแล้ว)`,
             'error'
           );
+          return;
         }
-      } else if (targetSheetId) {
-        const token = await getAccessToken();
-        if (token) {
-          const ok = await appendLeaveToSheet(token, targetSheetId, leave);
-          if (ok) markLeaveOutboxSynced([leave]);
-          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-        } else {
-          await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-          showToast('บันทึกวันลาไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
+
+        const targetGasUrl = (dbRef.current.settings.gasUrl || '').trim();
+        const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
+
+        if (targetGasUrl) {
+          const appendRes = await appendViaAppsScriptDetailed(targetGasUrl, 'appendLeave', normalizedLeave);
+          if (appendRes.ok) markLeaveOutboxSynced([normalizedLeave]);
+          const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          if (!appendRes.ok && !syncRes.accessible) {
+            showToast(
+              `บันทึกวันลาในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${appendRes.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets'}`,
+              'error'
+            );
+          }
+        } else if (targetSheetId) {
+          const token = await getAccessToken();
+          if (token) {
+            const ok = await appendLeaveToSheet(token, targetSheetId, normalizedLeave);
+            if (ok) markLeaveOutboxSynced([normalizedLeave]);
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+          } else {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            showToast('บันทึกวันลาไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
+          }
         }
-      }
-    });
+      });
+    } finally {
+      savingLeaveSlotsRef.current.delete(slotKey);
+    }
   };
 
   // Handler: Update Leave (Admin, mandatory reason + timestamp)
@@ -2547,12 +2577,28 @@ export default function App() {
     const editedBy = adminOwnerName || 'ผู้ดูแลระบบ';
     const prevItem = baseDb.leaves.find(l => l.id === updated.id);
 
+    const normStart = normalizeLeaveDateStr(updated.startDate);
+    const normEnd = normalizeLeaveDateStr(updated.endDate || updated.startDate) || normStart;
     const stamped: LeaveRecord = {
       ...updated,
+      staffName: normalizeStaffNameKey(updated.staffName),
+      startDate: normStart <= normEnd ? normStart : normEnd,
+      endDate: normStart <= normEnd ? normEnd : normStart,
       lastEditedAt: nowIso,
       lastEditReason: cleanReason,
       lastEditedBy: editedBy,
     };
+
+    const updateConflict = baseDb.leaves.find((l) =>
+      isLeaveDuplicateConflict(l, stamped, stamped.id)
+    );
+    if (updateConflict) {
+      showToast(
+        `ไม่สามารถบันทึกแก้ไขได้: ${stamped.staffName} มีประวัติ "${updateConflict.leaveType}" ในวันที่ซ้ำซ้อน (${formatThaiLeaveRange(updateConflict.startDate, updateConflict.endDate)}) อยู่ในระบบแล้ว`,
+        'error'
+      );
+      return;
+    }
 
     const prevDesc = prevItem
       ? `${prevItem.leaveType} ${prevItem.days} วัน (${formatThaiLeaveRange(prevItem.startDate, prevItem.endDate)})`
@@ -2596,7 +2642,7 @@ export default function App() {
     const dirtyVer = markLeavesDirty();
     const nextDb = {
       ...baseDb,
-      leaves: nextLeaves,
+      leaves: deduplicateLeaves(nextLeaves),
       auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
     };
     dbRef.current = nextDb;

@@ -1279,3 +1279,140 @@ export function normalizeWorkloadShiftStr(raw?: string | null): string {
   return String(raw || '').trim().replace(/\s+/g, ' ');
 }
 
+export function normalizeStaffNameKey(name?: string | null): string {
+  return String(name || '').trim().replace(/\s+/g, ' ');
+}
+
+export function normalizeLeaveDateStr(raw?: string | null): string {
+  return normalizeWorkloadDateStr(raw);
+}
+
+function normalizeLeaveRange(
+  startRaw?: string | null,
+  endRaw?: string | null
+): { start: string; end: string } {
+  const s = normalizeLeaveDateStr(startRaw);
+  const e = normalizeLeaveDateStr(endRaw || startRaw) || s;
+  if (!s) return { start: '', end: '' };
+  return s <= e ? { start: s, end: e } : { start: e, end: s };
+}
+
+export function isLeaveDuplicateConflict(
+  existing: Pick<LeaveRecord, 'id' | 'staffName' | 'leaveType' | 'startDate' | 'endDate' | 'days' | 'note'>,
+  candidate: Pick<LeaveRecord, 'staffName' | 'leaveType' | 'startDate' | 'endDate' | 'days' | 'note'>,
+  excludeId?: string
+): boolean {
+  if (excludeId && existing.id === excludeId) return false;
+  const exName = normalizeStaffNameKey(existing.staffName);
+  const caName = normalizeStaffNameKey(candidate.staffName);
+  if (!exName || !caName || exName !== caName) return false;
+
+  const exRange = normalizeLeaveRange(existing.startDate, existing.endDate);
+  const caRange = normalizeLeaveRange(candidate.startDate, candidate.endDate);
+  if (!exRange.start || !caRange.start) return false;
+  if (!(exRange.start <= caRange.end && exRange.end >= caRange.start)) return false;
+
+  const exIsTrain = isTrainingLeaveType(existing.leaveType);
+  const caIsTrain = isTrainingLeaveType(candidate.leaveType);
+  // Same category (two regular leaves or two trainings) for the same person on overlapping dates is always duplicate/conflict
+  if (exIsTrain === caIsTrain) return true;
+
+  // Regular leave vs Training on overlapping dates: only allow if BOTH are single-day 0.5 with distinct explicit periods (เช้า vs บ่าย)
+  const exDays = Number(existing.days) || 1;
+  const caDays = Number(candidate.days) || 1;
+  const exPeriod = parseLeavePeriodFromNote(existing.note);
+  const caPeriod = parseLeavePeriodFromNote(candidate.note);
+  if (
+    exRange.start === exRange.end &&
+    caRange.start === caRange.end &&
+    exDays === 0.5 &&
+    caDays === 0.5 &&
+    exPeriod &&
+    caPeriod &&
+    exPeriod !== caPeriod
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function scoreLeaveRecordQuality(l: Partial<LeaveRecord>): number {
+  let score = 0;
+  if (l.lastEditedAt) score += 2000;
+  if (l.lastEditReason) score += 200;
+  const cleanNote = stripLeavePeriodFromNote(l.note);
+  if (cleanNote) {
+    const isAutoNote =
+      /^บันทึกอัตโนมัติจากห้องตรวจ/.test(cleanNote) ||
+      /^ไปอบรม\/ประชุม\s*\(บันทึกจาก/.test(cleanNote);
+    score += isAutoNote ? 10 : 300;
+  }
+  const id = String(l.id || '').trim();
+  if (id && !/^(LV-AUTO-|TRN-AUTO-|LV-GS-|LV-CHK-)/.test(id)) {
+    score += 50;
+  } else if (/^(LV-AUTO-|TRN-AUTO-)/.test(id)) {
+    score += 20;
+  }
+  const days = Number(l.days) || 0;
+  score += Math.min(30, days);
+  if (String(l.clinic || '').trim()) score += 5;
+  return score;
+}
+
+export function deduplicateLeaves(items: LeaveRecord[]): LeaveRecord[] {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const seenIds = new Set<string>();
+  const keptByStaff = new Map<string, number[]>();
+  const result: LeaveRecord[] = [];
+
+  for (const rawItem of items) {
+    if (!rawItem) continue;
+    const staffName = normalizeStaffNameKey(rawItem.staffName);
+    const { start, end } = normalizeLeaveRange(rawItem.startDate, rawItem.endDate);
+    if (!staffName || !start) continue;
+
+    const item: LeaveRecord = {
+      ...rawItem,
+      staffName,
+      startDate: start,
+      endDate: end,
+      position: normalizeStaffPosition(rawItem.position),
+      clinic: String(rawItem.clinic || '').trim(),
+      leaveType: String(rawItem.leaveType || 'ลาป่วย').trim() as LeaveType,
+      days: Number(rawItem.days) > 0 ? Number(rawItem.days) : 1,
+      note: String(rawItem.note || '').trim(),
+    };
+
+    const cleanId = String(item.id || '').trim();
+    if (cleanId && seenIds.has(cleanId)) continue;
+
+    const indices = keptByStaff.get(staffName) || [];
+    const conflictIdx = indices.find((idx) => isLeaveDuplicateConflict(result[idx], item));
+
+    if (conflictIdx !== undefined) {
+      const existing = result[conflictIdx];
+      const itemScore = scoreLeaveRecordQuality(item);
+      const exScore = scoreLeaveRecordQuality(existing);
+      const itemEdited = String(item.lastEditedAt || '');
+      const exEdited = String(existing.lastEditedAt || '');
+      const shouldReplace =
+        itemScore > exScore ||
+        (itemScore === exScore && itemEdited > exEdited);
+      if (shouldReplace) {
+        result[conflictIdx] = item;
+      }
+      if (cleanId) seenIds.add(cleanId);
+      continue;
+    }
+
+    if (cleanId) seenIds.add(cleanId);
+    const newIdx = result.length;
+    result.push(item);
+    indices.push(newIdx);
+    keptByStaff.set(staffName, indices);
+  }
+
+  return result;
+}
+
+

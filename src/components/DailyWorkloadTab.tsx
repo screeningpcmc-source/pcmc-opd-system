@@ -49,6 +49,10 @@ import {
   formatOffDutyStaffSummaryText,
   normalizeWorkloadDateStr,
   normalizeWorkloadShiftStr,
+  deduplicateLeaves,
+  isLeaveDuplicateConflict,
+  normalizeLeaveDateStr,
+  normalizeStaffNameKey,
 } from '../types';
 import {
   formatThaiShortDate,
@@ -240,6 +244,8 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [referralInputs, setReferralInputs] = useState<ReferralCenterData>(() =>
     createEmptyReferralData()
   );
+
+  const uniqueLeaves = useMemo(() => deduplicateLeaves(leaves), [leaves]);
 
   const regularLeaveOptions = useMemo(() => {
     const filtered = leaveTypes.filter(lt => !isTrainingLeaveType(lt));
@@ -705,15 +711,17 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
 
     const needsStrictValidation = !isOutTime && !(isPremiumClinic && existingPremiumPool);
 
+    const normWorkloadDate = normalizeLeaveDateStr(date) || date;
+
     if (needsStrictValidation) {
-      // Saved leaves & training overlapping date for this department
-      leaves.forEach(l => {
-        const name = (l.staffName || '').trim();
+      // Saved leaves & training overlapping date for this department (deduplicated)
+      uniqueLeaves.forEach(l => {
+        const name = normalizeStaffNameKey(l.staffName);
         if (!name) return;
         const resolvedPos = staffPosMap.get(name) || normalizePos(l.position);
-        const sDate = (l.startDate || '').trim();
-        const eDate = (l.endDate || l.startDate || '').trim();
-        if (!sDate || date < sDate || date > eDate) return;
+        const sDate = normalizeLeaveDateStr(l.startDate);
+        const eDate = normalizeLeaveDateStr(l.endDate || l.startDate) || sDate;
+        if (!sDate || normWorkloadDate < sDate || normWorkloadDate > eDate) return;
         const unit = normalizeUnit(l.clinic || staffUnitMap.get(name) || '');
         if (unit !== targetUnit) return;
 
@@ -775,14 +783,29 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             nonDeptSelections.push(`${st.name} (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
             return;
           }
-          const existingSavedAmt = savedLeaveAmtByName.get(st.name) || 0;
-          const existingDescs = savedLeaveDetailsByName.get(st.name) || [];
+          const cleanStName = normalizeStaffNameKey(st.name);
           const itemPeriod: HalfDayPeriod =
             item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '';
+          const globalConflict = uniqueLeaves.find(l =>
+            isLeaveDuplicateConflict(l, {
+              staffName: cleanStName,
+              leaveType: item.leaveType,
+              startDate: normWorkloadDate,
+              endDate: normWorkloadDate,
+              days: item.days,
+              note: item.days === 0.5 ? itemPeriod : '',
+            })
+          );
+          const existingSavedAmt = savedLeaveAmtByName.get(cleanStName) || 0;
+          const existingDescs = savedLeaveDetailsByName.get(cleanStName) || [];
 
-          if (existingSavedAmt > 0 || existingDescs.length > 0) {
+          if (globalConflict || existingSavedAmt > 0 || existingDescs.length > 0) {
+            const conflictDesc =
+              existingDescs.length > 0
+                ? existingDescs.join(', ')
+                : `${globalConflict?.leaveType || 'การลา'} (${globalConflict?.days || 1} วัน)`;
             conflictErrors.push(
-              `${st.name} มีประวัติการลา (${existingDescs.join(', ')}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกวันลาซ้ำในวันเดียวกันได้`
+              `${st.name} มีประวัติการลา (${conflictDesc}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกวันลาซ้ำในวันเดียวกันได้`
             );
             return;
           }
@@ -810,16 +833,31 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             nonDeptSelections.push(`${st.name} ไปอบรม/ประชุม (สังกัด ${st.homeClinic} ไม่ใช่แผนก ${clinic})`);
             return;
           }
-          const existingSavedTrAmt = savedTrainingAmtByName.get(st.name) || 0;
-          const existingTrDescs = savedTrainingDetailsByName.get(st.name) || [];
-          if (existingSavedTrAmt > 0 || existingTrDescs.length > 0) {
+          const cleanTrName = normalizeStaffNameKey(st.name);
+          const itemPeriodTr: HalfDayPeriod =
+            item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '';
+          const globalTrConflict = uniqueLeaves.find(l =>
+            isTrainingLeaveType(l.leaveType) &&
+            isLeaveDuplicateConflict(l, {
+              staffName: cleanTrName,
+              leaveType: 'ไปอบรม/ประชุม',
+              startDate: normWorkloadDate,
+              endDate: normWorkloadDate,
+              days: item.days,
+              note: item.days === 0.5 ? itemPeriodTr : '',
+            })
+          );
+          const existingSavedTrAmt = savedTrainingAmtByName.get(cleanTrName) || 0;
+          const existingTrDescs = savedTrainingDetailsByName.get(cleanTrName) || [];
+          if (globalTrConflict || existingSavedTrAmt > 0 || existingTrDescs.length > 0) {
+            const trDesc = existingTrDescs.length > 0 ? existingTrDescs.join(', ') : 'ไปอบรม/ประชุม';
             conflictErrors.push(
-              `${st.name} มีประวัติ (${existingTrDescs.join(', ')}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกซ้ำในวันเดียวกันได้`
+              `${st.name} มีประวัติ (${trDesc}) ในวันที่ ${formatThaiShortDate(date)} อยู่ในฐานข้อมูลแล้ว ไม่สามารถบันทึกซ้ำในวันเดียวกันได้`
             );
             return;
           }
           const leaveSum = absents
-            .filter(a => a.name === st.name && a.kind === 'leave')
+            .filter(a => normalizeStaffNameKey(a.name) === cleanTrName && a.kind === 'leave')
             .reduce((s, a) => s + a.amount, 0);
           if (leaveSum + item.days > 1.001) {
             conflictErrors.push(
@@ -1151,7 +1189,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     isPremiumClinic,
     existingPremiumPool,
     staffList,
-    leaves,
+    uniqueLeaves,
     otRecords,
     hn,
     rn,
@@ -2532,11 +2570,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       })
                       .map(s => {
                         const checked = selectedLeaveItems.some(it => it.staffId === s.staffId);
-                        const existingSavedLeaves = leaves.filter(l => {
+                        const normPickerDate = normalizeLeaveDateStr(date) || date;
+                        const normStaffName = normalizeStaffNameKey(s.name);
+                        const existingSavedLeaves = uniqueLeaves.filter(l => {
                           if (isTrainingLeaveType(l.leaveType)) return false;
-                          const sDate = (l.startDate || '').trim();
-                          const eDate = (l.endDate || l.startDate || '').trim();
-                          return l.staffName === s.name && sDate && date >= sDate && date <= eDate;
+                          const sDate = normalizeLeaveDateStr(l.startDate);
+                          const eDate = normalizeLeaveDateStr(l.endDate || l.startDate) || sDate;
+                          return normalizeStaffNameKey(l.staffName) === normStaffName && Boolean(sDate) && normPickerDate >= sDate && normPickerDate <= eDate;
                         });
                         const isBlockedAlready = existingSavedLeaves.length > 0;
                         const existingTypeLabel = existingSavedLeaves[0]?.leaveType || '';
@@ -2825,11 +2865,13 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                       })
                       .map(s => {
                         const checked = selectedTrainingItems.some(it => it.staffId === s.staffId);
-                        const existingSavedTrainings = leaves.filter(l => {
+                        const normPickerDate = normalizeLeaveDateStr(date) || date;
+                        const normStaffName = normalizeStaffNameKey(s.name);
+                        const existingSavedTrainings = uniqueLeaves.filter(l => {
                           if (!isTrainingLeaveType(l.leaveType)) return false;
-                          const sDate = (l.startDate || '').trim();
-                          const eDate = (l.endDate || l.startDate || '').trim();
-                          return l.staffName === s.name && sDate && date >= sDate && date <= eDate;
+                          const sDate = normalizeLeaveDateStr(l.startDate);
+                          const eDate = normalizeLeaveDateStr(l.endDate || l.startDate) || sDate;
+                          return normalizeStaffNameKey(l.staffName) === normStaffName && Boolean(sDate) && normPickerDate >= sDate && normPickerDate <= eDate;
                         });
                         const isBlockedAlready = existingSavedTrainings.length > 0;
                         return (

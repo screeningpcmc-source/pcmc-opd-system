@@ -36,6 +36,7 @@ import {
   getWorkloadOffDutyReason,
   getWorkloadOffDutyStaff,
   formatOffDutyStaffSummaryText,
+  deduplicateLeaves,
 } from '../types';
 import { ThaiMonthInput } from './ThaiDateInput';
 import { THAI_MONTHS, formatThaiShortDate, getLocalCurrentMonthIso } from '../utils/thaiDate';
@@ -112,6 +113,8 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
   const [isExportingEyeJpeg, setIsExportingEyeJpeg] = useState<boolean>(false);
   const reportSheetRef = useRef<HTMLDivElement | null>(null);
   const eyeReportSheetRef = useRef<HTMLDivElement | null>(null);
+
+  const uniqueLeaves = useMemo(() => deduplicateLeaves(leaves), [leaves]);
 
   // Combine unique clinics list (exclude group names so "★ ศูนย์ปัญญาภิรมย์" renders once at top)
   const allClinicsList = useMemo(() => {
@@ -517,7 +520,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
       // 1. Leaves & Training/Meetings
       if (includesInTime) {
         const seenLeaveKeys = new Set<string>();
-        leaves.forEach((l) => {
+        uniqueLeaves.forEach((l) => {
           const start = (l.startDate || '').trim();
           const end = (l.endDate || l.startDate || '').trim();
           if (!start || dateStr < start || dateStr > end) return;
@@ -639,7 +642,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [
     filteredWorkloads,
-    leaves,
+    uniqueLeaves,
     otRecords,
     selectedShift,
     selectedClinic,
@@ -979,7 +982,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
         { name: string; label: string; kind: 'leave' | 'training' | 'outgoing' | 'off_duty'; amount: number }
       >();
 
-      leaves.forEach((l) => {
+      uniqueLeaves.forEach((l) => {
         const effPos = staffPositionByName.get((l.staffName || '').trim()) || l.position;
         const start = (l.startDate || '').trim();
         const end = (l.endDate || l.startDate || '').trim();
@@ -1141,7 +1144,7 @@ export const ProductivityTab: React.FC<ProductivityTabProps> = ({
     filteredWorkloads,
     selectedShift,
     staffList,
-    leaves,
+    uniqueLeaves,
     otRecords,
     staffClinicByName,
     staffPositionByName,

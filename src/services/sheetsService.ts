@@ -48,6 +48,12 @@ import {
   DEFAULT_BOOBY_OWNER_NAME,
   normalizeWorkloadDateStr,
   normalizeWorkloadShiftStr,
+  deduplicateLeaves,
+  isLeaveDuplicateConflict,
+  isTrainingLeaveType,
+  normalizeLeaveDateStr,
+  normalizeStaffNameKey,
+  parseLeavePeriodFromNote,
 } from '../types';
 import {
   INITIAL_STAFF_LIST,
@@ -1044,7 +1050,7 @@ export const loadLocalDatabase = (): AppDatabase => {
       const cleanDb: AppDatabase = {
         staff: hydratedLocal.staff,
         workloads: deduplicateWorkloads(migratedWorkloads, mergedPremiumClinics),
-        leaves: migratedLeaves,
+        leaves: deduplicateLeaves(migratedLeaves),
         ot: hydratedLocal.ot,
         auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : [],
         settings: mergedSettings,
@@ -1274,7 +1280,7 @@ export const normalizeIncomingServerDb = (
   return {
     staff: hydrated.staff,
     workloads: deduplicateWorkloads(migratedWorkloads, mergedPremiumClinics),
-    leaves: migratedLeaves,
+    leaves: deduplicateLeaves(migratedLeaves),
     ot: hydrated.ot,
     auditLogs: Array.isArray(src.auditLogs) ? src.auditLogs : fallbackDb.auditLogs || [],
     settings: mergedSettings,
@@ -1691,14 +1697,17 @@ function workloadKey(w: DailyWorkload): string {
 }
 
 export function getLeaveKey(l: LeaveRecord): string {
+  const sDate = normalizeLeaveDateStr(l.startDate);
+  const eDate = normalizeLeaveDateStr(l.endDate || l.startDate) || sDate;
+  const isTrain = isTrainingLeaveType(l.leaveType);
+  const daysNum = Number(l.days || 1);
+  const period = daysNum === 0.5 ? parseLeavePeriodFromNote(l.note) : '';
   return [
-    (l.startDate || '').trim(),
-    (l.endDate || l.startDate || '').trim(),
-    (l.staffName || '').trim(),
-    (l.clinic || '').trim(),
-    (l.leaveType || '').trim(),
-    Number(l.days || 1),
-    (l.note || '').trim(),
+    sDate,
+    eDate,
+    normalizeStaffNameKey(l.staffName),
+    isTrain ? 'TRAIN' : 'LEAVE',
+    ...(period ? [period] : []),
   ].join('|');
 }
 
@@ -1914,16 +1923,18 @@ export const syncAllWithGoogleSheet = async (
   ).sort((a, b) => b.date.localeCompare(a.date));
 
   // 3. Parse Leave_Records from sheet & merge cleanly (Sheet + Pending Outbox)
-  const sheetLeaves: LeaveRecord[] = leaveRawRows
+  const rawSheetLeaves: LeaveRecord[] = leaveRawRows
     .slice(1)
     .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
     .map((r, idx) => {
       const rawPos = (r[3] || 'RN').trim();
+      const sDate = normalizeLeaveDateStr(String(r[0] || '').trim());
+      const eDate = normalizeLeaveDateStr(String(r[1] || r[0] || '').trim()) || sDate;
       return {
         id: `LV-GS-${Date.now()}-${idx}`,
-        startDate: String(r[0] || '').trim(),
-        endDate: String(r[1] || r[0] || '').trim(),
-        staffName: String(r[2] || '').trim(),
+        startDate: sDate,
+        endDate: eDate,
+        staffName: normalizeStaffNameKey(String(r[2] || '').trim()),
         position: normalizeStaffPosition(rawPos),
         clinic: String(r[4] || '').trim(),
         leaveType: (String(r[5] || 'ลาป่วย').trim()) as LeaveType,
@@ -1931,13 +1942,17 @@ export const syncAllWithGoogleSheet = async (
         note: String(r[7] || '').trim(),
       };
     });
+  const sheetLeaves = deduplicateLeaves(rawSheetLeaves);
+  const hasRemoteLeaveDuplicates = rawSheetLeaves.length > sheetLeaves.length;
 
-  const shouldOverwriteLeaves = isLeavesDirty();
+  const shouldOverwriteLeaves = isLeavesDirty() || hasRemoteLeaveDuplicates;
   const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
   pruneOutboxSyncedAgainstRemote({ remoteLKeys: sheetLKeys });
-  const leavesToPush = shouldOverwriteLeaves
+  const leavesToPush = isLeavesDirty()
     ? []
-    : getPendingOutboxLeaves().filter((l) => !sheetLKeys.has(leaveKey(l)));
+    : getPendingOutboxLeaves().filter(
+        (l) => !sheetLKeys.has(leaveKey(l)) && !sheetLeaves.some((sl) => isLeaveDuplicateConflict(sl, l))
+      );
 
   const existingLeaveQueue = new Map<string, LeaveRecord[]>();
   db.leaves.forEach((l) => {
@@ -1947,8 +1962,8 @@ export const syncAllWithGoogleSheet = async (
     else existingLeaveQueue.set(k, [l]);
   });
 
-  const mergedLeaves = (
-    shouldOverwriteLeaves
+  const mergedLeaves = deduplicateLeaves(
+    isLeavesDirty()
       ? db.leaves
       : [
           ...leavesToPush,
@@ -3234,7 +3249,9 @@ function mergeRemoteDataRows(
   const deletedLKeys = getDeletedLeaveKeySet();
   let mergedLeaves: LeaveRecord[];
   if (isLeavesDirty() || params.leaveRows === null) {
-    mergedLeaves = [...db.leaves];
+    mergedLeaves = deduplicateLeaves([...db.leaves]).sort((a, b) =>
+      b.startDate.localeCompare(a.startDate)
+    );
   } else {
     const existingLeaveQueue = new Map<string, LeaveRecord[]>();
     db.leaves.forEach((l) => {
@@ -3244,15 +3261,17 @@ function mergeRemoteDataRows(
       else existingLeaveQueue.set(k, [l]);
     });
 
-    const sheetLeaves: LeaveRecord[] = params.leaveRows
+    const rawSheetLeaves: LeaveRecord[] = params.leaveRows
       .filter((r) => (r[0] || '').trim() && (r[2] || '').trim())
       .map((r, idx) => {
         const rawPos = (r[3] || 'RN').trim();
+        const sDate = normalizeLeaveDateStr(String(r[0] || '').trim());
+        const eDate = normalizeLeaveDateStr(String(r[1] || r[0] || '').trim()) || sDate;
         const item: LeaveRecord = {
           id: `LV-GS-${Date.now()}-${idx}`,
-          startDate: String(r[0] || '').trim(),
-          endDate: String(r[1] || r[0] || '').trim(),
-          staffName: String(r[2] || '').trim(),
+          startDate: sDate,
+          endDate: eDate,
+          staffName: normalizeStaffNameKey(String(r[2] || '').trim()),
           position: normalizeStaffPosition(rawPos),
           clinic: String(r[4] || '').trim(),
           leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
@@ -3272,6 +3291,7 @@ function mergeRemoteDataRows(
       })
       .filter((l) => !deletedLKeys.has(leaveKey(l)));
 
+    const sheetLeaves = deduplicateLeaves(rawSheetLeaves);
     const sheetLKeys = new Set(sheetLeaves.map(leaveKey));
     pruneOutboxSyncedAgainstRemote({ remoteLKeys: sheetLKeys });
 
@@ -3286,13 +3306,18 @@ function mergeRemoteDataRows(
       ...recentSavedLeaves.map((x) => x.item),
     ].forEach((l) => {
       const k = leaveKey(l);
-      if (!deletedLKeys.has(k) && !sheetLKeys.has(k) && !seenPendingL.has(l.id || k)) {
+      if (
+        !deletedLKeys.has(k) &&
+        !sheetLKeys.has(k) &&
+        !sheetLeaves.some((sl) => isLeaveDuplicateConflict(sl, l)) &&
+        !seenPendingL.has(l.id || k)
+      ) {
         seenPendingL.add(l.id || k);
         outboxAndJustPushedL.push(l);
       }
     });
 
-    mergedLeaves = [...outboxAndJustPushedL, ...sheetLeaves].sort((a, b) =>
+    mergedLeaves = deduplicateLeaves([...outboxAndJustPushedL, ...sheetLeaves]).sort((a, b) =>
       b.startDate.localeCompare(a.startDate)
     );
   }
@@ -3821,6 +3846,7 @@ export const syncPublicViaAppsScript = async (
   mergedDb: AppDatabase;
   pushedCount: number;
   needsStaffIdUpgrade?: boolean;
+  needsLeaveDedupWriteback?: boolean;
   httpStatus?: number;
   error?: string;
 }> => {
@@ -3849,9 +3875,11 @@ export const syncPublicViaAppsScript = async (
       db.settings.premiumSubClinics
     ).filter((w: DailyWorkload) => !deletedWKeys.has(workloadKey(w)));
 
-    const remoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
+    const rawRemoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
       (l: LeaveRecord) => !deletedLKeys.has(leaveKey(l))
     );
+    const remoteLeaves = deduplicateLeaves(rawRemoteLeaves);
+    const needsLeaveDedupWriteback = rawRemoteLeaves.length > remoteLeaves.length;
 
     const remoteOt = parseRemoteOtOnly(data.otRows).filter(
       (o: OTAttendance) => !deletedOKeys.has(otKey(o))
@@ -3876,7 +3904,10 @@ export const syncPublicViaAppsScript = async (
       : [];
     const leavesToPush = !isLeavesDirty()
       ? getPendingOutboxLeaves().filter(
-          (l) => !deletedLKeys.has(leaveKey(l)) && !remoteLKeys.has(leaveKey(l))
+          (l) =>
+            !deletedLKeys.has(leaveKey(l)) &&
+            !remoteLKeys.has(leaveKey(l)) &&
+            !remoteLeaves.some((rl) => isLeaveDuplicateConflict(rl, l))
         )
       : [];
     const otToPush = !isOtDirty()
@@ -3946,6 +3977,7 @@ export const syncPublicViaAppsScript = async (
       accessible: true,
       pushedCount,
       needsStaffIdUpgrade,
+      needsLeaveDedupWriteback,
       httpStatus: gasRes.httpStatus,
       mergedDb: {
         ...mergedDb,
@@ -4019,11 +4051,13 @@ function parseRemoteLeavesOnly(leaveRows: unknown): LeaveRecord[] {
     .filter((r: string[]) => (r[0] || '').trim() && (r[2] || '').trim())
     .map((r: string[], idx: number) => {
       const rawPos = (r[3] || 'RN').trim();
+      const sDate = normalizeLeaveDateStr(String(r[0] || '').trim());
+      const eDate = normalizeLeaveDateStr(String(r[1] || r[0] || '').trim()) || sDate;
       return {
         id: `LV-CHK-${idx}`,
-        startDate: String(r[0] || '').trim(),
-        endDate: String(r[1] || r[0] || '').trim(),
-        staffName: String(r[2] || '').trim(),
+        startDate: sDate,
+        endDate: eDate,
+        staffName: normalizeStaffNameKey(String(r[2] || '').trim()),
         position: normalizeStaffPosition(rawPos),
         clinic: String(r[4] || '').trim(),
         leaveType: String(r[5] || 'ลาป่วย').trim() as LeaveType,
@@ -5379,7 +5413,7 @@ export const syncAdminViaAppsScript = async (
     staff: dirtyVersions.staff > 0 || Boolean(pubRes.needsStaffIdUpgrade),
     settings: dirtyVersions.settings > 0,
     workloads: dirtyVersions.workloads > 0,
-    leaves: dirtyVersions.leaves > 0,
+    leaves: dirtyVersions.leaves > 0 || Boolean(pubRes.needsLeaveDedupWriteback),
     ot: dirtyVersions.ot > 0,
   };
   const pendingAudits = getPendingOutboxAuditLogs();
@@ -6181,9 +6215,10 @@ export const exportAllToGoogleSheetViaAppsScript = async (params: {
     data.workloadRows,
     db.settings.premiumSubClinics
   ).filter((w) => !deletedWKeys.has(workloadKey(w)));
-  const remoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
+  const rawRemoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
     (l) => !deletedLKeys.has(leaveKey(l))
   );
+  const remoteLeaves = deduplicateLeaves(rawRemoteLeaves);
   const remoteOt = parseRemoteOtOnly(data.otRows).filter(
     (o) => !deletedOKeys.has(otKey(o))
   );
@@ -6200,7 +6235,10 @@ export const exportAllToGoogleSheetViaAppsScript = async (params: {
       !remoteWSlots.has(getWorkloadSlotKey(w))
   );
   const missingLeaves = db.leaves.filter(
-    (l) => !deletedLKeys.has(leaveKey(l)) && !remoteLKeys.has(leaveKey(l))
+    (l) =>
+      !deletedLKeys.has(leaveKey(l)) &&
+      !remoteLKeys.has(leaveKey(l)) &&
+      !remoteLeaves.some((rl) => isLeaveDuplicateConflict(rl, l))
   );
   const missingOt = db.ot.filter(
     (o) => !deletedOKeys.has(otKey(o)) && !remoteOKeys.has(otKey(o))
@@ -6211,7 +6249,9 @@ export const exportAllToGoogleSheetViaAppsScript = async (params: {
     const unionWorkloads = isWorkloadsDirty()
       ? db.workloads
       : deduplicateWorkloads([...missingWorkloads, ...remoteWorkloads], db.settings.premiumSubClinics);
-    const unionLeaves = isLeavesDirty() ? db.leaves : [...missingLeaves, ...remoteLeaves];
+    const unionLeaves = isLeavesDirty()
+      ? deduplicateLeaves(db.leaves)
+      : deduplicateLeaves([...missingLeaves, ...remoteLeaves]);
     const unionOt = isOtDirty() ? db.ot : [...missingOt, ...remoteOt];
 
     const resolvedSheetId =

@@ -38,6 +38,10 @@ import {
   compareStaffByPositionAndStartDate as _compareRoster,
   getStaffEmployeeCode,
   isOtDuplicateConflict,
+  deduplicateLeaves,
+  isLeaveDuplicateConflict,
+  normalizeLeaveDateStr,
+  normalizeStaffNameKey,
 } from '../types';
 import {
   CalendarClock,
@@ -283,6 +287,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [isLeaveDropdownOpen, setIsLeaveDropdownOpen] = useState<boolean>(false);
   const [leaveFormError, setLeaveFormError] = useState<string>('');
   const leaveDropdownRef = useRef<HTMLDivElement | null>(null);
+  const submittingLeaveRef = useRef<boolean>(false);
+  const [isSubmittingLeave, setIsSubmittingLeave] = useState<boolean>(false);
+
+  const uniqueLeaves = useMemo(() => deduplicateLeaves(leaves), [leaves]);
 
   const [leaveType, setLeaveType] = useState<LeaveType>(leaveTypes[0] || 'ลาพักผ่อน');
   const [leaveDays, setLeaveDays] = useState<number>(1);
@@ -337,40 +345,28 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     targetDays?: number,
     targetPeriod?: HalfDayPeriod
   ): LeaveRecord | null => {
-    const cleanName = (targetStaffName || '').trim().replace(/\s+/g, ' ');
-    if (!cleanName || !startIso) return null;
-    const rangeEnd = (endIso || startIso).trim();
-    const targetIsTraining = isTrainingLeaveType(targetLeaveType);
-    const effTargetDays = targetDays ?? (startIso === rangeEnd ? Number(leaveDays) || 1 : 1);
+    const cleanName = normalizeStaffNameKey(targetStaffName);
+    const normStart = normalizeLeaveDateStr(startIso) || (startIso || '').trim();
+    const normEnd = normalizeLeaveDateStr(endIso || normStart) || normStart;
+    if (!cleanName || !normStart) return null;
+    const effTargetDays = targetDays ?? (normStart === normEnd ? Number(leaveDays) || 1 : 1);
     const effTargetPeriod = targetPeriod ?? (effTargetDays === 0.5 ? leaveHalfPeriod : '');
+    const candidateNote = effTargetDays === 0.5 && effTargetPeriod ? effTargetPeriod : '';
     return (
-      leaves.find((lv) => {
-        if (excludeId && lv.id === excludeId) return false;
-        if ((lv.staffName || '').trim().replace(/\s+/g, ' ') !== cleanName) return false;
-        const lvStart = (lv.startDate || '').trim();
-        const lvEnd = (lv.endDate || lvStart).trim();
-        if (!lvStart) return false;
-        if (!(startIso <= lvEnd && rangeEnd >= lvStart)) return false;
-
-        const lvIsTraining = isTrainingLeaveType(lv.leaveType);
-        if (lvIsTraining === targetIsTraining) return true;
-
-        // Leave vs Training on overlapping date: only allow if BOTH are 0.5 single-day with distinct periods
-        const lvDays = Number(lv.days) || 1;
-        const lvPeriod = parseLeavePeriodFromNote(lv.note);
-        if (
-          lvStart === lvEnd &&
-          startIso === rangeEnd &&
-          lvDays === 0.5 &&
-          effTargetDays === 0.5 &&
-          lvPeriod &&
-          effTargetPeriod &&
-          lvPeriod !== effTargetPeriod
-        ) {
-          return false;
-        }
-        return true;
-      }) || null
+      uniqueLeaves.find((lv) =>
+        isLeaveDuplicateConflict(
+          lv,
+          {
+            staffName: cleanName,
+            leaveType: targetLeaveType as LeaveType,
+            startDate: normStart,
+            endDate: normEnd,
+            days: effTargetDays,
+            note: candidateNote,
+          },
+          excludeId
+        )
+      ) || null
     );
   };
 
@@ -385,7 +381,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       Number(leaveDays) || 1,
       leaveHalfPeriod
     );
-  }, [selectedLeaveStaff, leaveType, leaveStartDate, leaveEndDate, leaveDays, leaveHalfPeriod, leaves]);
+  }, [selectedLeaveStaff, leaveType, leaveStartDate, leaveEndDate, leaveDays, leaveHalfPeriod, uniqueLeaves]);
 
   const filteredLeaveDropdownStaff = useMemo(() => {
     const q = leaveStaffQuery.toLowerCase().trim();
@@ -399,14 +395,14 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   }, [activeStaff, leaveStaffQuery]);
 
   const filteredLeaves = useMemo(() => {
-    return leaves.filter((lv) => {
+    return uniqueLeaves.filter((lv) => {
       const matchStaff =
         !leaveSearchStaff.trim() ||
         lv.staffName.toLowerCase().includes(leaveSearchStaff.toLowerCase().trim());
       const matchType = leaveFilterType === 'ALL' || lv.leaveType === leaveFilterType;
       return matchStaff && matchType;
     });
-  }, [leaves, leaveSearchStaff, leaveFilterType]);
+  }, [uniqueLeaves, leaveSearchStaff, leaveFilterType]);
 
   // Prioritize upcoming 5-7 nearest leaves by default; always keep newly saved records immediately visible
   const leaveHistoryDisplay = useMemo(() => {
@@ -588,11 +584,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const leaveCalendarStaffOptions = useMemo(() => {
     const set = new Set<string>();
     activeStaff.forEach((s) => set.add(s.name));
-    leaves.forEach((l) => {
+    uniqueLeaves.forEach((l) => {
       if (l.staffName) set.add(l.staffName);
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
-  }, [activeStaff, leaves]);
+  }, [activeStaff, uniqueLeaves]);
 
   const otCalendarStaffOptions = useMemo(() => {
     const set = new Set<string>();
@@ -631,12 +627,12 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   }, [leaveCalAnchor, customHolidays]);
 
   const filteredLeaveCalendarRecords = useMemo(() => {
-    return leaves.filter((lv) => {
+    return uniqueLeaves.filter((lv) => {
       if (leaveCalStaff !== 'ALL' && lv.staffName !== leaveCalStaff) return false;
       if (leaveCalType !== 'ALL' && lv.leaveType !== leaveCalType) return false;
       return true;
     });
-  }, [leaves, leaveCalStaff, leaveCalType]);
+  }, [uniqueLeaves, leaveCalStaff, leaveCalType]);
 
   const getLeavesOnCalendarDate = (dateIso: string): LeaveRecord[] => {
     const { y, m, d } = parseIsoParts(dateIso);
@@ -665,6 +661,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   // Handle Save Leave
   const handleSaveLeaveSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingLeaveRef.current) return;
     const scrollLeaveErr = () => {
       setTimeout(() => leaveFormErrorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 30);
     };
@@ -674,18 +671,21 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
       scrollLeaveErr();
       return;
     }
+    const normStart = normalizeLeaveDateStr(leaveStartDate) || leaveStartDate;
+    const normEnd = normalizeLeaveDateStr(leaveEndDate || normStart) || normStart;
+    const cleanStaffName = normalizeStaffNameKey(staff.name);
     const conflict = findOverlappingLeaveConflict(
-      staff.name,
+      cleanStaffName,
       leaveType,
-      leaveStartDate,
-      leaveEndDate,
+      normStart,
+      normEnd,
       undefined,
       Number(leaveDays) || 1,
       leaveHalfPeriod
     );
     if (conflict) {
       setLeaveFormError(
-        `ไม่สามารถบันทึกซ้ำได้: ${staff.name} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
+        `ไม่สามารถบันทึกซ้ำได้: ${cleanStaffName} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
       );
       scrollLeaveErr();
       return;
@@ -698,13 +698,16 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }
     setLeaveFormError('');
 
+    submittingLeaveRef.current = true;
+    setIsSubmittingLeave(true);
+
     const formattedNote = formatLeaveNoteWithPeriod(leaveNote, numericDays, leaveHalfPeriod);
 
     const newLeave: LeaveRecord = {
-      id: `LV-${Date.now()}`,
-      startDate: leaveStartDate,
-      endDate: leaveEndDate,
-      staffName: staff.name,
+      id: `LV-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      startDate: normStart,
+      endDate: normEnd,
+      staffName: cleanStaffName,
       position: staff.position,
       clinic: staff.homeClinic,
       leaveType,
@@ -714,11 +717,15 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
     onSaveLeave(newLeave);
     setRecentSavedLeaveIds((prev) => [newLeave.id, ...prev.filter((id) => id !== newLeave.id)]);
-    setLeaveCalAnchor(leaveStartDate);
+    setLeaveCalAnchor(normStart);
     setLeaveNote('');
     setLeaveHalfPeriod('');
     setLeaveStaffId('');
     setLeaveStaffQuery('');
+    setTimeout(() => {
+      submittingLeaveRef.current = false;
+      setIsSubmittingLeave(false);
+    }, 350);
   };
 
   const handleOtShiftChange = (nextShift: WorkShift) => {
@@ -997,13 +1004,16 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         const hasOtInFy = otRecords.some(
           (o) => o.staffName === s.name && o.date >= fyStart && o.date <= fyEnd
         );
-        const hasLeaveInFy = leaves.some(
-          (l) => l.staffName === s.name && l.endDate >= fyStart && l.startDate <= fyEnd
+        const hasLeaveInFy = uniqueLeaves.some(
+          (l) =>
+            normalizeStaffNameKey(l.staffName) === normalizeStaffNameKey(s.name) &&
+            l.endDate >= fyStart &&
+            l.startDate <= fyEnd
         );
         return hasOtInFy || hasLeaveInFy;
       })
       .sort(compareStaffByPositionAndStartDate);
-  }, [staffList, otRecords, leaves, selectedFiscalYear]);
+  }, [staffList, otRecords, uniqueLeaves, selectedFiscalYear]);
 
   const fiscalSummaryData = useMemo(() => {
     const targetCeEndYear = selectedFiscalYear - 543;
@@ -1041,10 +1051,11 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         const otCount = staffOts.length;
         const otClinics = Array.from(new Set(staffOts.map((o) => o.workClinic)));
 
-        const staffLeavesAll = leaves.filter((l) => {
+        const normStaff = normalizeStaffNameKey(staff.name);
+        const staffLeavesAll = uniqueLeaves.filter((l) => {
           const lStart = l.startDate || '';
           const lEnd = l.endDate || lStart;
-          return l.staffName === staff.name && lStart <= monthEnd && lEnd >= monthStart;
+          return normalizeStaffNameKey(l.staffName) === normStaff && lStart <= monthEnd && lEnd >= monthStart;
         });
         // Business rule: "ไปอบรม/ประชุม" counts as normal workday, NOT leave
         const actualLeaves = staffLeavesAll.filter((l) => !isTrainingLeaveType(l.leaveType));
@@ -1117,7 +1128,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
         grandTotal,
       };
     });
-  }, [summaryEligibleStaff, otRecords, leaves, selectedFiscalYear, fiscalMonths, customHolidays]);
+  }, [summaryEligibleStaff, otRecords, uniqueLeaves, selectedFiscalYear, fiscalMonths, customHolidays]);
 
   const filteredSummaryData = useMemo(() => {
     return fiscalSummaryData
@@ -1287,7 +1298,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     leaveTypes.forEach((lt) => {
       if (!coreTypesSet.has(lt) && !isTrainingLeaveType(lt)) extraTypes.add(lt);
     });
-    leaves.forEach((lv) => {
+    uniqueLeaves.forEach((lv) => {
       if (lv.leaveType && !coreTypesSet.has(lv.leaveType) && !isTrainingLeaveType(lv.leaveType)) {
         extraTypes.add(lv.leaveType);
       }
@@ -1305,7 +1316,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     }));
 
     return { coreCols, extraCols, allCols: [...coreCols, ...extraCols] };
-  }, [leaveTypes, leaves]);
+  }, [leaveTypes, uniqueLeaves]);
 
   const leaveReportData = useMemo(() => {
     const targetCeEndYear = selectedFiscalYear - 543;
@@ -1320,7 +1331,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     });
 
     // Exclude "ไปอบรม/ประชุม" from leave report (training counts as normal workday, NOT leave)
-    const periodLeaves = leaves.filter((lv) => {
+    const periodLeaves = uniqueLeaves.filter((lv) => {
       if (isTrainingLeaveType(lv.leaveType)) return false;
       const startYm = (lv.startDate || '').slice(0, 7);
       const endYm = (lv.endDate || lv.startDate || '').slice(0, 7);
@@ -1428,7 +1439,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     selectedFiscalYear,
     fiscalMonths,
     monthFilter,
-    leaves,
+    uniqueLeaves,
     activeStaff,
     staffList,
     clinicFilter,
@@ -2000,7 +2011,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                               s.name,
                               leaveType,
                               leaveStartDate,
-                              leaveEndDate
+                              leaveEndDate,
+                              undefined,
+                              Number(leaveDays) || 1,
+                              leaveHalfPeriod
                             );
                             return (
                               <button
@@ -2237,11 +2251,17 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <button
                 type="submit"
-                disabled={Boolean(overlappingLeaveInDb)}
+                disabled={Boolean(overlappingLeaveInDb) || isSubmittingLeave}
                 className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <FileCheck2 className="w-4 h-4" />
-                <span>{overlappingLeaveInDb ? 'มีประวัติในวันเดียวกันแล้ว (บันทึกซ้ำไม่ได้)' : 'บันทึกประวัติการลา'}</span>
+                <span>
+                  {overlappingLeaveInDb
+                    ? 'มีประวัติในวันเดียวกันแล้ว (บันทึกซ้ำไม่ได้)'
+                    : isSubmittingLeave
+                      ? 'กำลังบันทึก...'
+                      : 'บันทึกประวัติการลา'}
+                </span>
               </button>
             </form>
           </div>
@@ -2251,7 +2271,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2 shrink-0">
                 <h3 className="text-xs font-bold text-gray-900 flex items-center gap-2">
                   <CalendarDays className="w-4 h-4 text-amber-600" />
-                  <span>ประวัติการลาและไปอบรม/ประชุม ({leaves.length} รายการทั้งหมด)</span>
+                  <span>ประวัติการลาและไปอบรม/ประชุม ({uniqueLeaves.length} รายการทั้งหมด)</span>
                 </h3>
                 <span className="text-[11px] font-normal text-gray-500">บันทึกลง Leave_Records</span>
               </div>
@@ -2340,7 +2360,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               {filteredLeaves.length === 0 ? (
                 <div className="flex-1 flex items-center justify-center py-10 text-center text-gray-400 text-xs">
-                  {leaves.length === 0
+                  {uniqueLeaves.length === 0
                     ? 'ยังไม่มีประวัติการลา'
                     : 'ไม่พบรายการที่ตรงกับเงื่อนไขการค้นหา'}
                 </div>
@@ -5651,23 +5671,32 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     setEditLeaveReasonError('กรุณาระบุเหตุผลการแก้ไขรายการก่อนบันทึก');
                     return;
                   }
+                  const normStart = normalizeLeaveDateStr(editingLeave.startDate) || editingLeave.startDate;
+                  const normEnd = normalizeLeaveDateStr(editingLeave.endDate || normStart) || normStart;
+                  const normName = normalizeStaffNameKey(editingLeave.staffName);
+                  const normalizedEditing: LeaveRecord = {
+                    ...editingLeave,
+                    staffName: normName,
+                    startDate: normStart,
+                    endDate: normEnd,
+                  };
                   const conflict = findOverlappingLeaveConflict(
-                    editingLeave.staffName,
-                    editingLeave.leaveType,
-                    editingLeave.startDate,
-                    editingLeave.endDate,
-                    editingLeave.id,
-                    Number(editingLeave.days) || 1,
-                    parseLeavePeriodFromNote(editingLeave.note)
+                    normalizedEditing.staffName,
+                    normalizedEditing.leaveType,
+                    normalizedEditing.startDate,
+                    normalizedEditing.endDate,
+                    normalizedEditing.id,
+                    Number(normalizedEditing.days) || 1,
+                    parseLeavePeriodFromNote(normalizedEditing.note)
                   );
                   if (conflict) {
                     setEditLeaveDuplicateError(
-                      `ไม่สามารถบันทึกได้: ${editingLeave.staffName} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
+                      `ไม่สามารถบันทึกได้: ${normalizedEditing.staffName} มีประวัติ "${conflict.leaveType}" วันที่ ${formatThaiLeaveRange(conflict.startDate, conflict.endDate)} (${conflict.days} วัน) อยู่ในฐานข้อมูลแล้ว`
                     );
                     return;
                   }
                   setEditLeaveDuplicateError('');
-                  onUpdateLeave(editingLeave, editLeaveReason.trim());
+                  onUpdateLeave(normalizedEditing, editLeaveReason.trim());
                   setEditingLeave(null);
                   setEditLeaveReason('');
                 }}
