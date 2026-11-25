@@ -1395,6 +1395,306 @@ async function createAppServer(): Promise<void> {
     }
   });
 
+  const validateAllowedGasUrlServer = (
+    rawUrl: string
+  ): { ok: true; url: URL } | { ok: false; errorCode: string; error: string } => {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed) {
+      return { ok: false, errorCode: 'MISSING_URL', error: 'กรุณาระบุ Apps Script Web App URL' };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return { ok: false, errorCode: 'INVALID_URL', error: 'รูปแบบ Web App URL ไม่ถูกต้อง' };
+    }
+    if (parsed.protocol !== 'https:') {
+      return { ok: false, errorCode: 'INVALID_PROTOCOL', error: 'Web App URL ต้องขึ้นต้นด้วย https:// เท่านั้น' };
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'script.google.com' && host !== 'script.googleusercontent.com') {
+      return {
+        ok: false,
+        errorCode: 'DISALLOWED_HOST',
+        error: 'อนุญาตเฉพาะโดเมน script.google.com หรือ script.googleusercontent.com เท่านั้น',
+      };
+    }
+    if (host === 'script.google.com' && !parsed.pathname.startsWith('/macros/')) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_PATH',
+        error: 'Web App URL ต้องเป็นลิงก์ /macros/s/.../exec จาก Google Apps Script',
+      };
+    }
+    if (/\/dev\/?$/i.test(parsed.pathname)) {
+      return {
+        ok: false,
+        errorCode: 'DEV_URL',
+        error: 'URL ลงท้ายด้วย /dev ไม่สามารถใช้งานภายนอกได้ กรุณา Deploy เป็น Web App แล้วคัดลอกลิงก์ที่ลงท้ายด้วย /exec',
+      };
+    }
+    return { ok: true, url: parsed };
+  };
+
+  const formatGvizCellServer = (cell: any): string => {
+    if (!cell || cell.v === null || cell.v === undefined) return '';
+    if (typeof cell.v === 'string') {
+      const dateMatch = cell.v.match(/^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)/);
+      if (dateMatch) {
+        const y = Number(dateMatch[1]);
+        const m = Number(dateMatch[2]) + 1;
+        const d = Number(dateMatch[3]);
+        if (dateMatch[4] !== undefined && y < 1900) {
+          return String(cell.f || cell.v);
+        }
+        return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      }
+      return cell.v;
+    }
+    if (typeof cell.f === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cell.f.trim())) {
+      return cell.f.trim();
+    }
+    return String(cell.v);
+  };
+
+  app.post('/api/sheets/gas-proxy', async (req: Request, res: Response) => {
+    try {
+      const bodyObj = (req.body || {}) as {
+        gasUrl?: string;
+        method?: 'GET' | 'POST';
+        action?: string;
+        body?: unknown;
+      };
+      const check = validateAllowedGasUrlServer(String(bodyObj.gasUrl || ''));
+      if (!check.ok) {
+        res.status(400).json({ ok: false, httpStatus: 400, errorCode: check.errorCode, error: check.error });
+        return;
+      }
+
+      const method = bodyObj.method === 'GET' ? 'GET' : 'POST';
+      const targetUrl = new URL(check.url.toString());
+      if (method === 'GET') {
+        targetUrl.searchParams.set('action', String(bodyObj.action || 'readAll'));
+        targetUrl.searchParams.set('_ts', String(Date.now()));
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 25_000);
+      let upstream: globalThis.Response;
+      try {
+        upstream = await fetch(targetUrl.toString(), {
+          method,
+          redirect: 'follow',
+          signal: controller.signal,
+          ...(method === 'POST'
+            ? {
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body:
+                  typeof bodyObj.body === 'string'
+                    ? bodyObj.body
+                    : JSON.stringify(bodyObj.body ?? {}),
+              }
+            : {}),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const finalUrl = String(upstream.url || '');
+      const rawText = await upstream.text();
+
+      if (
+        finalUrl.includes('accounts.google.com') ||
+        /ServiceLogin|accounts\.google\.com/i.test(rawText.slice(0, 1200))
+      ) {
+        res.json({
+          ok: false,
+          httpStatus: upstream.status || 401,
+          errorCode: 'AUTH_REQUIRED',
+          error:
+            'Apps Script Web App ยังไม่ได้เปิดสิทธิ์เป็น "Who has access: Anyone" (ทุกคน) กรุณา Deploy ใหม่และเลือก Who has access: Anyone',
+        });
+        return;
+      }
+
+      if (upstream.status === 404) {
+        res.json({
+          ok: false,
+          httpStatus: 404,
+          errorCode: 'NOT_FOUND',
+          error:
+            'ไม่พบ Apps Script Web App URL นี้ (HTTP 404) — ลิงก์ /exec อาจถูกลบหรือยังไม่ได้ Deploy Code.gs ใหม่',
+        });
+        return;
+      }
+
+      if (upstream.status === 401 || upstream.status === 403) {
+        res.json({
+          ok: false,
+          httpStatus: upstream.status,
+          errorCode: 'FORBIDDEN',
+          error: `ไม่มีสิทธิ์เข้าถึง Apps Script Web App (HTTP ${upstream.status}) — กรุณาตั้ง Execute as: Me และ Who has access: Anyone`,
+        });
+        return;
+      }
+
+      if (!upstream.ok) {
+        res.json({
+          ok: false,
+          httpStatus: upstream.status,
+          errorCode: 'HTTP_ERROR',
+          error: `Apps Script ตอบกลับ HTTP ${upstream.status}`,
+        });
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(rawText);
+        if (parsed && parsed.success === false) {
+          res.json({
+            ok: false,
+            httpStatus: upstream.status,
+            data: parsed,
+            errorCode: 'SCRIPT_REJECTED',
+            error: String(parsed.error || 'Apps Script ปฏิเสธคำสั่ง'),
+          });
+          return;
+        }
+        res.json({ ok: true, httpStatus: upstream.status, data: parsed });
+      } catch {
+        const htmlHint = /Script function not found/i.test(rawText)
+          ? 'ไม่พบฟังก์ชันใน Apps Script (กรุณาคัดลอกโค้ด Code.gs ล่าสุดไปวางและ Deploy ใหม่)'
+          : 'Apps Script ส่งค่ากลับมาไม่ใช่ JSON (กรุณาตรวจสอบสิทธิ์ Who has access: Anyone และลิงก์ลงท้าย /exec)';
+        res.json({
+          ok: false,
+          httpStatus: upstream.status,
+          errorCode: 'NON_JSON',
+          error: htmlHint,
+        });
+      }
+    } catch (err: any) {
+      const msg =
+        err?.name === 'AbortError'
+          ? 'หมดเวลาการเชื่อมต่อ Apps Script (Timeout 25 วินาที)'
+          : String(err?.message || err || 'เชื่อมต่อ Apps Script ไม่สำเร็จ');
+      res.json({ ok: false, httpStatus: 502, errorCode: 'NETWORK_ERROR', error: msg });
+    }
+  });
+
+  app.get('/api/sheets/gviz-proxy', async (req: Request, res: Response) => {
+    try {
+      const spreadsheetId = String(req.query.spreadsheetId || '').trim();
+      const sheetName = String(req.query.sheet || '').trim().slice(0, 80);
+      if (!/^[a-zA-Z0-9-_]{10,128}$/.test(spreadsheetId)) {
+        res.status(400).json({ ok: false, httpStatus: 400, errorCode: 'INVALID_ID', error: 'Spreadsheet ID ไม่ถูกต้อง' });
+        return;
+      }
+      if (!sheetName) {
+        res.status(400).json({ ok: false, httpStatus: 400, errorCode: 'MISSING_SHEET', error: 'ไม่ได้ระบุชื่อแท็บชีท' });
+        return;
+      }
+
+      const targetUrl = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(
+        spreadsheetId
+      )}/gviz/tq?tqx=out:json&headers=1&sheet=${encodeURIComponent(sheetName)}&_ts=${Date.now()}`;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      let upstream: globalThis.Response;
+      try {
+        upstream = await fetch(targetUrl, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const finalUrl = String(upstream.url || '');
+      const text = await upstream.text();
+
+      if (finalUrl.includes('accounts.google.com') || text.trim().startsWith('<')) {
+        if (upstream.status === 404) {
+          res.json({
+            ok: false,
+            httpStatus: 404,
+            errorCode: 'NOT_FOUND',
+            error: `ไม่พบ Google Sheet (${spreadsheetId.slice(0, 12)}...) — HTTP 404 ชีทอาจถูกลบหรือยังไม่ได้สร้าง`,
+          });
+          return;
+        }
+        res.json({
+          ok: false,
+          httpStatus: upstream.status || 401,
+          errorCode: 'PRIVATE_SHEET',
+          error: 'Google Sheet ยังไม่ได้เปิดสิทธิ์แชร์แบบ "ทุกคนที่มีลิงก์อ่านได้ (Viewer)"',
+        });
+        return;
+      }
+
+      if (upstream.status === 404) {
+        res.json({
+          ok: false,
+          httpStatus: 404,
+          errorCode: 'NOT_FOUND',
+          error: `ไม่พบ Google Sheet (${spreadsheetId.slice(0, 12)}...) — HTTP 404`,
+        });
+        return;
+      }
+
+      if (!upstream.ok || !text.includes('setResponse(')) {
+        res.json({
+          ok: false,
+          httpStatus: upstream.status,
+          errorCode: 'GVIZ_ERROR',
+          error: `ไม่สามารถอ่านข้อมูล Google Sheet ได้ (HTTP ${upstream.status})`,
+        });
+        return;
+      }
+
+      const startIdx = text.indexOf('{');
+      const endIdx = text.lastIndexOf('}');
+      if (startIdx < 0 || endIdx <= startIdx) {
+        res.json({ ok: false, httpStatus: upstream.status, errorCode: 'PARSE_ERROR', error: 'ข้อมูลชีทไม่สมบูรณ์' });
+        return;
+      }
+      const parsed = JSON.parse(text.slice(startIdx, endIdx + 1));
+      if (parsed.status === 'error' || !parsed.table) {
+        const msg = parsed?.errors?.[0]?.detailed_message || parsed?.errors?.[0]?.message || 'ไม่พบแท็บชีทใน Google Sheets';
+        res.json({ ok: false, httpStatus: 200, errorCode: 'SHEET_TAB_ERROR', error: String(msg) });
+        return;
+      }
+      const rawRows: any[] = Array.isArray(parsed.table.rows) ? parsed.table.rows : [];
+      const rows = rawRows.map((row) =>
+        (Array.isArray(row.c) ? row.c : []).map((cell: any) => formatGvizCellServer(cell))
+      );
+      res.json({ ok: true, httpStatus: 200, rows });
+    } catch (err: any) {
+      res.json({
+        ok: false,
+        httpStatus: 502,
+        errorCode: 'NETWORK_ERROR',
+        error: String(err?.message || err || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ'),
+      });
+    }
+  });
+
+  app.get('/api/sheets/code-gs', (_req: Request, res: Response) => {
+    try {
+      const baseDir = path.resolve(__dirname);
+      const codeGsPath = path.resolve(baseDir, 'Code.gs');
+      if (!codeGsPath.startsWith(baseDir + path.sep) || !fs.existsSync(codeGsPath)) {
+        res.status(404).type('text/plain; charset=utf-8').send('// Code.gs not found');
+        return;
+      }
+      const content = fs.readFileSync(codeGsPath, 'utf8');
+      res.status(200).type('text/plain; charset=utf-8').send(content);
+    } catch (err: any) {
+      res.status(500).type('text/plain; charset=utf-8').send(`// Error reading Code.gs: ${String(err?.message || err)}`);
+    }
+  });
+
   app.post('/api/line/webhook', (req: Request, res: Response) => {
     // Always return HTTP 200 OK immediately with zero 302 redirects for LINE Platform verification
     res.status(200).json({ status: 'ok' });

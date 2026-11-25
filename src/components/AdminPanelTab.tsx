@@ -45,6 +45,7 @@ import {
   fetchServerLineStatus,
   LineAutomationStatusInfo,
   LineServerStatusInfo,
+  SheetConnectionStatus,
 } from '../services/sheetsService';
 import { formatThaiShortDate, getLocalTodayIso } from '../utils/thaiDate';
 import { buildDailyCensusLineMessage, resolveLineAutoReportDate } from '../utils/lineReport';
@@ -93,7 +94,11 @@ import {
   MessageSquare,
   ChevronDown,
   ChevronUp,
-  ImageDown
+  ImageDown,
+  Upload,
+  Code2,
+  AlertTriangle,
+  Wifi
 } from 'lucide-react';
 
 interface AdminPanelTabProps {
@@ -158,6 +163,11 @@ interface AdminPanelTabProps {
     sendFormat?: LineSendFormat;
   }) => Promise<{ ok: boolean; error?: string }>;
   onFetchLineStatus?: () => Promise<LineAutomationStatusInfo | null>;
+  onExportAllToGoogleSheet?: () => void;
+  onTestSheetConnection?: (sheetUrlOrId?: string, gasUrl?: string) => Promise<SheetConnectionStatus>;
+  onSaveSheetLinkConfig?: (sheetUrlOrId: string, gasUrl: string) => Promise<void> | void;
+  sheetConnectionStatus?: SheetConnectionStatus;
+  isExportingToSheet?: boolean;
 }
 
 export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
@@ -182,6 +192,11 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   onResetData,
   onSetupSpreadsheet,
   onSyncSpreadsheet,
+  onExportAllToGoogleSheet,
+  onTestSheetConnection,
+  onSaveSheetLinkConfig,
+  sheetConnectionStatus,
+  isExportingToSheet = false,
   isSettingUpSheet,
   isSyncingSheet,
   onCopyShareLink,
@@ -236,6 +251,9 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const [showBuiltInHolidays, setShowBuiltInHolidays] = useState<boolean>(false);
   const [holidayPreviewYear, setHolidayPreviewYear] = useState<number>(new Date().getFullYear());
   const [showSheetLinkConfig, setShowSheetLinkConfig] = useState<boolean>(false);
+  const [isTestingSheet, setIsTestingSheet] = useState<boolean>(false);
+  const [copiedCodeGs, setCopiedCodeGs] = useState<boolean>(false);
+  const [copyCodeGsError, setCopyCodeGsError] = useState<string>('');
 
   // PIN Security Gate State
   const [pinInput, setPinInput] = useState<string>('');
@@ -983,10 +1001,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
     });
   };
 
-  // Save custom spreadsheet link/ID (+ optional Apps Script Web App URL)
+  // Save custom spreadsheet link/ID (+ Apps Script Web App URL) and verify/export immediately
   const handleSaveSheetLink = () => {
     const raw = customSheetUrl.trim();
     const trimmedGas = customGasUrl.trim();
+    if (onSaveSheetLinkConfig) {
+      void onSaveSheetLinkConfig(raw, trimmedGas);
+      return;
+    }
     if (!raw && !trimmedGas) {
       onSaveSettings({
         ...settings,
@@ -1017,6 +1039,10 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
   const handleUnlinkSheet = () => {
     setCustomSheetUrl('');
     setCustomGasUrl('');
+    if (onSaveSheetLinkConfig) {
+      void onSaveSheetLinkConfig('', '');
+      return;
+    }
     onSaveSettings({
       ...settings,
       spreadsheetId: undefined,
@@ -1024,6 +1050,46 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
       gasUrl: undefined,
       isUnlinked: true,
     });
+  };
+
+  const handleTestSheetConnectionClick = async () => {
+    if (!onTestSheetConnection) return;
+    setIsTestingSheet(true);
+    try {
+      await onTestSheetConnection(
+        customSheetUrl.trim() || settings.spreadsheetId || '',
+        customGasUrl.trim() || settings.gasUrl || ''
+      );
+    } finally {
+      setIsTestingSheet(false);
+    }
+  };
+
+  const handleCopyCodeGs = async () => {
+    setCopyCodeGsError('');
+    try {
+      const res = await fetch('/api/sheets/code-gs', { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const codeText = await res.text();
+      try {
+        await navigator.clipboard.writeText(codeText);
+      } catch {
+        const textarea = document.createElement('textarea');
+        textarea.value = codeText;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setCopiedCodeGs(true);
+      setTimeout(() => setCopiedCodeGs(false), 3000);
+    } catch (err: any) {
+      setCopyCodeGsError(`ไม่สามารถโหลด Code.gs ได้ (${err?.message || 'กรุณาเปิดไฟล์ Code.gs ในโปรเจกต์'})`);
+    }
   };
 
   const handleCopyLinkClick = () => {
@@ -1332,17 +1398,23 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
           <div className="space-y-1">
             <h3 className="text-sm font-bold flex items-center gap-2 text-emerald-200">
               <FileSpreadsheet className="w-5 h-5 text-emerald-300" />
-              <span>การเชื่อมต่อ Google Sheets และแชร์ลิงก์ให้บุคลากร OPD</span>
+              <span>การเชื่อมต่อ Google Sheets, ส่งออกข้อมูล และแชร์ลิงก์ให้บุคลากร OPD</span>
             </h3>
-            <p className="text-xs text-emerald-100/80">
-              {settings.spreadsheetId || settings.gasUrl
-                ? 'เชื่อมโยงฐานข้อมูล Google Sheets เรียบร้อยแล้ว — ซิงค์อัตโนมัติโดยไม่ต้อง Sign in Google (ซ่อนรหัสและลิงก์ชีทเพื่อความปลอดภัย)'
-                : 'เชื่อมต่อฐานข้อมูล Google Sheets ผ่านลิงก์ชีท / Web App URL (Code.gs) โดยไม่ต้อง Sign in Google'}
+            <p className="text-xs text-emerald-100/85">
+              {!(settings.spreadsheetId || settings.gasUrl)
+                ? 'เชื่อมต่อฐานข้อมูล Google Sheets ผ่านลิงก์ชีท และ Apps Script Web App URL (/exec) โดยไม่ต้อง Sign in Google'
+                : sheetConnectionStatus?.checked && !sheetConnectionStatus.ok
+                ? 'ตั้งค่าลิงก์ชีทไว้แล้ว แต่ยังไม่สามารถเชื่อมต่อ Google Sheets / Web App URL ปลายทางได้ — กรุณาตรวจสอบด้านล่าง'
+                : sheetConnectionStatus?.checked && sheetConnectionStatus.ok && !sheetConnectionStatus.gasOk
+                ? 'อ่านข้อมูลจาก Google Sheet ได้แล้ว — กรุณาวาง Web App URL (/exec) ที่เปิดสิทธิ์ Anyone เพื่อส่งออกข้อมูลกลับ'
+                : sheetConnectionStatus?.checked && sheetConnectionStatus.ok && sheetConnectionStatus.gasOk
+                ? 'เชื่อมต่อ Google Sheets และ Web App URL (/exec) พร้อมส่งออกและซิงค์ข้อมูลอัตโนมัติแล้ว'
+                : 'บันทึกลิงก์ Google Sheets แล้ว — สามารถกด "ส่งออกข้อมูลขึ้น Google Sheet" หรือ "ทดสอบเชื่อมต่อ" เพื่อยืนยันสถานะ'}
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* 1. When Sheet Link/ID or GAS URL exists -> Open Sheet + Sync (Zero Sign-In!) */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* 1. When Sheet Link/ID or GAS URL exists -> Open Sheet + Export + Sync + Test (Zero Sign-In!) */}
             {settings.spreadsheetId || settings.spreadsheetUrl || settings.gasUrl ? (
               <div className="flex flex-wrap items-center gap-2">
                 {(settings.spreadsheetUrl || settings.spreadsheetId) && (
@@ -1350,22 +1422,54 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                     href={settings.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${settings.spreadsheetId}/edit`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-emerald-500/25 hover:bg-emerald-500/35 text-emerald-100 border border-emerald-400/50 rounded-xl transition-colors"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-emerald-500/25 hover:bg-emerald-500/35 text-emerald-100 border border-emerald-400/50 rounded-xl transition-colors"
                   >
-                    <ExternalLink className="w-4 h-4 text-emerald-300" />
-                    <span>เปิด Google Sheets</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>เปิดชีท</span>
                   </a>
+                )}
+                {onExportAllToGoogleSheet && (
+                  <button
+                    type="button"
+                    onClick={onExportAllToGoogleSheet}
+                    disabled={isExportingToSheet || isSyncingSheet}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-xl shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                    title="ส่งออกข้อมูลทั้งหมดในระบบ (ภาระงาน วันลา OT บุคลากร และตั้งค่า) ขึ้น Google Sheet ทันที"
+                  >
+                    {isExportingToSheet ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5" />
+                    )}
+                    <span>{isExportingToSheet ? 'กำลังส่งออก...' : 'ส่งออกข้อมูลขึ้น Google Sheet'}</span>
+                  </button>
                 )}
                 <button
                   type="button"
                   onClick={onSyncSpreadsheet}
-                  disabled={isSyncingSheet}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white border border-teal-400/40 rounded-xl shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                  disabled={isSyncingSheet || isExportingToSheet}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white border border-teal-400/40 rounded-xl shadow-sm transition-colors cursor-pointer disabled:opacity-50"
                   title="ซิงค์ข้อมูลไป-กลับระหว่างหน้าเว็บกับ Google Sheet ปัจจุบันโดยไม่ต้อง Sign in Google"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
-                  <span>{isSyncingSheet ? 'กำลังซิงค์ข้อมูล...' : 'ซิงค์ข้อมูลกับ Google Sheet'}</span>
+                  <span>{isSyncingSheet ? 'กำลังซิงค์...' : 'ซิงค์ข้อมูล'}</span>
                 </button>
+                {onTestSheetConnection && (
+                  <button
+                    type="button"
+                    onClick={handleTestSheetConnectionClick}
+                    disabled={isTestingSheet}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-100 border border-cyan-300/40 rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+                    title="ตรวจสอบสถานะการเชื่อมต่อของ Google Sheet และ Apps Script Web App (/exec)"
+                  >
+                    {isTestingSheet ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Wifi className="w-3.5 h-3.5 text-cyan-300" />
+                    )}
+                    <span>{isTestingSheet ? 'กำลังทดสอบ...' : 'ทดสอบเชื่อมต่อ'}</span>
+                  </button>
+                )}
                 {onToggleAutoSync && (
                   <button
                     type="button"
@@ -1379,14 +1483,14 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
                   >
                     <span
                       className={`w-2 h-2 rounded-full ${
-                        isSyncingSheet
+                        isSyncingSheet || isExportingToSheet
                           ? 'bg-amber-300 animate-ping'
                           : settings.autoSync !== false
                           ? 'bg-emerald-400'
                           : 'bg-slate-400'
                       }`}
                     />
-                    <span>{settings.autoSync !== false ? 'ซิงค์เมื่อบันทึก & เปิดหน้า: เปิด' : 'ซิงค์เมื่อบันทึก: เปิด (ปิดดึงอัตโนมัติ)'}</span>
+                    <span>{settings.autoSync !== false ? 'ซิงค์อัตโนมัติ: เปิด' : 'ซิงค์อัตโนมัติ: ปิด'}</span>
                     {lastSyncedAt && (
                       <span className="text-[10px] text-emerald-200/80">({lastSyncedAt})</span>
                     )}
@@ -1409,63 +1513,165 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
             <button
               type="button"
               onClick={handleCopyLinkClick}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border transition-all cursor-pointer ${
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-all cursor-pointer ${
                 copiedShareLink
                   ? 'bg-emerald-500 text-emerald-950 border-emerald-300 shadow-sm'
                   : 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-100 border-cyan-300/40'
               }`}
               title="คัดลอกลิงก์หน้าเว็บ (พร้อมผูกชีทให้อัตโนมัติ) ส่งให้บุคลากร OPD ใช้งาน"
             >
-              {copiedShareLink ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4 text-cyan-300" />}
-              <span>{copiedShareLink ? 'คัดลอกลิงก์แล้ว!' : 'คัดลอกลิงก์แชร์ให้ OPD'}</span>
+              {copiedShareLink ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5 text-cyan-300" />}
+              <span>{copiedShareLink ? 'คัดลอกลิงก์แล้ว!' : 'คัดลอกลิงก์แชร์'}</span>
             </button>
 
             {/* Discrete toggle for Sheet ID & Web App URL config */}
             <button
               type="button"
               onClick={() => setShowSheetLinkConfig((prev) => !prev)}
-              className="inline-flex items-center gap-1 px-2.5 py-2 text-xs font-semibold bg-black/20 hover:bg-black/35 text-emerald-100/80 border border-white/15 rounded-xl transition-colors cursor-pointer"
+              className={`inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold border rounded-xl transition-colors cursor-pointer ${
+                sheetConnectionStatus?.checked && !sheetConnectionStatus.ok
+                  ? 'bg-amber-400 text-amber-950 border-amber-300 font-bold'
+                  : 'bg-black/20 hover:bg-black/35 text-emerald-100/90 border-white/15'
+              }`}
               title="แสดง/ซ่อนช่องตั้งค่าลิงก์ Google Sheets และ Web App URL"
             >
               <Link2 className="w-3.5 h-3.5" />
               <span>{showSheetLinkConfig ? 'ซ่อนตั้งค่าลิงก์' : 'ตั้งค่าลิงก์ชีท'}</span>
             </button>
 
-            {/* Zero Sign-In Status Pill */}
-            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-black/25 text-emerald-200 border border-emerald-400/30 rounded-xl">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>ซิงค์ไม่ต้อง Sign in</span>
-            </div>
+            {/* Live Connection Status Badge */}
+            {sheetConnectionStatus?.checked ? (
+              sheetConnectionStatus.ok && sheetConnectionStatus.gasOk ? (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-emerald-500/20 text-emerald-200 border border-emerald-400/40 rounded-xl">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>พร้อมส่งออก (2-Way)</span>
+                </div>
+              ) : sheetConnectionStatus.ok ? (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-amber-500/20 text-amber-200 border border-amber-400/40 rounded-xl">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
+                  <span>อ่านได้อย่างเดียว (ต้องใส่ /exec)</span>
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-red-500/25 text-red-100 border border-red-400/50 rounded-xl">
+                  <AlertCircle className="w-3.5 h-3.5 text-red-300" />
+                  <span>เชื่อมต่อไม่ได้</span>
+                </div>
+              )
+            ) : (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-black/25 text-emerald-200 border border-emerald-400/30 rounded-xl">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>ซิงค์ไม่ต้อง Sign in</span>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Hidden by default (Image 2): Existing Spreadsheet URL/ID & Share Link */}
+        {/* Connection Diagnostics Alert Banner when disconnected or Web App URL needs setup */}
+        {sheetConnectionStatus?.checked && (!sheetConnectionStatus.ok || !sheetConnectionStatus.gasOk) && (
+          <div
+            className={`rounded-xl p-3 border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+              !sheetConnectionStatus.ok
+                ? 'bg-red-950/60 border-red-400/40 text-red-100'
+                : 'bg-amber-950/50 border-amber-400/40 text-amber-100'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-300" />
+              <div className="space-y-0.5">
+                <div className="font-bold">
+                  {!sheetConnectionStatus.ok
+                    ? 'ไม่สามารถเชื่อมต่อ Google Sheets / Web App URL ปัจจุบันได้'
+                    : 'ยังส่งออกข้อมูลไปยัง Google Sheet ไม่ได้ (อ่านชีทได้เท่านั้น)'}
+                </div>
+                <div className="text-[11px] opacity-90">
+                  {sheetConnectionStatus.error || sheetConnectionStatus.gasError || sheetConnectionStatus.sheetError}
+                </div>
+              </div>
+            </div>
+            {!showSheetLinkConfig && (
+              <button
+                type="button"
+                onClick={() => setShowSheetLinkConfig(true)}
+                className="px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white font-semibold text-[11px] shrink-0 cursor-pointer self-start sm:self-center"
+              >
+                แก้ไขลิงก์ชีท & /exec
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Hidden by default: Existing Spreadsheet URL/ID, Web App URL, Code.gs helper & Share Link */}
         {showSheetLinkConfig && (
-          <div className="bg-black/20 rounded-xl p-3 border border-white/10 space-y-2.5">
+          <div className="bg-black/25 rounded-xl p-3.5 border border-white/15 space-y-3">
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               <div className="flex items-center gap-1.5 text-xs text-emerald-200 font-semibold shrink-0">
                 <Link2 className="w-4 h-4" />
-                <span>ลิงก์ / ID Google Sheets ที่ต้องการจำค่า:</span>
+                <span>ลิงก์ / ID Google Sheets:</span>
               </div>
               <input
                 type="text"
                 value={customSheetUrl}
                 onChange={(e) => setCustomSheetUrl(e.target.value)}
-                placeholder="วาง URL หรือ Spreadsheet ID ที่มีอยู่เพื่อบันทึกลิงก์ถาวร..."
+                placeholder="วาง URL เช่น https://docs.google.com/spreadsheets/d/.../edit หรือ Spreadsheet ID"
                 className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
               />
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              <div className="flex items-center gap-1.5 text-xs text-cyan-200 font-semibold shrink-0">
+                <span>Web App URL (/exec สำหรับส่งออกข้อมูล):</span>
+              </div>
+              <input
+                type="url"
+                value={customGasUrl}
+                onChange={(e) => setCustomGasUrl(e.target.value)}
+                placeholder="https://script.google.com/macros/s/.../exec (จำเป็นสำหรับการส่งออกข้อมูลขึ้น Google Sheet)"
+                className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
               <button
                 type="button"
                 onClick={handleSaveSheetLink}
-                className="px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer shrink-0"
+                disabled={isExportingToSheet || isSyncingSheet}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-emerald-950 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
               >
-                จำค่าลิงก์ชีท
+                {isExportingToSheet ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                <span>บันทึก &amp; ส่งออกข้อมูลขึ้นชีท</span>
               </button>
+
+              {onTestSheetConnection && (
+                <button
+                  type="button"
+                  onClick={handleTestSheetConnectionClick}
+                  disabled={isTestingSheet}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-500/25 hover:bg-cyan-500/35 text-cyan-100 border border-cyan-300/40 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {isTestingSheet ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+                  <span>ทดสอบการเชื่อมต่อ</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={handleCopyCodeGs}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                  copiedCodeGs
+                    ? 'bg-emerald-400 text-emerald-950 border-emerald-300'
+                    : 'bg-white/10 hover:bg-white/20 text-white border-white/20'
+                }`}
+                title="คัดลอกโค้ด Google Apps Script (Code.gs) เวอร์ชันล่าสุดไปวางใน Google Sheet ของคุณ"
+              >
+                {copiedCodeGs ? <Check className="w-3.5 h-3.5" /> : <Code2 className="w-3.5 h-3.5 text-cyan-300" />}
+                <span>{copiedCodeGs ? 'คัดลอกโค้ด Code.gs แล้ว!' : 'คัดลอกโค้ด Code.gs ล่าสุด'}</span>
+              </button>
+
               {(settings.spreadsheetId || settings.spreadsheetUrl || settings.gasUrl) && (
                 <button
                   type="button"
                   onClick={handleUnlinkSheet}
-                  className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white/10 hover:bg-red-500/30 text-red-100 border border-white/15 rounded-lg transition-colors cursor-pointer shrink-0"
+                  className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white/10 hover:bg-red-500/30 text-red-100 border border-white/15 rounded-lg transition-colors cursor-pointer ml-auto"
                   title="ล้างลิงก์ที่จำไว้ออก"
                 >
                   <Unlink className="w-3.5 h-3.5" />
@@ -1474,17 +1680,18 @@ export const AdminPanelTab: React.FC<AdminPanelTabProps> = ({
               )}
             </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
-              <div className="flex items-center gap-1.5 text-[11px] text-cyan-200 font-semibold shrink-0">
-                <span>Web App URL ซิงค์อัตโนมัติ (ไม่บังคับ):</span>
+            {copyCodeGsError && (
+              <div className="text-[11px] text-amber-200 bg-amber-950/50 border border-amber-400/30 rounded-lg px-2.5 py-1.5">
+                {copyCodeGsError}
               </div>
-              <input
-                type="url"
-                value={customGasUrl}
-                onChange={(e) => setCustomGasUrl(e.target.value)}
-                placeholder="https://script.google.com/macros/s/.../exec (ช่วยให้ OPD บันทึกข้อมูลเข้าชีทได้ทันทีโดยไม่ต้องล็อกอิน)"
-                className="flex-1 text-xs bg-white/95 text-gray-900 rounded-lg px-3 py-1.5 border border-white/20 outline-none"
-              />
+            )}
+
+            <div className="bg-black/25 border border-white/10 rounded-lg p-2.5 text-[11px] text-emerald-100/85 space-y-1">
+              <div className="font-bold text-cyan-200">วิธีตั้งค่า Google Sheet ให้ส่งออกข้อมูลได้ 100% (ไม่ต้อง Sign in):</div>
+              <div>1. เปิดไฟล์ Google Sheets ของหน่วยงาน → เมนู <b>ส่วนขยาย (Extensions) → Apps Script</b></div>
+              <div>2. กดปุ่ม <b>&quot;คัดลอกโค้ด Code.gs ล่าสุด&quot;</b> ด้านบน แล้ววางทับโค้ดทั้งหมดใน Apps Script จากนั้นกด <b>บันทึก (Save)</b></div>
+              <div>3. กด <b>Deploy → New deployment → Web app</b> ตั้งค่า <b>Execute as: Me</b> และ <b>Who has access: Anyone (ทุกคน)</b> แล้วกด Deploy</div>
+              <div>4. คัดลอก <b>Web App URL (ที่ลงท้ายด้วย /exec)</b> และลิงก์ชีทมาวางด้านบน แล้วกด <b>&quot;บันทึก &amp; ส่งออกข้อมูลขึ้นชีท&quot;</b></div>
             </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px] text-emerald-100/85">

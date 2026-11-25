@@ -1024,8 +1024,17 @@ export const loadLocalDatabase = (): AppDatabase => {
           : storedSpreadsheetId || INITIAL_SETTINGS.spreadsheetId,
         spreadsheetUrl: isUnlinked
           ? undefined
-          : storedSpreadsheetUrl || INITIAL_SETTINGS.spreadsheetUrl,
-        gasUrl: isUnlinked ? '' : storedGasUrl || INITIAL_SETTINGS.gasUrl || '',
+          : storedSpreadsheetUrl ||
+            (storedSpreadsheetId && storedSpreadsheetId !== INITIAL_SETTINGS.spreadsheetId
+              ? `https://docs.google.com/spreadsheets/d/${storedSpreadsheetId}/edit`
+              : INITIAL_SETTINGS.spreadsheetUrl),
+        gasUrl: isUnlinked
+          ? ''
+          : parsed.settings?.gasUrl !== undefined
+          ? storedGasUrl
+          : !storedSpreadsheetId || storedSpreadsheetId === INITIAL_SETTINGS.spreadsheetId
+          ? INITIAL_SETTINGS.gasUrl || ''
+          : '',
         isUnlinked,
         autoSync: parsed.settings?.autoSync !== undefined ? Boolean(parsed.settings.autoSync) : true,
       };
@@ -1210,10 +1219,17 @@ export const normalizeIncomingServerDb = (
       : storedSheetId || fallbackDb.settings.spreadsheetId || INITIAL_SETTINGS.spreadsheetId,
     spreadsheetUrl: isUnlinked
       ? undefined
-      : storedSheetUrl || fallbackDb.settings.spreadsheetUrl || INITIAL_SETTINGS.spreadsheetUrl,
+      : storedSheetUrl ||
+        (storedSheetId && storedSheetId !== fallbackDb.settings.spreadsheetId
+          ? `https://docs.google.com/spreadsheets/d/${storedSheetId}/edit`
+          : fallbackDb.settings.spreadsheetUrl || INITIAL_SETTINGS.spreadsheetUrl),
     gasUrl: isUnlinked
       ? ''
-      : storedGasUrl || fallbackDb.settings.gasUrl || INITIAL_SETTINGS.gasUrl || '',
+      : rawSettings.gasUrl !== undefined
+      ? storedGasUrl
+      : storedSheetId && storedSheetId !== (fallbackDb.settings.spreadsheetId || INITIAL_SETTINGS.spreadsheetId)
+      ? ''
+      : fallbackDb.settings.gasUrl ?? INITIAL_SETTINGS.gasUrl ?? '',
     isUnlinked,
     autoSync:
       rawSettings.autoSync !== undefined
@@ -2806,29 +2822,259 @@ function formatGvizCell(cell: any): string {
   return String(cell.v);
 }
 
-async function fetchGvizSheetRows(spreadsheetId: string, sheetName: string): Promise<string[][] | null> {
+export interface SheetConnectionStatus {
+  checked: boolean;
+  ok: boolean;
+  via?: 'gas' | 'oauth' | 'public';
+  sheetOk?: boolean;
+  sheetStatus?: number;
+  sheetError?: string;
+  gasOk?: boolean;
+  gasStatus?: number;
+  gasError?: string;
+  discoveredGasUrl?: string;
+  error?: string;
+  rowCounts?: {
+    staff: number;
+    workloads: number;
+    leaves: number;
+    ot: number;
+  };
+}
+
+export interface GasEndpointResult {
+  ok: boolean;
+  httpStatus: number;
+  data?: any;
+  errorCode?: string;
+  error?: string;
+}
+
+export async function requestGasEndpoint(
+  gasUrl: string,
+  options: {
+    method: 'GET' | 'POST';
+    action?: string;
+    body?: unknown;
+  }
+): Promise<GasEndpointResult> {
+  const trimmed = String(gasUrl || '').trim();
+  if (!trimmed) {
+    return { ok: false, httpStatus: 0, errorCode: 'MISSING_URL', error: 'ยังไม่ได้ระบุ Apps Script Web App URL (/exec)' };
+  }
+  if (/\/dev(\?.*)?$/i.test(trimmed)) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      errorCode: 'DEV_URL',
+      error: 'URL ลงท้ายด้วย /dev ใช้ภายนอกไม่ได้ กรุณาคัดลอกลิงก์ที่ลงท้ายด้วย /exec จากการ Deploy Web App',
+    };
+  }
+
+  // Prefer same-origin Node server proxy when available to eliminate CORS/302 iframe issues and get exact HTTP/auth diagnostics
+  if (typeof window !== 'undefined') {
+    try {
+      const proxyRes = await fetch('/api/sheets/gas-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gasUrl: trimmed,
+          method: options.method,
+          action: options.action,
+          body: options.body,
+        }),
+      });
+      const contentType = proxyRes.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const parsed = await proxyRes.json();
+        if (parsed && typeof parsed.ok === 'boolean') {
+          return {
+            ok: Boolean(parsed.ok),
+            httpStatus: Number(parsed.httpStatus ?? proxyRes.status) || 0,
+            data: parsed.data,
+            errorCode: parsed.errorCode,
+            error: parsed.error,
+          };
+        }
+      }
+    } catch {
+      // Static build / offline proxy fallback -> continue to direct browser fetch
+    }
+  }
+
+  // Direct browser fetch fallback (e.g., GitHub Pages static deployment)
+  try {
+    const sep = trimmed.includes('?') ? '&' : '?';
+    const targetUrl =
+      options.method === 'GET'
+        ? `${trimmed}${sep}action=${encodeURIComponent(options.action || 'readAll')}&_ts=${Date.now()}`
+        : trimmed;
+    const res = await fetch(targetUrl, {
+      method: options.method,
+      cache: 'no-store',
+      ...(options.method === 'POST'
+        ? {
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: typeof options.body === 'string' ? options.body : JSON.stringify(options.body ?? {}),
+          }
+        : {}),
+    });
+
+    if (res.status === 404) {
+      return {
+        ok: false,
+        httpStatus: 404,
+        errorCode: 'NOT_FOUND',
+        error: 'ไม่พบ Apps Script Web App URL นี้ (HTTP 404) — กรุณาตรวจสอบหรือ Deploy Code.gs ใหม่',
+      };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        errorCode: 'FORBIDDEN',
+        error: `ไม่มีสิทธิ์เข้าถึง Apps Script (HTTP ${res.status}) — กรุณาตั้ง Who has access: Anyone`,
+      };
+    }
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        errorCode: 'HTTP_ERROR',
+        error: `Apps Script ตอบกลับ HTTP ${res.status}`,
+      };
+    }
+
+    try {
+      const data = JSON.parse(rawText);
+      if (data && data.success === false) {
+        return {
+          ok: false,
+          httpStatus: res.status,
+          data,
+          errorCode: 'SCRIPT_REJECTED',
+          error: String(data.error || 'Apps Script ปฏิเสธคำสั่ง'),
+        };
+      }
+      return { ok: true, httpStatus: res.status, data };
+    } catch {
+      const needsAnyone = /accounts\.google\.com|ServiceLogin/i.test(rawText.slice(0, 1200));
+      return {
+        ok: false,
+        httpStatus: res.status,
+        errorCode: needsAnyone ? 'AUTH_REQUIRED' : 'NON_JSON',
+        error: needsAnyone
+          ? 'Apps Script Web App ยังไม่ได้เปิดสิทธิ์ "Who has access: Anyone"'
+          : 'Apps Script ส่งค่ากลับมาไม่ใช่ JSON (ตรวจสอบสิทธิ์ Anyone และลิงก์ /exec)',
+      };
+    }
+  } catch (err: any) {
+    return {
+      ok: false,
+      httpStatus: 0,
+      errorCode: 'NETWORK_ERROR',
+      error: `เชื่อมต่อ Apps Script ไม่สำเร็จ (${err?.message || 'CORS หรือ Web App URL ไม่ถูกต้อง/ยังไม่ได้เปิดสิทธิ์ Anyone'})`,
+    };
+  }
+}
+
+async function fetchGvizSheetRowsWithMeta(
+  spreadsheetId: string,
+  sheetName: string
+): Promise<{ ok: boolean; httpStatus: number; rows: string[][] | null; errorCode?: string; error?: string }> {
+  const cleanId = String(spreadsheetId || '').trim();
+  if (!cleanId) {
+    return { ok: false, httpStatus: 0, rows: null, errorCode: 'MISSING_ID', error: 'ยังไม่ได้ระบุ Google Sheet ID' };
+  }
+
+  if (typeof window !== 'undefined') {
+    try {
+      const proxyRes = await fetch(
+        `/api/sheets/gviz-proxy?spreadsheetId=${encodeURIComponent(cleanId)}&sheet=${encodeURIComponent(sheetName)}`,
+        { method: 'GET', cache: 'no-store' }
+      );
+      const contentType = proxyRes.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const parsed = await proxyRes.json();
+        if (parsed && typeof parsed.ok === 'boolean') {
+          return {
+            ok: Boolean(parsed.ok),
+            httpStatus: Number(parsed.httpStatus ?? proxyRes.status) || 0,
+            rows: Array.isArray(parsed.rows) ? parsed.rows : null,
+            errorCode: parsed.errorCode,
+            error: parsed.error,
+          };
+        }
+      }
+    } catch {
+      // Static build fallback -> direct browser fetch below
+    }
+  }
+
   try {
     const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(
-      spreadsheetId
+      cleanId
     )}/gviz/tq?tqx=out:json&headers=1&sheet=${encodeURIComponent(sheetName)}&_ts=${Date.now()}`;
     const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) return null;
+    if (res.status === 404) {
+      return {
+        ok: false,
+        httpStatus: 404,
+        rows: null,
+        errorCode: 'NOT_FOUND',
+        error: `ไม่พบ Google Sheet (${cleanId.slice(0, 12)}...) — HTTP 404`,
+      };
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        rows: null,
+        errorCode: 'HTTP_ERROR',
+        error: `ไม่สามารถอ่าน Google Sheet ได้ (HTTP ${res.status})`,
+      };
+    }
     const text = await res.text();
     if (!text || text.trim().startsWith('<') || !text.includes('setResponse(')) {
-      return null;
+      return {
+        ok: false,
+        httpStatus: 401,
+        rows: null,
+        errorCode: 'PRIVATE_SHEET',
+        error: 'Google Sheet ยังไม่ได้เปิดสิทธิ์แชร์แบบ "ทุกคนที่มีลิงก์อ่านได้ (Viewer)"',
+      };
     }
     const startIdx = text.indexOf('{');
     const endIdx = text.lastIndexOf('}');
-    if (startIdx < 0 || endIdx <= startIdx) return null;
+    if (startIdx < 0 || endIdx <= startIdx) {
+      return { ok: false, httpStatus: res.status, rows: null, errorCode: 'PARSE_ERROR', error: 'ข้อมูลชีทไม่สมบูรณ์' };
+    }
     const parsed = JSON.parse(text.slice(startIdx, endIdx + 1));
-    if (parsed.status === 'error' || !parsed.table) return null;
+    if (parsed.status === 'error' || !parsed.table) {
+      return { ok: false, httpStatus: 200, rows: null, errorCode: 'SHEET_TAB_ERROR', error: 'ไม่พบแท็บชีทที่กำหนด' };
+    }
     const rows: any[] = Array.isArray(parsed.table.rows) ? parsed.table.rows : [];
-    return rows.map((row) =>
-      (Array.isArray(row.c) ? row.c : []).map((cell: any) => formatGvizCell(cell))
-    );
-  } catch {
-    return null;
+    return {
+      ok: true,
+      httpStatus: 200,
+      rows: rows.map((row) => (Array.isArray(row.c) ? row.c : []).map((cell: any) => formatGvizCell(cell))),
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      httpStatus: 0,
+      rows: null,
+      errorCode: 'NETWORK_ERROR',
+      error: String(err?.message || err || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ'),
+    };
   }
+}
+
+async function fetchGvizSheetRows(spreadsheetId: string, sheetName: string): Promise<string[][] | null> {
+  const res = await fetchGvizSheetRowsWithMeta(spreadsheetId, sheetName);
+  return res.rows;
 }
 
 interface MergeRemoteExtraOptions {
@@ -3240,8 +3486,11 @@ function mergeRemoteDataRows(
     gasUrl: db.settings.isUnlinked
       ? ''
       : settingsDirty
-      ? db.settings.gasUrl || INITIAL_SETTINGS.gasUrl || ''
-      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || INITIAL_SETTINGS.gasUrl || '',
+      ? db.settings.gasUrl ?? ''
+      : settingsMap['Gas_Web_App_URL'] &&
+        (!db.settings.gasUrl || db.settings.gasUrl === INITIAL_SETTINGS.gasUrl)
+      ? settingsMap['Gas_Web_App_URL']
+      : db.settings.gasUrl || settingsMap['Gas_Web_App_URL'] || '',
     defaultCostCenter: settingsDirty
       ? db.settings.defaultCostCenter || DEFAULT_OT_COST_CENTER
       : settingsMap['Default_Cost_Center'] ||
@@ -3368,39 +3617,45 @@ function mergeRemoteDataRows(
 }
 
 /**
- * Reads all tabs from a shared Google Sheet without OAuth (via GViz public JSON feed).
+ * Reads all tabs from a shared Google Sheet without OAuth (via GViz public JSON feed / server proxy).
  * Works whenever the Sheet allows "Anyone with the link" to view.
  */
 export const readPublicGoogleSheet = async (
   spreadsheetId: string,
   db: AppDatabase
-): Promise<{ accessible: boolean; mergedDb: AppDatabase }> => {
-  const [staffRows, workloadRows, leaveRows, otRows, settingsRows, auditRows] = await Promise.all([
-    fetchGvizSheetRows(spreadsheetId, 'Staff_Master'),
-    fetchGvizSheetRows(spreadsheetId, 'Daily_Workload'),
-    fetchGvizSheetRows(spreadsheetId, 'Leave_Records'),
-    fetchGvizSheetRows(spreadsheetId, 'OT_Attendance'),
-    fetchGvizSheetRows(spreadsheetId, 'Settings'),
-    fetchGvizSheetRows(spreadsheetId, 'Audit_Logs'),
+): Promise<{ accessible: boolean; mergedDb: AppDatabase; httpStatus?: number; error?: string }> => {
+  const [staffRes, workloadRes, leaveRes, otRes, settingsRes, auditRes] = await Promise.all([
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'Staff_Master'),
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'Daily_Workload'),
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'Leave_Records'),
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'OT_Attendance'),
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'Settings'),
+    fetchGvizSheetRowsWithMeta(spreadsheetId, 'Audit_Logs'),
   ]);
 
-  if (!staffRows && !settingsRows && !workloadRows && !leaveRows && !otRows) {
-    return { accessible: false, mergedDb: db };
+  if (!staffRes.rows && !settingsRes.rows && !workloadRes.rows && !leaveRes.rows && !otRes.rows) {
+    const firstErr = [settingsRes, staffRes, workloadRes, leaveRes, otRes].find((r) => r.error);
+    return {
+      accessible: false,
+      mergedDb: db,
+      httpStatus: firstErr?.httpStatus,
+      error: firstErr?.error || 'ไม่สามารถอ่าน Google Sheet ได้ (ตรวจสอบ ID และสิทธิ์ทุกคนที่มีลิงก์อ่านได้)',
+    };
   }
 
   const mergedDb = mergeRemoteDataRows(
     {
-      staffRows,
-      workloadRows,
-      leaveRows,
-      otRows,
-      settingsRows,
-      auditRows,
+      staffRows: staffRes.rows,
+      workloadRows: workloadRes.rows,
+      leaveRows: leaveRes.rows,
+      otRows: otRes.rows,
+      settingsRows: settingsRes.rows,
+      auditRows: auditRes.rows,
     },
     db
   );
 
-  return { accessible: true, mergedDb };
+  return { accessible: true, mergedDb, httpStatus: 200 };
 };
 
 /**
@@ -3409,16 +3664,18 @@ export const readPublicGoogleSheet = async (
 export const readViaAppsScript = async (
   gasUrl: string,
   db: AppDatabase
-): Promise<{ accessible: boolean; mergedDb: AppDatabase }> => {
+): Promise<{ accessible: boolean; mergedDb: AppDatabase; httpStatus?: number; error?: string }> => {
   try {
-    const sep = gasUrl.includes('?') ? '&' : '?';
-    const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    if (!res.ok) return { accessible: false, mergedDb: db };
-    const data = await res.json();
-    if (!data || data.success === false) return { accessible: false, mergedDb: db };
+    const gasRes = await requestGasEndpoint(gasUrl, { method: 'GET', action: 'readAll' });
+    if (!gasRes.ok || !gasRes.data) {
+      return {
+        accessible: false,
+        mergedDb: db,
+        httpStatus: gasRes.httpStatus,
+        error: gasRes.error || 'เชื่อมต่อ Apps Script Web App ไม่สำเร็จ',
+      };
+    }
+    const data = gasRes.data;
 
     const mergedDb = mergeRemoteDataRows(
       {
@@ -3434,6 +3691,7 @@ export const readViaAppsScript = async (
     const resolvedSheetId = mergedDb.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
     return {
       accessible: true,
+      httpStatus: gasRes.httpStatus,
       mergedDb: {
         ...mergedDb,
         settings: {
@@ -3446,19 +3704,23 @@ export const readViaAppsScript = async (
         },
       },
     };
-  } catch {
-    return { accessible: false, mergedDb: db };
+  } catch (err: any) {
+    return {
+      accessible: false,
+      mergedDb: db,
+      error: String(err?.message || err || 'เชื่อมต่อ Apps Script Web App ไม่สำเร็จ'),
+    };
   }
 };
 
 /**
- * Appends new data-entry records ONLY (no edit/delete) via Apps Script Web App URL.
+ * Appends new data-entry records ONLY via Apps Script Web App URL and returns rich error diagnostics.
  */
-export const appendViaAppsScript = async (
+export const appendViaAppsScriptDetailed = async (
   gasUrl: string,
   action: 'appendWorkload' | 'appendLeave' | 'appendOT',
   payload: unknown
-): Promise<boolean> => {
+): Promise<{ ok: boolean; httpStatus?: number; error?: string }> => {
   const claimedWorkloadSlots: string[] = [];
   if (action === 'appendWorkload') {
     const rawItems = (Array.isArray(payload) ? payload : [payload]) as DailyWorkload[];
@@ -3476,13 +3738,12 @@ export const appendViaAppsScript = async (
       uniqueItems.push(item);
     }
     if (uniqueItems.length === 0) {
-      // Nothing new to append because an append for this slot is already in flight
-      return true;
+      return { ok: true };
     }
     payload = Array.isArray(payload) ? uniqueItems : uniqueItems[0];
   }
 
-  const runPromise = (async (): Promise<boolean> => {
+  const runPromise = (async (): Promise<{ ok: boolean; httpStatus?: number; error?: string }> => {
     try {
       const normalizedPayload =
         action === 'appendWorkload'
@@ -3502,40 +3763,42 @@ export const appendViaAppsScript = async (
               records: Array.isArray(normalizedPayload) ? normalizedPayload : [normalizedPayload],
             }
           : { action, payload: normalizedPayload };
-      const res = await fetch(gasUrl, {
+      const res = await requestGasEndpoint(gasUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(bodyObj),
+        body: bodyObj,
       });
-      const rawText = await res.text();
       if (!res.ok) {
-        console.error(`Apps Script HTTP ${res.status} for ${action}:`, rawText.slice(0, 300));
-        return false;
+        console.error(`Apps Script failed for ${action}:`, res.error);
+        return { ok: false, httpStatus: res.httpStatus, error: res.error };
       }
-      try {
-        const data = JSON.parse(rawText);
-        if (!data?.success) {
-          console.error(`Apps Script rejected ${action}:`, data);
-        }
-        return Boolean(data?.success);
-      } catch {
-        console.error(`Non-JSON response from Apps Script for ${action} (check Web App permission = Anyone):`, rawText.slice(0, 300));
-        return false;
-      }
-    } catch (err) {
+      return { ok: true, httpStatus: res.httpStatus };
+    } catch (err: any) {
       console.error(`Failed to ${action} via Apps Script:`, err);
-      return false;
+      return { ok: false, error: String(err?.message || err || 'Network error') };
     } finally {
       claimedWorkloadSlots.forEach((slot) => inFlightWorkloadSlotKeys.delete(slot));
     }
   })();
 
   if (action === 'appendWorkload') {
-    activeWorkloadAppendPromises.add(runPromise);
-    runPromise.finally(() => activeWorkloadAppendPromises.delete(runPromise));
+    const boolPromise = runPromise.then((r) => r.ok);
+    activeWorkloadAppendPromises.add(boolPromise);
+    boolPromise.finally(() => activeWorkloadAppendPromises.delete(boolPromise));
   }
 
   return await runPromise;
+};
+
+/**
+ * Appends new data-entry records ONLY (no edit/delete) via Apps Script Web App URL.
+ */
+export const appendViaAppsScript = async (
+  gasUrl: string,
+  action: 'appendWorkload' | 'appendLeave' | 'appendOT',
+  payload: unknown
+): Promise<boolean> => {
+  const res = await appendViaAppsScriptDetailed(gasUrl, action, payload);
+  return res.ok;
 };
 
 export const hasPendingAdminDirtyFlags = (): boolean =>
@@ -3558,19 +3821,24 @@ export const syncPublicViaAppsScript = async (
   mergedDb: AppDatabase;
   pushedCount: number;
   needsStaffIdUpgrade?: boolean;
+  httpStatus?: number;
+  error?: string;
 }> => {
   try {
     // Wait for any in-flight direct workload appends before reading remote Sheet to prevent double-append race!
     await waitForInFlightWorkloadAppends();
 
-    const sep = gasUrl.includes('?') ? '&' : '?';
-    const res = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    if (!res.ok) return { accessible: false, mergedDb: db, pushedCount: 0 };
-    const data = await res.json();
-    if (!data || data.success === false) return { accessible: false, mergedDb: db, pushedCount: 0 };
+    const gasRes = await requestGasEndpoint(gasUrl, { method: 'GET', action: 'readAll' });
+    if (!gasRes.ok || !gasRes.data) {
+      return {
+        accessible: false,
+        mergedDb: db,
+        pushedCount: 0,
+        httpStatus: gasRes.httpStatus,
+        error: gasRes.error || 'เชื่อมต่อ Apps Script Web App ไม่สำเร็จ',
+      };
+    }
+    const data = gasRes.data;
 
     const deletedWKeys = getDeletedWorkloadKeySet();
     const deletedLKeys = getDeletedLeaveKeySet();
@@ -3678,6 +3946,7 @@ export const syncPublicViaAppsScript = async (
       accessible: true,
       pushedCount,
       needsStaffIdUpgrade,
+      httpStatus: gasRes.httpStatus,
       mergedDb: {
         ...mergedDb,
         settings: {
@@ -3692,8 +3961,13 @@ export const syncPublicViaAppsScript = async (
         },
       },
     };
-  } catch {
-    return { accessible: false, mergedDb: db, pushedCount: 0 };
+  } catch (err: any) {
+    return {
+      accessible: false,
+      mergedDb: db,
+      pushedCount: 0,
+      error: String(err?.message || err || 'เชื่อมต่อ Apps Script Web App ไม่สำเร็จ'),
+    };
   }
 };
 
@@ -3807,24 +4081,20 @@ export const pushAdminTableViaAppsScript = async (params: {
     }
     if (auditEntry) payload.auditLogs = [auditEntry];
 
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'syncAdminAll',
         adminPin,
         payload,
-      }),
+      },
     });
 
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
+    if (!gasRes.ok || !gasRes.data) {
+      return { ok: false, error: String(gasRes.error || 'Apps Script ปฏิเสธการบันทึก') };
     }
 
-    const data = await res.json();
-    if (!data || data.success === false) {
-      return { ok: false, error: String(data?.error || 'Apps Script ปฏิเสธการบันทึก') };
-    }
+    const data = gasRes.data;
 
     if (table === 'workloads' && Array.isArray(data.workloadRows)) {
       const remoteParsed = parseRemoteWorkloadsOnly(
@@ -4084,10 +4354,9 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
         ? prepareOtForRemote(updated as OTAttendance)
         : updated;
 
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action,
         adminPin,
         payload: {
@@ -4096,14 +4365,14 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
           auditEntry,
           ...(insertIfMissing ? { insertIfMissing: true } : {}),
         },
-      }),
+      },
     });
 
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
+    if (!gasRes.ok && !gasRes.data) {
+      return { ok: false, error: gasRes.error || `HTTP ${gasRes.httpStatus}` };
     }
 
-    const data = await res.json();
+    const data = gasRes.data;
 
     // Case 1: New Code.gs responded to targeted endpoint
     if (data && data.targeted === true) {
@@ -4156,18 +4425,11 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
     }
 
     // Case 3: Older Code.gs deployed — perform safe Read-Modify-Write on freshest remote rows
-    const sep = gasUrl.includes('?') ? '&' : '?';
-    const freshRes = await fetch(`${gasUrl}${sep}action=readAll&_ts=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    if (!freshRes.ok) {
-      return { ok: false, error: `HTTP ${freshRes.status}` };
+    const freshRes = await requestGasEndpoint(gasUrl, { method: 'GET', action: 'readAll' });
+    if (!freshRes.ok || !freshRes.data) {
+      return { ok: false, error: String(freshRes.error || 'อ่านข้อมูลล่าสุดจากชีทไม่สำเร็จ') };
     }
-    const freshData = await freshRes.json();
-    if (!freshData || freshData.success === false) {
-      return { ok: false, error: String(freshData?.error || 'อ่านข้อมูลล่าสุดจากชีทไม่สำเร็จ') };
-    }
+    const freshData = freshRes.data;
 
     let nextTableRows: unknown[] = [];
     if (table === 'workloads') {
@@ -4217,10 +4479,9 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
       nextTableRows = remoteList.map(prepareOtForRemote);
     }
 
-    const rmwRes = await fetch(gasUrl, {
+    const rmwRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'syncAdminAll',
         adminPin,
         payload: {
@@ -4234,16 +4495,13 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
           [table]: nextTableRows,
           auditLogs: [auditEntry],
         },
-      }),
+      },
     });
 
-    if (!rmwRes.ok) {
-      return { ok: false, error: `HTTP ${rmwRes.status}` };
+    if (!rmwRes.ok || !rmwRes.data) {
+      return { ok: false, error: String(rmwRes.error || 'Apps Script ปฏิเสธการบันทึก') };
     }
-    const rmwData = await rmwRes.json();
-    if (!rmwData || rmwData.success === false) {
-      return { ok: false, error: String(rmwData?.error || 'Apps Script ปฏิเสธการบันทึก') };
-    }
+    const rmwData = rmwRes.data;
 
     if (table === 'workloads' && Array.isArray(rmwData.workloadRows)) {
       const remoteParsed = parseRemoteWorkloadsOnly(
@@ -4361,10 +4619,9 @@ export const pushTargetedAdminStaffMutationViaAppsScript = async (params: {
   };
 
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action,
         adminPin,
         payload: {
@@ -4375,13 +4632,13 @@ export const pushTargetedAdminStaffMutationViaAppsScript = async (params: {
           ...(insertIfMissing ? { insertIfMissing: true } : {}),
           ...(auditEntry ? { auditEntry } : {}),
         },
-      }),
+      },
     });
 
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
+    if (!gasRes.ok && !gasRes.data) {
+      return { ok: false, error: String(gasRes.error || `HTTP ${gasRes.httpStatus}`) };
     }
-    const data = await res.json();
+    const data = gasRes.data;
 
     if (data && data.targeted === true) {
       if (data.notFound) {
@@ -4461,23 +4718,22 @@ export const pushTargetedSettingsKeysViaAppsScript = async (params: {
   }
 
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'updateSettingsKeys',
         adminPin,
         payload: {
           entries: changedEntries,
           ...(auditEntry ? { auditEntry } : {}),
         },
-      }),
+      },
     });
 
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
+    if (!gasRes.ok && !gasRes.data) {
+      return { ok: false, error: String(gasRes.error || `HTTP ${gasRes.httpStatus}`) };
     }
-    const data = await res.json();
+    const data = gasRes.data;
 
     if (data && data.targeted === true) {
       if (data.success === false) {
@@ -5096,11 +5352,19 @@ export const syncAdminViaAppsScript = async (
   adminSynced: boolean;
   mergedDb: AppDatabase;
   pushedCount: number;
+  httpStatus?: number;
   error?: string;
 }> => {
   const pubRes = await syncPublicViaAppsScript(gasUrl, db);
   if (!pubRes.accessible) {
-    return { accessible: false, adminSynced: false, mergedDb: db, pushedCount: 0 };
+    return {
+      accessible: false,
+      adminSynced: false,
+      mergedDb: db,
+      pushedCount: 0,
+      httpStatus: pubRes.httpStatus,
+      error: pubRes.error,
+    };
   }
 
   const workingDb = pubRes.mergedDb;
@@ -5137,10 +5401,9 @@ export const syncAdminViaAppsScript = async (
   }
 
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'syncAdminAll',
         adminPin,
         payload: {
@@ -5158,29 +5421,21 @@ export const syncAdminViaAppsScript = async (
             staffEmployeeCodes: buildStaffEmployeeCodesMap(workingDb.staff),
           },
         },
-      }),
+      },
     });
 
-    if (!res.ok) {
+    if (!gasRes.ok || !gasRes.data) {
       return {
         accessible: true,
         adminSynced: false,
         mergedDb: workingDb,
         pushedCount: pubRes.pushedCount,
-        error: `HTTP ${res.status}`,
+        httpStatus: gasRes.httpStatus,
+        error: String(gasRes.error || 'Apps Script syncAdminAll failed'),
       };
     }
 
-    const data = await res.json();
-    if (!data || data.success === false) {
-      return {
-        accessible: true,
-        adminSynced: false,
-        mergedDb: workingDb,
-        pushedCount: pubRes.pushedCount,
-        error: String(data?.error || 'Apps Script syncAdminAll failed'),
-      };
-    }
+    const data = gasRes.data;
 
     // Verify dirty tables actually cleared deleted items before clearing dirty versions
     if (dirty.workloads && Array.isArray(data.workloadRows)) {
@@ -5278,22 +5533,15 @@ export const appendAuditViaAppsScript = async (
   entry: AuditLogEntry
 ): Promise<boolean> => {
   if (!gasUrl || !adminPin) return false;
-  try {
-    const res = await fetch(gasUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action: 'appendAudit',
-        adminPin,
-        payload: entry,
-      }),
-    });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return Boolean(data?.success);
-  } catch {
-    return false;
-  }
+  const gasRes = await requestGasEndpoint(gasUrl, {
+    method: 'POST',
+    body: {
+      action: 'appendAudit',
+      adminPin,
+      payload: entry,
+    },
+  });
+  return gasRes.ok;
 };
 
 export interface LineAutomationStatusInfo {
@@ -5509,25 +5757,21 @@ export const configureLineAutomationViaAppsScript = async (params: {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'configureLineAutomation',
         adminPin,
         payload: config,
-      }),
+      },
     });
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
-    }
-    const data = await res.json();
-    if (!data || data.success === false) {
+    if (!gasRes.ok || !gasRes.data) {
       return {
         ok: false,
-        error: String(data?.error || 'Google Apps Script ปฏิเสธการตั้งค่า LINE อัตโนมัติ (กรุณาตรวจสอบการ Deploy Code.gs)'),
+        error: String(gasRes.error || 'Google Apps Script ปฏิเสธการตั้งค่า LINE อัตโนมัติ (กรุณาตรวจสอบการ Deploy Code.gs)'),
       };
     }
+    const data = gasRes.data;
     clearSettingsDirty(expectedDirtyVersion);
     const merged = mergeRemoteDataRows(
       {
@@ -5574,22 +5818,20 @@ export const uploadLineReportJpegViaAppsScript = async (params: {
     return { ok: false, error: 'ยังไม่ได้เชื่อมต่อ Google Apps Script Web App URL' };
   }
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'uploadLineReportJpeg',
         payload: {
           base64Jpeg: base64Jpeg.replace(/^data:image\/\w+;base64,/, ''),
           filename: filename || `OPD_Census_${Date.now()}.jpeg`,
         },
-      }),
+      },
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-    const data = await res.json();
-    if (!data || data.success === false || !data.imageUrl) {
-      return { ok: false, error: String(data?.error || 'อัปโหลดภาพ .jpeg ไปยัง Google Drive ไม่สำเร็จ') };
+    if (!gasRes.ok || !gasRes.data || !gasRes.data.imageUrl) {
+      return { ok: false, error: String(gasRes.error || 'อัปโหลดภาพ .jpeg ไปยัง Google Drive ไม่สำเร็จ') };
     }
+    const data = gasRes.data;
     return {
       ok: true,
       imageUrl: String(data.imageUrl),
@@ -5607,24 +5849,17 @@ export const saveUnitCostCenterViaAppsScript = async (params: {
 }): Promise<{ ok: boolean; error?: string }> => {
   const { gasUrl, clinic, costCenter } = params;
   if (!gasUrl) return { ok: false, error: 'ไม่มี Web App URL' };
-  try {
-    const res = await fetch(gasUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action: 'saveUnitCostCenter',
-        payload: { clinic, costCenter },
-      }),
-    });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-    const data = await res.json();
-    if (!data || data.success === false) {
-      return { ok: false, error: String(data?.error || 'บันทึก Cost Center ไม่สำเร็จ') };
-    }
-    return { ok: true };
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message || err || 'Network error') };
+  const gasRes = await requestGasEndpoint(gasUrl, {
+    method: 'POST',
+    body: {
+      action: 'saveUnitCostCenter',
+      payload: { clinic, costCenter },
+    },
+  });
+  if (!gasRes.ok) {
+    return { ok: false, error: String(gasRes.error || 'บันทึก Cost Center ไม่สำเร็จ') };
   }
+  return { ok: true };
 };
 
 export const sendLineDailyCensusNowViaAppsScript = async (params: {
@@ -5671,10 +5906,9 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'sendLineReportNow',
         adminPin,
         payload: {
@@ -5690,12 +5924,9 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
           ...(sendFormat ? { sendFormat } : {}),
           ...(scheduleId ? { scheduleId } : {}),
         },
-      }),
+      },
     });
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
-    }
-    const data = await res.json();
+    const data = gasRes.data;
     const merged = Array.isArray(data?.settingsRows)
       ? mergeRemoteDataRows(
           {
@@ -5710,8 +5941,8 @@ export const sendLineDailyCensusNowViaAppsScript = async (params: {
         )
       : undefined;
 
-    if (!data || data.success === false) {
-      const errStr = String(data?.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ');
+    if (!gasRes.ok || !data || data.success === false) {
+      const errStr = String(gasRes.error || data?.error || 'ส่งรายงานเข้า LINE ไม่สำเร็จ');
       const quotaExceeded =
         Boolean(data?.quotaExceeded) ||
         /429|monthly limit|โควต้าส่งข้อความ Push รายเดือน/i.test(errStr);
@@ -5749,25 +5980,21 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
     return { ok: false, error: 'ไม่มี Web App URL หรือรหัส Admin PIN' };
   }
   try {
-    const res = await fetch(gasUrl, {
+    const gasRes = await requestGasEndpoint(gasUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
+      body: {
         action: 'getLineAutomationStatus',
         adminPin,
         payload: {},
-      }),
+      },
     });
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}` };
-    }
-    const data = await res.json();
-    if (!data || data.success === false) {
+    if (!gasRes.ok || !gasRes.data) {
       return {
         ok: false,
-        error: String(data?.error || 'ไม่สามารถอ่านสถานะ LINE อัตโนมัติได้'),
+        error: String(gasRes.error || 'ไม่สามารถอ่านสถานะ LINE อัตโนมัติได้'),
       };
     }
+    const data = gasRes.data;
     return {
       ok: true,
       status: {
@@ -5799,5 +6026,396 @@ export const fetchLineAutomationStatusViaAppsScript = async (params: {
     return { ok: false, error: String(err?.message || err || 'Network error') };
   }
 };
+
+/**
+ * Tests live reachability of both Google Sheet (GViz/public view) and Apps Script Web App (/exec).
+ */
+export const testGoogleSheetConnection = async (params: {
+  spreadsheetId?: string;
+  gasUrl?: string;
+}): Promise<SheetConnectionStatus> => {
+  const spreadsheetId = String(params.spreadsheetId || '').trim();
+  let gasUrl = String(params.gasUrl || '').trim();
+
+  if (!spreadsheetId && !gasUrl) {
+    return {
+      checked: true,
+      ok: false,
+      error: 'ยังไม่ได้ตั้งค่าลิงก์ Google Sheets หรือ Web App URL (/exec)',
+    };
+  }
+
+  let sheetOk = false;
+  let sheetStatus: number | undefined;
+  let sheetError: string | undefined;
+  let discoveredGasUrl = '';
+
+  if (spreadsheetId) {
+    const [settingsRes, staffRes] = await Promise.all([
+      fetchGvizSheetRowsWithMeta(spreadsheetId, 'Settings'),
+      fetchGvizSheetRowsWithMeta(spreadsheetId, 'Staff_Master'),
+    ]);
+    sheetOk = Boolean(settingsRes.ok || staffRes.ok);
+    sheetStatus = settingsRes.httpStatus || staffRes.httpStatus;
+    if (!sheetOk) {
+      sheetError = settingsRes.error || staffRes.error || 'ไม่สามารถเปิดอ่าน Google Sheet ได้';
+    } else if (Array.isArray(settingsRes.rows)) {
+      const foundRow = settingsRes.rows.find((r) => String(r[0] || '').trim() === 'Gas_Web_App_URL');
+      if (foundRow && foundRow[1]) {
+        discoveredGasUrl = String(foundRow[1]).trim();
+      }
+    }
+  }
+
+  let gasOk = false;
+  let gasStatus: number | undefined;
+  let gasError: string | undefined;
+  let rowCounts: SheetConnectionStatus['rowCounts'] | undefined;
+
+  const gasCandidates = Array.from(
+    new Set([gasUrl, discoveredGasUrl].filter((u) => Boolean(u && u.trim())))
+  );
+
+  for (const candidate of gasCandidates) {
+    const gasRes = await requestGasEndpoint(candidate, { method: 'GET', action: 'readAll' });
+    gasStatus = gasRes.httpStatus;
+    if (gasRes.ok && gasRes.data) {
+      gasOk = true;
+      gasError = undefined;
+      gasUrl = candidate;
+      rowCounts = {
+        staff: Array.isArray(gasRes.data.staffRows) ? gasRes.data.staffRows.length : 0,
+        workloads: Array.isArray(gasRes.data.workloadRows) ? gasRes.data.workloadRows.length : 0,
+        leaves: Array.isArray(gasRes.data.leaveRows) ? gasRes.data.leaveRows.length : 0,
+        ot: Array.isArray(gasRes.data.otRows) ? gasRes.data.otRows.length : 0,
+      };
+      if (!spreadsheetId && gasRes.data.spreadsheetId) {
+        sheetOk = true;
+      }
+      break;
+    } else {
+      gasError = gasRes.error || `เชื่อมต่อ Web App ไม่สำเร็จ (HTTP ${gasRes.httpStatus})`;
+    }
+  }
+
+  const ok = Boolean(gasOk || sheetOk);
+  const error = ok
+    ? gasUrl && !gasOk
+      ? `อ่านชีทได้ แต่ส่งข้อมูลกลับ via Web App URL ไม่สำเร็จ: ${gasError}`
+      : undefined
+    : [gasError, sheetError].filter(Boolean).join(' • ') || 'ไม่สามารถเชื่อมต่อ Google Sheets ได้';
+
+  return {
+    checked: true,
+    ok,
+    via: gasOk ? 'gas' : sheetOk ? 'public' : undefined,
+    sheetOk,
+    sheetStatus,
+    sheetError,
+    gasOk,
+    gasStatus,
+    gasError,
+    discoveredGasUrl: discoveredGasUrl || (gasOk ? gasUrl : undefined),
+    error,
+    rowCounts,
+  };
+};
+
+/**
+ * Exports ALL local records (workloads, leaves, OT, and—when Admin PIN is provided—Staff Master & Settings)
+ * up to Google Sheets without erasing remote data, verifying delivery and clearing outbox/dirty flags.
+ */
+export const exportAllToGoogleSheetViaAppsScript = async (params: {
+  gasUrl: string;
+  adminPin?: string;
+  db: AppDatabase;
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  httpStatus?: number;
+  mergedDb: AppDatabase;
+  exportedWorkloads: number;
+  exportedLeaves: number;
+  exportedOt: number;
+  staffCount: number;
+  adminSynced: boolean;
+}> => {
+  const { gasUrl, adminPin, db } = params;
+  if (!gasUrl.trim()) {
+    return {
+      ok: false,
+      error: 'ยังไม่ได้ตั้งค่า Apps Script Web App URL (/exec) — กรุณานำลิงก์ /exec จาก Code.gs มาวางก่อนส่งออกข้อมูล',
+      mergedDb: db,
+      exportedWorkloads: 0,
+      exportedLeaves: 0,
+      exportedOt: 0,
+      staffCount: db.staff.length,
+      adminSynced: false,
+    };
+  }
+
+  await waitForInFlightWorkloadAppends();
+
+  // 1. Read current remote sheet contents so we merge cleanly and count missing rows accurately
+  const readRes = await requestGasEndpoint(gasUrl, { method: 'GET', action: 'readAll' });
+  if (!readRes.ok || !readRes.data) {
+    return {
+      ok: false,
+      httpStatus: readRes.httpStatus,
+      error: readRes.error || 'ไม่สามารถเชื่อมต่อ Google Apps Script Web App ได้',
+      mergedDb: db,
+      exportedWorkloads: 0,
+      exportedLeaves: 0,
+      exportedOt: 0,
+      staffCount: db.staff.length,
+      adminSynced: false,
+    };
+  }
+
+  const data = readRes.data;
+  const deletedWKeys = getDeletedWorkloadKeySet();
+  const deletedLKeys = getDeletedLeaveKeySet();
+  const deletedOKeys = getDeletedOtKeySet();
+
+  const remoteWorkloads = parseRemoteWorkloadsOnly(
+    data.workloadRows,
+    db.settings.premiumSubClinics
+  ).filter((w) => !deletedWKeys.has(workloadKey(w)));
+  const remoteLeaves = parseRemoteLeavesOnly(data.leaveRows).filter(
+    (l) => !deletedLKeys.has(leaveKey(l))
+  );
+  const remoteOt = parseRemoteOtOnly(data.otRows).filter(
+    (o) => !deletedOKeys.has(otKey(o))
+  );
+
+  const remoteWKeys = new Set(remoteWorkloads.map(workloadKey));
+  const remoteWSlots = new Set(remoteWorkloads.map(getWorkloadSlotKey));
+  const remoteLKeys = new Set(remoteLeaves.map(leaveKey));
+  const remoteOKeys = new Set(remoteOt.map(otKey));
+
+  const missingWorkloads = db.workloads.filter(
+    (w) =>
+      !deletedWKeys.has(workloadKey(w)) &&
+      !remoteWKeys.has(workloadKey(w)) &&
+      !remoteWSlots.has(getWorkloadSlotKey(w))
+  );
+  const missingLeaves = db.leaves.filter(
+    (l) => !deletedLKeys.has(leaveKey(l)) && !remoteLKeys.has(leaveKey(l))
+  );
+  const missingOt = db.ot.filter(
+    (o) => !deletedOKeys.has(otKey(o)) && !remoteOKeys.has(otKey(o))
+  );
+
+  // 2. If Admin PIN is unlocked, perform full union + write Staff_Master, Settings & missing/dirty tables via syncAdminAll
+  if (adminPin && adminPin.trim()) {
+    const unionWorkloads = isWorkloadsDirty()
+      ? db.workloads
+      : deduplicateWorkloads([...missingWorkloads, ...remoteWorkloads], db.settings.premiumSubClinics);
+    const unionLeaves = isLeavesDirty() ? db.leaves : [...missingLeaves, ...remoteLeaves];
+    const unionOt = isOtDirty() ? db.ot : [...missingOt, ...remoteOt];
+
+    const resolvedSheetId =
+      db.settings.spreadsheetId || String(data.spreadsheetId || '').trim() || undefined;
+    const settingsToPush: SystemSettings = {
+      ...db.settings,
+      spreadsheetId: resolvedSheetId,
+      spreadsheetUrl:
+        db.settings.spreadsheetUrl ||
+        (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+      gasUrl: gasUrl.trim(),
+      isUnlinked: false,
+    };
+
+    const staffToPush =
+      db.staff.length > 0
+        ? db.staff
+        : mergeRemoteDataRows(
+            {
+              staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+              workloadRows: null,
+              leaveRows: null,
+              otRows: null,
+              settingsRows: null,
+              auditRows: null,
+            },
+            db
+          ).staff;
+
+    const remoteAuditSet = new Set(
+      (Array.isArray(data.auditRows) ? data.auditRows : []).map((r: string[]) =>
+        `${String(r[0] || '').trim()}|${String(r[1] || '').trim()}|${String(r[2] || '').trim()}`
+      )
+    );
+    const auditsToPush = (db.auditLogs || []).filter(
+      (a) => !remoteAuditSet.has(`${a.timestamp}|${a.action}|${a.targetName}`)
+    );
+
+    const writeRes = await requestGasEndpoint(gasUrl, {
+      method: 'POST',
+      body: {
+        action: 'syncAdminAll',
+        adminPin: adminPin.trim(),
+        payload: {
+          dirty: {
+            staff: true,
+            settings: true,
+            workloads: missingWorkloads.length > 0 || isWorkloadsDirty() || unionWorkloads.length > 0,
+            leaves: missingLeaves.length > 0 || isLeavesDirty() || unionLeaves.length > 0,
+            ot: missingOt.length > 0 || isOtDirty() || unionOt.length > 0,
+          },
+          staff: staffToPush.map(prepareStaffForRemote),
+          workloads: unionWorkloads.map(prepareWorkloadForRemote),
+          leaves: unionLeaves,
+          ot: unionOt.map(prepareOtForRemote),
+          auditLogs: auditsToPush.slice(0, 100),
+          settings: {
+            ...settingsToPush,
+            staffEmployeeCodes: buildStaffEmployeeCodesMap(staffToPush),
+          },
+        },
+      },
+    });
+
+    if (!writeRes.ok || !writeRes.data) {
+      return {
+        ok: false,
+        httpStatus: writeRes.httpStatus,
+        error: writeRes.error || 'ส่งออกข้อมูลทั้งหมดไปยัง Google Sheet ไม่สำเร็จ',
+        mergedDb: db,
+        exportedWorkloads: 0,
+        exportedLeaves: 0,
+        exportedOt: 0,
+        staffCount: staffToPush.length,
+        adminSynced: false,
+      };
+    }
+
+    clearStaffMasterDirty();
+    clearSettingsDirty();
+    clearWorkloadsDirty();
+    clearLeavesDirty();
+    clearOtDirty();
+    if (missingWorkloads.length > 0) markWorkloadOutboxSynced(missingWorkloads);
+    if (missingLeaves.length > 0) markLeaveOutboxSynced(missingLeaves);
+    if (missingOt.length > 0) markOtOutboxSynced(missingOt);
+    if (auditsToPush.length > 0) markAuditOutboxSynced(auditsToPush);
+
+    const wData = writeRes.data;
+    const refreshed = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(wData.staffRows) ? wData.staffRows : [],
+        workloadRows: Array.isArray(wData.workloadRows) ? wData.workloadRows : [],
+        leaveRows: Array.isArray(wData.leaveRows) ? wData.leaveRows : [],
+        otRows: Array.isArray(wData.otRows) ? wData.otRows : [],
+        settingsRows: Array.isArray(wData.settingsRows) ? wData.settingsRows : [],
+        auditRows: Array.isArray(wData.auditRows) ? wData.auditRows : [],
+      },
+      { ...db, staff: staffToPush, settings: settingsToPush }
+    );
+
+    return {
+      ok: true,
+      mergedDb: {
+        ...refreshed,
+        settings: {
+          ...refreshed.settings,
+          spreadsheetId: resolvedSheetId || refreshed.settings.spreadsheetId,
+          spreadsheetUrl:
+            settingsToPush.spreadsheetUrl ||
+            refreshed.settings.spreadsheetUrl ||
+            (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+          gasUrl: gasUrl.trim(),
+          isUnlinked: false,
+        },
+      },
+      exportedWorkloads: missingWorkloads.length,
+      exportedLeaves: missingLeaves.length,
+      exportedOt: missingOt.length,
+      staffCount: staffToPush.length,
+      adminSynced: true,
+    };
+  }
+
+  // 3. Non-admin fallback: append missing workloads, leaves, OT in batches
+  if (missingWorkloads.length > 0) {
+    const wPush = await appendViaAppsScriptDetailed(gasUrl, 'appendWorkload', missingWorkloads);
+    if (!wPush.ok) {
+      return {
+        ok: false,
+        httpStatus: wPush.httpStatus,
+        error: wPush.error || 'ส่งออกข้อมูลภาระงานไม่สำเร็จ',
+        mergedDb: db,
+        exportedWorkloads: 0,
+        exportedLeaves: 0,
+        exportedOt: 0,
+        staffCount: db.staff.length,
+        adminSynced: false,
+      };
+    }
+    markWorkloadOutboxSynced(missingWorkloads);
+  }
+  if (missingLeaves.length > 0) {
+    const lPush = await appendViaAppsScriptDetailed(gasUrl, 'appendLeave', missingLeaves);
+    if (!lPush.ok) {
+      return {
+        ok: false,
+        httpStatus: lPush.httpStatus,
+        error: lPush.error || 'ส่งออกข้อมูลวันลาไม่สำเร็จ',
+        mergedDb: db,
+        exportedWorkloads: missingWorkloads.length,
+        exportedLeaves: 0,
+        exportedOt: 0,
+        staffCount: db.staff.length,
+        adminSynced: false,
+      };
+    }
+    markLeaveOutboxSynced(missingLeaves);
+  }
+  if (missingOt.length > 0) {
+    const oPush = await appendViaAppsScriptDetailed(gasUrl, 'appendOT', missingOt);
+    if (!oPush.ok) {
+      return {
+        ok: false,
+        httpStatus: oPush.httpStatus,
+        error: oPush.error || 'ส่งออกข้อมูลเวร OT ไม่สำเร็จ',
+        mergedDb: db,
+        exportedWorkloads: missingWorkloads.length,
+        exportedLeaves: missingLeaves.length,
+        exportedOt: 0,
+        staffCount: db.staff.length,
+        adminSynced: false,
+      };
+    }
+    markOtOutboxSynced(missingOt);
+  }
+
+  const mergedDb = mergeRemoteDataRows(
+    {
+      staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+      workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+      leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+      otRows: Array.isArray(data.otRows) ? data.otRows : [],
+      settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+      auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+    },
+    db,
+    {
+      justPushedWorkloads: missingWorkloads,
+      justPushedLeaves: missingLeaves,
+      justPushedOt: missingOt,
+    }
+  );
+
+  return {
+    ok: true,
+    mergedDb,
+    exportedWorkloads: missingWorkloads.length,
+    exportedLeaves: missingLeaves.length,
+    exportedOt: missingOt.length,
+    staffCount: mergedDb.staff.length,
+    adminSynced: false,
+  };
+};
+
 
 

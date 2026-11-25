@@ -104,9 +104,13 @@ import {
   ensureSheetAnyoneReaderPermission,
   readPublicGoogleSheet,
   appendViaAppsScript,
+  appendViaAppsScriptDetailed,
   syncPublicViaAppsScript,
   syncAdminViaAppsScript,
   appendAuditViaAppsScript,
+  testGoogleSheetConnection,
+  exportAllToGoogleSheetViaAppsScript,
+  SheetConnectionStatus,
   markWorkloadsRecentlySaved,
   removeWorkloadRecentlySaved,
   markLeavesRecentlySaved,
@@ -156,6 +160,7 @@ import {
   UsersRound, 
   CheckCircle2, 
   AlertCircle,
+  Info,
   X
 } from 'lucide-react';
 
@@ -170,7 +175,12 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [isSettingUpSheet, setIsSettingUpSheet] = useState<boolean>(false);
   const [isSyncingSheet, setIsSyncingSheet] = useState<boolean>(false);
+  const [isExportingToSheet, setIsExportingToSheet] = useState<boolean>(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [sheetConnectionStatus, setSheetConnectionStatus] = useState<SheetConnectionStatus>({
+    checked: false,
+    ok: false,
+  });
 
   const dbRef = useRef(db);
   dbRef.current = db;
@@ -179,6 +189,7 @@ export default function App() {
   const sheetOpQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastSyncEpochRef = useRef<number>(0);
   const lastSyncedKeyRef = useRef<string>('');
+  const pendingUrlLinkNoticeRef = useRef<{ sheetId: string; gasUrl: string } | null>(null);
   const mutationSeqRef = useRef<number>(0);
   const tabInstanceIdRef = useRef<string>(`tab-${Math.random().toString(36).slice(2)}-${Date.now()}`);
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
@@ -548,23 +559,28 @@ export default function App() {
         const shouldUpdateSheet = Boolean(extractedId && extractedId !== db.settings.spreadsheetId);
         const shouldUpdateGas = Boolean(sharedGasParam && sharedGasParam !== (db.settings.gasUrl || ''));
         if (shouldUpdateSheet || shouldUpdateGas) {
+          const nextGasUrl = shouldUpdateGas
+            ? sharedGasParam || ''
+            : shouldUpdateSheet
+            ? ''
+            : dbRef.current.settings.gasUrl || '';
           const updatedSettings: SystemSettings = {
             ...dbRef.current.settings,
             spreadsheetId: extractedId || dbRef.current.settings.spreadsheetId,
             spreadsheetUrl: extractedId
               ? `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
               : dbRef.current.settings.spreadsheetUrl,
-            gasUrl: sharedGasParam || dbRef.current.settings.gasUrl,
+            gasUrl: nextGasUrl,
             isUnlinked: false,
           };
           const nextLinkedDb: AppDatabase = { ...dbRef.current, settings: updatedSettings };
           dbRef.current = nextLinkedDb;
           setDb(nextLinkedDb);
           void propagateServerMutation('saveSettings', { settings: updatedSettings });
-          setToastMessage({
-            text: `เชื่อมโยงฐานข้อมูล OPD อัตโนมัติเรียบร้อยแล้ว${extractedId ? ` (${extractedId.slice(0, 12)}...)` : ''}`,
-            type: 'info',
-          });
+          pendingUrlLinkNoticeRef.current = {
+            sheetId: updatedSettings.spreadsheetId || '',
+            gasUrl: updatedSettings.gasUrl || '',
+          };
         }
       }
     } catch {
@@ -786,7 +802,24 @@ export default function App() {
           return true;
         };
 
-        let publicFallbackRes: { accessible: boolean; mergedDb: AppDatabase } | null = null;
+        let publicFallbackRes: { accessible: boolean; mergedDb: AppDatabase; httpStatus?: number; error?: string } | null = null;
+        let lastGasError = '';
+        let lastGasStatus: number | undefined;
+
+        const notifyPendingUrlLinkIfNeeded = (ok: boolean, detailErr?: string) => {
+          const pending = pendingUrlLinkNoticeRef.current;
+          if (!pending) return;
+          pendingUrlLinkNoticeRef.current = null;
+          const shortId = pending.sheetId ? ` (${pending.sheetId.slice(0, 12)}...)` : '';
+          if (ok) {
+            showToast(`เชื่อมโยงฐานข้อมูล OPD อัตโนมัติเรียบร้อยแล้ว${shortId}`, 'success');
+          } else {
+            showToast(
+              `ไม่สามารถเชื่อมต่อ Google Sheet จากลิงก์ได้${shortId}: ${detailErr || 'ไม่พบชีท (HTTP 404) หรือยังไม่เปิดสิทธิ์'}`,
+              'error'
+            );
+          }
+        };
 
         if (!targetGasUrl && targetSheetId) {
           publicFallbackRes = await readPublicGoogleSheet(targetSheetId, currentDb);
@@ -818,6 +851,22 @@ export default function App() {
               },
               `${finalSheetId}|${targetGasUrl}`
             );
+            setSheetConnectionStatus({
+              checked: true,
+              ok: true,
+              via: 'gas',
+              sheetOk: true,
+              gasOk: true,
+              gasStatus: gasRes.httpStatus || 200,
+              discoveredGasUrl: targetGasUrl,
+              rowCounts: {
+                staff: gasRes.mergedDb.staff.length,
+                workloads: gasRes.mergedDb.workloads.length,
+                leaves: gasRes.mergedDb.leaves.length,
+                ot: gasRes.mergedDb.ot.length,
+              },
+            });
+            notifyPendingUrlLinkIfNeeded(true);
             return {
               accessible: true,
               via: 'gas',
@@ -826,6 +875,9 @@ export default function App() {
               adminSynced: 'adminSynced' in gasRes ? Boolean(gasRes.adminSynced) : true,
               error: 'error' in gasRes ? String(gasRes.error || '') : undefined,
             };
+          } else {
+            lastGasError = gasRes.error || 'เชื่อมต่อ Web App URL ไม่สำเร็จ';
+            lastGasStatus = gasRes.httpStatus;
           }
         }
 
@@ -850,6 +902,15 @@ export default function App() {
               },
               `${targetSheetId}|${result.mergedDb.settings.gasUrl || targetGasUrl || ''}`
             );
+            setSheetConnectionStatus({
+              checked: true,
+              ok: true,
+              via: 'oauth',
+              sheetOk: true,
+              gasOk: Boolean(result.mergedDb.settings.gasUrl || targetGasUrl) && !lastGasError,
+              gasError: lastGasError || undefined,
+            });
+            notifyPendingUrlLinkIfNeeded(true);
             return {
               accessible: true,
               via: 'oauth',
@@ -862,7 +923,7 @@ export default function App() {
           const pubRes = publicFallbackRes || (await readPublicGoogleSheet(targetSheetId, currentDb));
           if (pubRes.accessible) {
             const discoveredGas = (pubRes.mergedDb.settings.gasUrl || '').trim();
-            if (discoveredGas) {
+            if (discoveredGas && discoveredGas !== targetGasUrl) {
               const gasRes =
                 isAdminUnlockedRef.current && unlockedAdminPinRef.current
                   ? await syncAdminViaAppsScript(discoveredGas, unlockedAdminPinRef.current, pubRes.mergedDb)
@@ -877,11 +938,29 @@ export default function App() {
                     spreadsheetUrl:
                       finalDb.settings.spreadsheetUrl ||
                       `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
-                    gasUrl: discoveredGas,
+                    gasUrl: gasRes.accessible ? discoveredGas : targetGasUrl || discoveredGas,
                   },
                 },
-                `${targetSheetId}|${discoveredGas}`
+                `${targetSheetId}|${gasRes.accessible ? discoveredGas : targetGasUrl}`
               );
+              setSheetConnectionStatus({
+                checked: true,
+                ok: true,
+                via: gasRes.accessible ? 'gas' : 'public',
+                sheetOk: true,
+                gasOk: gasRes.accessible,
+                gasStatus: gasRes.httpStatus,
+                gasError: gasRes.accessible ? undefined : gasRes.error || lastGasError || undefined,
+                discoveredGasUrl: discoveredGas,
+                error: gasRes.accessible ? undefined : gasRes.error || lastGasError || undefined,
+                rowCounts: {
+                  staff: finalDb.staff.length,
+                  workloads: finalDb.workloads.length,
+                  leaves: finalDb.leaves.length,
+                  ot: finalDb.ot.length,
+                },
+              });
+              notifyPendingUrlLinkIfNeeded(true);
               return {
                 accessible: true,
                 via: gasRes.accessible ? 'gas' : 'public',
@@ -900,18 +979,62 @@ export default function App() {
                     `https://docs.google.com/spreadsheets/d/${targetSheetId}/edit`,
                 },
               },
-              `${targetSheetId}|`
+              `${targetSheetId}|${targetGasUrl}`
             );
+            setSheetConnectionStatus({
+              checked: true,
+              ok: true,
+              via: 'public',
+              sheetOk: true,
+              gasOk: false,
+              gasStatus: lastGasStatus,
+              gasError: lastGasError || 'ยังไม่ได้เชื่อม Apps Script Web App URL (/exec)',
+              error: lastGasError ? `อ่านชีทได้ แต่ส่งออก via Web App ไม่สำเร็จ: ${lastGasError}` : undefined,
+              rowCounts: {
+                staff: pubRes.mergedDb.staff.length,
+                workloads: pubRes.mergedDb.workloads.length,
+                leaves: pubRes.mergedDb.leaves.length,
+                ot: pubRes.mergedDb.ot.length,
+              },
+            });
+            notifyPendingUrlLinkIfNeeded(true);
             return {
               accessible: true,
               via: 'public',
               staffCount: pubRes.mergedDb.staff.length,
+              error: lastGasError || undefined,
             };
           } else {
             lastSyncedKeyRef.current = syncKey;
+            const combinedError = [lastGasError, pubRes.error].filter(Boolean).join(' • ') || 'ไม่สามารถเชื่อมต่อ Google Sheets ได้';
+            setSheetConnectionStatus({
+              checked: true,
+              ok: false,
+              sheetOk: false,
+              sheetStatus: pubRes.httpStatus,
+              sheetError: pubRes.error,
+              gasOk: false,
+              gasStatus: lastGasStatus,
+              gasError: lastGasError || undefined,
+              error: combinedError,
+            });
+            notifyPendingUrlLinkIfNeeded(false, combinedError);
+            return { accessible: false, error: combinedError };
           }
         }
-        return { accessible: false };
+
+        lastSyncedKeyRef.current = syncKey;
+        const gasOnlyErr = lastGasError || 'ไม่สามารถเชื่อมต่อ Google Apps Script Web App ได้';
+        setSheetConnectionStatus({
+          checked: true,
+          ok: false,
+          gasOk: false,
+          gasStatus: lastGasStatus,
+          gasError: gasOnlyErr,
+          error: gasOnlyErr,
+        });
+        notifyPendingUrlLinkIfNeeded(false, gasOnlyErr);
+        return { accessible: false, error: gasOnlyErr };
       } finally {
         isSyncInFlightRef.current = false;
         setIsSyncingSheet(false);
@@ -1005,8 +1128,10 @@ export default function App() {
       );
       if (!res.accessible) {
         showToast(
-          'ไม่สามารถซิงค์แบบไม่ต้อง Sign in ได้ กรุณาวาง Web App URL (/exec) จาก Code.gs ใน "ตั้งค่าลิงก์ชีท" หรือเปิดสิทธิ์ชีทเป็น "ทุกคนที่มีลิงก์อ่านได้"',
-          'info'
+          res.error
+            ? `เชื่อมต่อ Google Sheets ไม่สำเร็จ: ${res.error}`
+            : 'ไม่สามารถซิงค์แบบไม่ต้อง Sign in ได้ กรุณาวาง Web App URL (/exec) จาก Code.gs ใน "ตั้งค่าลิงก์ชีท" หรือเปิดสิทธิ์ชีทเป็น "ทุกคนที่มีลิงก์อ่านได้"',
+          'error'
         );
         return;
       }
@@ -1030,13 +1155,246 @@ export default function App() {
         );
       } else {
         showToast(
-          `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${res.staffCount || 0} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
-          'success'
+          res.error
+            ? `ดึงข้อมูลจากชีทได้แล้ว (${res.staffCount || 0} คน) แต่ส่งออกข้อมูลยังไม่ได้: ${res.error}`
+            : `ดึงข้อมูลล่าสุดจาก Google Sheet สำเร็จ! (${res.staffCount || 0} คน — หากต้องการส่งข้อมูลกลับอัตโนมัติให้วาง Web App URL ใน "ตั้งค่าลิงก์ชีท")`,
+          res.error ? 'info' : 'success'
         );
       }
     } catch (err: any) {
       console.error('Sync spreadsheet error:', err);
       showToast(`ซิงค์ข้อมูลไม่สำเร็จ: ${err?.message || err}`, 'error');
+    }
+  };
+
+  // Test live Google Sheet & Apps Script Web App reachability
+  const handleTestSheetConnection = async (overrideSheetUrlOrId?: string, overrideGasUrl?: string): Promise<SheetConnectionStatus> => {
+    const rawSheet = (overrideSheetUrlOrId !== undefined ? overrideSheetUrlOrId : dbRef.current.settings.spreadsheetId || '').trim();
+    const idMatch = rawSheet.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const spreadsheetId = idMatch ? idMatch[1] : rawSheet;
+    const gasUrl = (overrideGasUrl !== undefined ? overrideGasUrl : dbRef.current.settings.gasUrl || '').trim();
+
+    const status = await enqueueSheetOperation(() => testGoogleSheetConnection({ spreadsheetId, gasUrl }));
+    setSheetConnectionStatus(status);
+
+    if (status.discoveredGasUrl && status.discoveredGasUrl !== (dbRef.current.settings.gasUrl || '').trim() && status.gasOk) {
+      const nextSettings: SystemSettings = {
+        ...dbRef.current.settings,
+        spreadsheetId: spreadsheetId || dbRef.current.settings.spreadsheetId,
+        gasUrl: status.discoveredGasUrl,
+        isUnlinked: false,
+      };
+      const nextDb = { ...dbRef.current, settings: nextSettings };
+      dbRef.current = nextDb;
+      setDb(nextDb);
+      void propagateServerMutation('saveSettings', { settings: nextSettings });
+    }
+
+    if (status.ok && status.gasOk) {
+      showToast(
+        `เชื่อมต่อ Google Sheet & Web App สำเร็จ! (ชีทมีบุคลากร ${status.rowCounts?.staff ?? 0} คน, ภาระงาน ${status.rowCounts?.workloads ?? 0} แถว)`,
+        'success'
+      );
+    } else if (status.ok) {
+      showToast(
+        status.gasError
+          ? `อ่านชีทได้ แต่ Web App URL (/exec) ยังเขียนข้อมูลไม่ได้: ${status.gasError}`
+          : 'อ่านข้อมูลจาก Google Sheet ได้แล้ว (กรุณาวาง Web App URL /exec เพื่อส่งออกข้อมูล)',
+        'info'
+      );
+    } else {
+      showToast(`เชื่อมต่อ Google Sheet ไม่สำเร็จ: ${status.error || 'กรุณาตรวจสอบลิงก์ชีทและ Web App URL'}`, 'error');
+    }
+    return status;
+  };
+
+  // Full export of ALL local records (workloads, leaves, OT, staff, settings) to Google Sheet
+  const handleExportAllToGoogleSheet = async (overrideGasUrl?: string, overrideSheetId?: string) => {
+    const currentDb = dbRef.current;
+    const targetSheetId = (overrideSheetId || currentDb.settings.spreadsheetId || '').trim();
+    let targetGasUrl = (overrideGasUrl !== undefined ? overrideGasUrl : currentDb.settings.gasUrl || '').trim();
+
+    setIsExportingToSheet(true);
+    try {
+      await enqueueSheetOperation(async () => {
+        // Discover Web App URL from linked Google Sheet Settings if needed
+        if (!targetGasUrl && targetSheetId) {
+          const probe = await testGoogleSheetConnection({ spreadsheetId: targetSheetId, gasUrl: '' });
+          if (probe.discoveredGasUrl) {
+            targetGasUrl = probe.discoveredGasUrl;
+          }
+        }
+
+        if (targetGasUrl) {
+          const res = await exportAllToGoogleSheetViaAppsScript({
+            gasUrl: targetGasUrl,
+            adminPin: isAdminUnlockedRef.current ? unlockedAdminPinRef.current : undefined,
+            db: dbRef.current,
+          });
+          if (res.ok) {
+            dbRef.current = res.mergedDb;
+            setDb(res.mergedDb);
+            lastSyncEpochRef.current = Date.now();
+            lastSyncedKeyRef.current = `${res.mergedDb.settings.spreadsheetId || targetSheetId}|${targetGasUrl}`;
+            setLastSyncedAt(formatSyncTime());
+            setSheetConnectionStatus({
+              checked: true,
+              ok: true,
+              via: 'gas',
+              sheetOk: true,
+              gasOk: true,
+              gasStatus: 200,
+              discoveredGasUrl: targetGasUrl,
+              rowCounts: {
+                staff: res.mergedDb.staff.length,
+                workloads: res.mergedDb.workloads.length,
+                leaves: res.mergedDb.leaves.length,
+                ot: res.mergedDb.ot.length,
+              },
+            });
+            await broadcastSyncedSnapshot(res.mergedDb);
+            const exportedTotal = res.exportedWorkloads + res.exportedLeaves + res.exportedOt;
+            showToast(
+              exportedTotal > 0
+                ? `ส่งออกข้อมูลขึ้น Google Sheet สำเร็จ! (ภาระงาน +${res.exportedWorkloads}, วันลา +${res.exportedLeaves}, OT +${res.exportedOt}, บุคลากร ${res.staffCount} คน)`
+                : `ซิงค์และส่งออกข้อมูลทั้งหมดไปยัง Google Sheet เรียบร้อยแล้ว! (บุคลากร ${res.staffCount} คน)`,
+              'success'
+            );
+            return;
+          }
+
+          // Fallback to OAuth if logged in
+          const token = await getPassiveGoogleToken();
+          if (token && targetSheetId) {
+            const oauthRes = await syncAllWithGoogleSheet(token, targetSheetId, dbRef.current);
+            dbRef.current = oauthRes.mergedDb;
+            setDb(oauthRes.mergedDb);
+            lastSyncEpochRef.current = Date.now();
+            setLastSyncedAt(formatSyncTime());
+            await broadcastSyncedSnapshot(oauthRes.mergedDb);
+            setSheetConnectionStatus({
+              checked: true,
+              ok: true,
+              via: 'oauth',
+              sheetOk: true,
+              gasOk: false,
+              gasError: res.error,
+            });
+            showToast(
+              `ส่งออกข้อมูลขึ้น Google Sheet ผ่านบัญชี Google สำเร็จ! (ส่งขึ้น ${oauthRes.pushedWorkloads} รายการ)`,
+              'success'
+            );
+            return;
+          }
+
+          setSheetConnectionStatus({
+            checked: true,
+            ok: false,
+            gasOk: false,
+            gasStatus: res.httpStatus,
+            gasError: res.error,
+            error: res.error,
+          });
+          showToast(`ส่งออกข้อมูลไปยัง Google Sheet ไม่สำเร็จ: ${res.error || 'กรุณาตรวจสอบ Web App URL (/exec)'}`, 'error');
+          return;
+        }
+
+        if (targetSheetId) {
+          const token = await getPassiveGoogleToken();
+          if (token) {
+            const oauthRes = await syncAllWithGoogleSheet(token, targetSheetId, dbRef.current);
+            dbRef.current = oauthRes.mergedDb;
+            setDb(oauthRes.mergedDb);
+            lastSyncEpochRef.current = Date.now();
+            setLastSyncedAt(formatSyncTime());
+            await broadcastSyncedSnapshot(oauthRes.mergedDb);
+            setSheetConnectionStatus({ checked: true, ok: true, via: 'oauth', sheetOk: true });
+            showToast(
+              `ส่งออกข้อมูลขึ้น Google Sheet สำเร็จ! (ส่งขึ้น ${oauthRes.pushedWorkloads} รายการ)`,
+              'success'
+            );
+            return;
+          }
+          const pubProbe = await testGoogleSheetConnection({ spreadsheetId: targetSheetId, gasUrl: '' });
+          setSheetConnectionStatus(pubProbe);
+          showToast(
+            pubProbe.ok
+              ? 'ยังไม่ได้วาง Apps Script Web App URL (/exec) จึงอ่านได้เฉพาะข้อมูล — กรุณาคัดลอก Code.gs ไป Deploy เป็น Web App แล้วนำลิงก์ /exec มาวางเพื่อส่งออกข้อมูล'
+              : `ไม่พบ Google Sheet หรือยังไม่ได้เปิดสิทธิ์: ${pubProbe.error || ''}`,
+            'error'
+          );
+          return;
+        }
+
+        showToast('กรุณาวางลิงก์ Google Sheets และ Apps Script Web App URL (/exec) ก่อนส่งออกข้อมูล', 'error');
+      });
+    } finally {
+      setIsExportingToSheet(false);
+    }
+  };
+
+  // Save Sheet URL/ID + GAS Web App URL and immediately verify & export/sync
+  const handleSaveSheetLinkConfig = async (rawSheetInput: string, rawGasInput: string) => {
+    if (!isAdmin) {
+      showToast('สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin PIN) เท่านั้น', 'error');
+      return;
+    }
+    const raw = rawSheetInput.trim();
+    const trimmedGas = rawGasInput.trim();
+    const baseDb = dbRef.current;
+
+    if (!raw && !trimmedGas) {
+      const unlinkedSettings: SystemSettings = {
+        ...baseDb.settings,
+        spreadsheetId: undefined,
+        spreadsheetUrl: undefined,
+        gasUrl: undefined,
+        isUnlinked: true,
+      };
+      const dirtyVer = markSettingsDirty();
+      mutationSeqRef.current += 1;
+      const nextDb = { ...baseDb, settings: unlinkedSettings };
+      dbRef.current = nextDb;
+      setDb(nextDb);
+      setSheetConnectionStatus({ checked: false, ok: false });
+      void propagateServerMutation('saveSettings', { settings: unlinkedSettings });
+      clearSettingsDirty(dirtyVer);
+      showToast('ยกเลิกการเชื่อมโยง Google Sheet แล้ว', 'info');
+      return;
+    }
+
+    const idMatch = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const extractedId = raw ? (idMatch ? idMatch[1] : raw) : undefined;
+    const normalizedUrl = raw
+      ? raw.startsWith('http')
+        ? raw
+        : `https://docs.google.com/spreadsheets/d/${extractedId}/edit`
+      : undefined;
+
+    const updatedSettings: SystemSettings = {
+      ...baseDb.settings,
+      spreadsheetId: extractedId,
+      spreadsheetUrl: normalizedUrl,
+      gasUrl: trimmedGas || '',
+      isUnlinked: false,
+    };
+
+    const dirtyVer = markSettingsDirty();
+    mutationSeqRef.current += 1;
+    const nextDb = { ...baseDb, settings: updatedSettings };
+    dbRef.current = nextDb;
+    setDb(nextDb);
+    void propagateServerMutation('saveSettings', { settings: updatedSettings });
+
+    if (trimmedGas) {
+      await handleExportAllToGoogleSheet(trimmedGas, extractedId);
+      clearSettingsDirty(dirtyVer);
+    } else if (extractedId) {
+      const status = await handleTestSheetConnection(extractedId, '');
+      if (status.ok) {
+        await handleSyncSpreadsheet(extractedId);
+      }
+      clearSettingsDirty(dirtyVer);
     }
   };
 
@@ -1290,27 +1648,29 @@ export default function App() {
         const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
         if (targetGasUrl) {
-          const [wOk, lOk, oOk] = await Promise.all([
-            appendViaAppsScript(targetGasUrl, 'appendWorkload', entry).then((ok) => {
-              if (ok) markWorkloadOutboxSynced([entry]);
-              return ok;
+          const [wRes, lRes, oRes] = await Promise.all([
+            appendViaAppsScriptDetailed(targetGasUrl, 'appendWorkload', entry).then((r) => {
+              if (r.ok) markWorkloadOutboxSynced([entry]);
+              return r;
             }),
             newLeaveEntries.length > 0
-              ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-                  if (ok) markLeaveOutboxSynced(newLeaveEntries);
-                  return ok;
+              ? appendViaAppsScriptDetailed(targetGasUrl, 'appendLeave', newLeaveEntries).then((r) => {
+                  if (r.ok) markLeaveOutboxSynced(newLeaveEntries);
+                  return r;
                 })
-              : Promise.resolve(true),
+              : Promise.resolve({ ok: true } as { ok: boolean; httpStatus?: number; error?: string }),
             newOtEntries.length > 0
-              ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-                  if (ok) markOtOutboxSynced(newOtEntries);
-                  return ok;
+              ? appendViaAppsScriptDetailed(targetGasUrl, 'appendOT', newOtEntries).then((r) => {
+                  if (r.ok) markOtOutboxSynced(newOtEntries);
+                  return r;
                 })
-              : Promise.resolve(true),
+              : Promise.resolve({ ok: true } as { ok: boolean; httpStatus?: number; error?: string }),
           ]);
           const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-          if (!(wOk && lOk && oOk) && !syncRes.accessible) {
-            showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+          const failedAppend = [wRes, lRes, oRes].find((r) => !r.ok);
+          if (failedAppend && !syncRes.accessible) {
+            const errDetail = failedAppend.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets';
+            showToast(`บันทึกในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${errDetail}`, 'error');
           }
         } else if (targetSheetId) {
           const token = await getAccessToken();
@@ -1333,7 +1693,7 @@ export default function App() {
             await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
           } else {
             await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-            showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+            showToast('บันทึกข้อมูลไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
           }
         }
       });
@@ -1517,27 +1877,29 @@ export default function App() {
         const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
         if (targetGasUrl) {
-          const [wOk, lOk, oOk] = await Promise.all([
-            appendViaAppsScript(targetGasUrl, 'appendWorkload', entries).then((ok) => {
-              if (ok) markWorkloadOutboxSynced(entries);
-              return ok;
+          const [wRes, lRes, oRes] = await Promise.all([
+            appendViaAppsScriptDetailed(targetGasUrl, 'appendWorkload', entries).then((r) => {
+              if (r.ok) markWorkloadOutboxSynced(entries);
+              return r;
             }),
             newLeaveEntries.length > 0
-              ? appendViaAppsScript(targetGasUrl, 'appendLeave', newLeaveEntries).then((ok) => {
-                  if (ok) markLeaveOutboxSynced(newLeaveEntries);
-                  return ok;
+              ? appendViaAppsScriptDetailed(targetGasUrl, 'appendLeave', newLeaveEntries).then((r) => {
+                  if (r.ok) markLeaveOutboxSynced(newLeaveEntries);
+                  return r;
                 })
-              : Promise.resolve(true),
+              : Promise.resolve({ ok: true } as { ok: boolean; httpStatus?: number; error?: string }),
             newOtEntries.length > 0
-              ? appendViaAppsScript(targetGasUrl, 'appendOT', newOtEntries).then((ok) => {
-                  if (ok) markOtOutboxSynced(newOtEntries);
-                  return ok;
+              ? appendViaAppsScriptDetailed(targetGasUrl, 'appendOT', newOtEntries).then((r) => {
+                  if (r.ok) markOtOutboxSynced(newOtEntries);
+                  return r;
                 })
-              : Promise.resolve(true),
+              : Promise.resolve({ ok: true } as { ok: boolean; httpStatus?: number; error?: string }),
           ]);
           const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-          if (!(wOk && lOk && oOk) && !syncRes.accessible) {
-            showToast('บันทึกในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+          const failedAppend = [wRes, lRes, oRes].find((r) => !r.ok);
+          if (failedAppend && !syncRes.accessible) {
+            const errDetail = failedAppend.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets';
+            showToast(`บันทึกในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${errDetail}`, 'error');
           }
         } else if (targetSheetId) {
           const token = await getAccessToken();
@@ -1560,7 +1922,7 @@ export default function App() {
             await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
           } else {
             await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-            showToast('บันทึกข้อมูลไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+            showToast('บันทึกข้อมูลไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
           }
         }
       });
@@ -2149,11 +2511,14 @@ export default function App() {
       const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
       if (targetGasUrl) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendLeave', leave);
-        if (ok) markLeaveOutboxSynced([leave]);
+        const appendRes = await appendViaAppsScriptDetailed(targetGasUrl, 'appendLeave', leave);
+        if (appendRes.ok) markLeaveOutboxSynced([leave]);
         const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-        if (!ok && !syncRes.accessible) {
-          showToast('บันทึกวันลาในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+        if (!appendRes.ok && !syncRes.accessible) {
+          showToast(
+            `บันทึกวันลาในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${appendRes.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets'}`,
+            'error'
+          );
         }
       } else if (targetSheetId) {
         const token = await getAccessToken();
@@ -2163,7 +2528,7 @@ export default function App() {
           await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
         } else {
           await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-          showToast('บันทึกวันลาไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          showToast('บันทึกวันลาไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
         }
       }
     });
@@ -2361,11 +2726,14 @@ export default function App() {
       const targetSheetId = (dbRef.current.settings.spreadsheetId || '').trim();
 
       if (targetGasUrl) {
-        const ok = await appendViaAppsScript(targetGasUrl, 'appendOT', validRecords);
-        if (ok) markOtOutboxSynced(validRecords);
+        const appendRes = await appendViaAppsScriptDetailed(targetGasUrl, 'appendOT', validRecords);
+        if (appendRes.ok) markOtOutboxSynced(validRecords);
         const syncRes = await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-        if (!ok && !syncRes.accessible) {
-          showToast('บันทึกเวร OT ในเครื่องแล้ว (รอซิงค์เข้า Google Sheet เมื่อเชื่อมต่อกลับมาได้)', 'info');
+        if (!appendRes.ok && !syncRes.accessible) {
+          showToast(
+            `บันทึกเวร OT ในระบบแล้ว แต่ส่งขึ้น Google Sheet ไม่สำเร็จ: ${appendRes.error || syncRes.error || 'ตรวจสอบการเชื่อมต่อ Google Sheets'}`,
+            'error'
+          );
         }
       } else if (targetSheetId) {
         const token = await getAccessToken();
@@ -2380,7 +2748,7 @@ export default function App() {
           await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
         } else {
           await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
-          showToast('บันทึกเวร OT ไว้ในเครื่องนี้แล้ว (ยังไม่ได้เชื่อม Web App URL /exec หรือ Sign in Google จึงยังไม่ขึ้น Google Sheet)', 'info');
+          showToast('บันทึกเวร OT ไว้ในระบบแล้ว (กรุณาวาง Web App URL /exec ใน "ตั้งค่าลิงก์ชีท" เพื่อให้ส่งขึ้น Google Sheet อัตโนมัติ)', 'info');
         }
       }
     });
@@ -3854,18 +4222,20 @@ export default function App() {
 
       {/* Floating Toast Message */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 animate-bounce">
+        <div className="fixed bottom-6 right-6 z-50 max-w-md animate-bounce">
           <div className={`px-4 py-3 rounded-2xl shadow-xl border flex items-center gap-2.5 text-xs font-semibold ${
             toastMessage.type === 'success' 
               ? 'bg-emerald-900 text-white border-emerald-700' 
               : toastMessage.type === 'error'
               ? 'bg-red-900 text-white border-red-700'
-              : 'bg-slate-900 text-white border-slate-700'
+              : 'bg-slate-900 text-white border-cyan-700/70'
           }`}>
             {toastMessage.type === 'success' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            ) : (
+            ) : toastMessage.type === 'error' ? (
               <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            ) : (
+              <Info className="w-4 h-4 text-cyan-400 shrink-0" />
             )}
             <span>{toastMessage.text}</span>
             <button 
@@ -4041,6 +4411,11 @@ export default function App() {
             onResetData={handleResetData}
             onSetupSpreadsheet={handleSetupSpreadsheet}
             onSyncSpreadsheet={() => handleSyncSpreadsheet()}
+            onExportAllToGoogleSheet={() => handleExportAllToGoogleSheet()}
+            onTestSheetConnection={handleTestSheetConnection}
+            onSaveSheetLinkConfig={handleSaveSheetLinkConfig}
+            sheetConnectionStatus={sheetConnectionStatus}
+            isExportingToSheet={isExportingToSheet}
             isSettingUpSheet={isSettingUpSheet}
             isSyncingSheet={isSyncingSheet}
             onCopyShareLink={handleCopyShareLink}
