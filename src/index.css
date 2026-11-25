@@ -6,11 +6,332 @@
     background-color: #f8fafc;
     color: #1e293b;
     -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
   }
 }
 
 .font-sarabun {
   font-family: 'Sarabun', 'Prompt', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Screen-Only Liquid Glass Surface Utilities (iOS/iPadOS 27 + macOS 27 Golden Gate) */
+@media screen {
+  .ios-liquid-canvas {
+    position: relative;
+  }
+
+  .ios-glass-bar {
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.80) 0%, rgba(255, 255, 255, 0.58) 100%);
+    -webkit-backdrop-filter: blur(28px) saturate(195%);
+    backdrop-filter: blur(28px) saturate(195%);
+    border: 1px solid rgba(255, 255, 255, 0.84);
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.96),
+      inset 0 -1px 0 rgba(15, 23, 42, 0.04),
+      0 10px 30px -12px rgba(15, 23, 42, 0.14),
+      0 2px 8px -2px rgba(15, 23, 42, 0.06);
+  }
+
+  .ios-glass-dock {
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.82) 0%, rgba(246, 250, 255, 0.66) 100%);
+    -webkit-backdrop-filter: blur(34px) saturate(210%);
+    backdrop-filter: blur(34px) saturate(210%);
+    border: 1px solid rgba(255, 255, 255, 0.88);
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.98),
+      inset 0 -1px 0 rgba(15, 23, 42, 0.06),
+      0 16px 38px -12px rgba(15, 23, 42, 0.20),
+      0 4px 12px -4px rgba(15, 23, 42, 0.08);
+    padding-bottom: max(0.375rem, env(safe-area-inset-bottom));
+  }
+
+  .ios-glass-pill {
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.88) 0%, rgba(255, 255, 255, 0.62) 100%);
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    backdrop-filter: blur(18px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.96),
+      0 3px 10px -4px rgba(15, 23, 42, 0.12);
+  }
+
+  .ios-glass-toast {
+    -webkit-backdrop-filter: blur(30px) saturate(200%);
+    backdrop-filter: blur(30px) saturate(200%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.28),
+      0 18px 40px -12px rgba(15, 23, 42, 0.36);
+  }
+
+  /* macOS 27 Golden Gate Desktop Surfaces */
+  .macos-gg-menubar {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(248, 251, 255, 0.56) 100%);
+    -webkit-backdrop-filter: blur(28px) saturate(200%);
+    backdrop-filter: blur(28px) saturate(200%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.72);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.88),
+      0 4px 18px -8px rgba(15, 23, 42, 0.10);
+  }
+
+  .macos-gg-window {
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.68) 0%, rgba(248, 251, 255, 0.54) 100%);
+    -webkit-backdrop-filter: blur(34px) saturate(190%);
+    backdrop-filter: blur(34px) saturate(190%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: 26px;
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.96),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.55),
+      0 26px 64px -22px rgba(15, 23, 42, 0.18),
+      0 6px 20px -8px rgba(15, 23, 42, 0.08);
+  }
+
+  .macos-gg-window-toolbar {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.44) 100%);
+    border-bottom: 1px solid rgba(15, 23, 42, 0.07);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  }
+
+  .macos-gg-segmented {
+    background: rgba(15, 23, 42, 0.055);
+    border: 1px solid rgba(255, 255, 255, 0.68);
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+  }
+
+  .macos-gg-window-body {
+    padding: 1.25rem;
+  }
+
+  .macos-gg-dock {
+    background: linear-gradient(165deg, rgba(255, 255, 255, 0.76) 0%, rgba(246, 250, 255, 0.56) 100%);
+    -webkit-backdrop-filter: blur(38px) saturate(215%);
+    backdrop-filter: blur(38px) saturate(215%);
+    border: 1px solid rgba(255, 255, 255, 0.86);
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.98),
+      inset 0 -1px 0 rgba(15, 23, 42, 0.06),
+      0 22px 48px -14px rgba(15, 23, 42, 0.24),
+      0 4px 14px -4px rgba(15, 23, 42, 0.10);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Responsive Device Class Helpers:
+     - Mobile & Tablet (Portrait + Landscape up to 1279px, plus touch tablets up to 1399px) -> .ui-mobile-tablet
+     - PC / MacBook Desktop (>= 1280px fine pointer or >= 1400px) -> .ui-pc-desktop */
+  .ui-mobile-tablet {
+    display: none;
+  }
+
+  .ui-toast-anchor {
+    top: 3.15rem;
+    right: 1.5rem;
+    bottom: auto;
+    left: auto;
+  }
+}
+
+/* Mobile & Tablet (Portrait & Landscape): iPhone / iPadOS 27 Liquid Glass */
+@media screen and (max-width: 1279px), screen and (hover: none) and (pointer: coarse) and (max-width: 1399px) {
+  .ui-mobile-tablet {
+    display: block;
+  }
+
+  .ui-pc-desktop {
+    display: none !important;
+  }
+
+  .ui-toast-anchor {
+    top: auto;
+    bottom: 6rem;
+    left: 0.75rem;
+    right: 0.75rem;
+  }
+
+  .ios-liquid-canvas {
+    background:
+      radial-gradient(92% 48% at 10% 4%, rgba(56, 189, 248, 0.19) 0%, rgba(56, 189, 248, 0) 62%),
+      radial-gradient(85% 52% at 92% 16%, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0) 60%),
+      radial-gradient(95% 55% at 50% 88%, rgba(99, 102, 241, 0.12) 0%, rgba(99, 102, 241, 0) 64%),
+      linear-gradient(165deg, #eaf3fb 0%, #f3f7fc 48%, #e8f5f1 100%);
+  }
+
+  /* Strip desktop window frame on tablet landscape */
+  .macos-gg-window {
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+
+  .macos-gg-window-body {
+    padding: 0 !important;
+  }
+
+  /* Frosted Liquid Glass Cards (excluding printable paper sheets & their wrappers) */
+  .ios-liquid-canvas main .bg-white.rounded-2xl:not(.print-portrait-sheet):not(.print-landscape-sheet),
+  .ios-liquid-canvas main .bg-white.rounded-3xl:not(.print-portrait-sheet):not(.print-landscape-sheet),
+  .ios-liquid-canvas main .bg-white.rounded-xl:not(.print-portrait-sheet):not(.print-landscape-sheet) {
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0.64) 100%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    backdrop-filter: blur(22px) saturate(180%);
+    border-color: rgba(255, 255, 255, 0.84);
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.94),
+      0 8px 26px -12px rgba(15, 23, 42, 0.12),
+      0 0 0 1px rgba(15, 23, 42, 0.045);
+    border-radius: 22px;
+  }
+
+  /* Tactile iOS / iPadOS 27 Glass Form Wells & Touch Targets */
+  .ios-liquid-canvas main input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .ios-liquid-canvas main select,
+  .ios-liquid-canvas main textarea {
+    min-height: 42px;
+    border-radius: 14px;
+    background-color: rgba(255, 255, 255, 0.84);
+    border-color: rgba(148, 163, 184, 0.34);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1), background-color 160ms ease;
+  }
+
+  .ios-liquid-canvas main input:not([type="checkbox"]):not([type="radio"]):focus,
+  .ios-liquid-canvas main select:focus,
+  .ios-liquid-canvas main textarea:focus {
+    background-color: rgba(255, 255, 255, 0.96);
+  }
+
+  .ios-liquid-canvas button {
+    transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), opacity 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  }
+
+  .ios-liquid-canvas button:active:not(:disabled) {
+    transform: scale(0.975);
+  }
+
+  /* Modals & Popovers as iOS / iPadOS 27 Liquid Glass Sheets */
+  .ios-liquid-canvas div.fixed.inset-0 > div.bg-white,
+  .ios-liquid-canvas div.fixed.z-\[9999\].bg-white {
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.92) 0%, rgba(248, 252, 255, 0.86) 100%);
+    -webkit-backdrop-filter: blur(30px) saturate(195%);
+    backdrop-filter: blur(30px) saturate(195%);
+    border-color: rgba(255, 255, 255, 0.88);
+    border-radius: 26px;
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.98),
+      0 24px 54px -16px rgba(15, 23, 42, 0.28);
+  }
+
+  .ios-liquid-canvas div.fixed.inset-0 > div.bg-white {
+    max-height: 90dvh;
+    overflow-y: auto;
+  }
+
+  .ios-liquid-canvas .print-portrait-sheet,
+  .ios-liquid-canvas .print-landscape-sheet {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-radius: 12px !important;
+  }
+}
+
+@media screen and (min-width: 640px) and (max-width: 1279px), screen and (min-width: 640px) and (hover: none) and (pointer: coarse) and (max-width: 1399px) {
+  .ui-toast-anchor {
+    left: auto;
+    right: 1.5rem;
+  }
+}
+
+/* PC / MacBook Desktop: macOS 27 Golden Gate Liquid Glass */
+@media screen and (min-width: 1280px) and (hover: hover), screen and (min-width: 1400px) {
+  .ios-liquid-canvas {
+    background:
+      radial-gradient(62% 52% at 14% 8%, rgba(56, 189, 248, 0.20) 0%, rgba(56, 189, 248, 0) 64%),
+      radial-gradient(58% 48% at 88% 10%, rgba(245, 158, 11, 0.16) 0%, rgba(245, 158, 11, 0) 60%),
+      radial-gradient(52% 46% at 78% 72%, rgba(244, 114, 182, 0.08) 0%, rgba(244, 114, 182, 0) 64%),
+      radial-gradient(64% 56% at 22% 84%, rgba(16, 185, 129, 0.16) 0%, rgba(16, 185, 129, 0) 62%),
+      linear-gradient(155deg, #e7f0f8 0%, #f2f6fa 44%, #f9f1e8 76%, #e7f4ef 100%);
+  }
+
+  .ios-liquid-canvas main .bg-white.rounded-2xl:not(.print-portrait-sheet):not(.print-landscape-sheet),
+  .ios-liquid-canvas main .bg-white.rounded-3xl:not(.print-portrait-sheet):not(.print-landscape-sheet),
+  .ios-liquid-canvas main .bg-white.rounded-xl:not(.print-portrait-sheet):not(.print-landscape-sheet) {
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.86) 0%, rgba(255, 255, 255, 0.72) 100%);
+    -webkit-backdrop-filter: blur(20px) saturate(175%);
+    backdrop-filter: blur(20px) saturate(175%);
+    border-color: rgba(255, 255, 255, 0.88);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 8px 24px -12px rgba(15, 23, 42, 0.10),
+      0 0 0 1px rgba(15, 23, 42, 0.045);
+    border-radius: 18px;
+  }
+
+  .ios-liquid-canvas main input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .ios-liquid-canvas main select,
+  .ios-liquid-canvas main textarea {
+    border-radius: 10px;
+    background-color: rgba(255, 255, 255, 0.86);
+    border-color: rgba(148, 163, 184, 0.36);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    transition: border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1), background-color 150ms ease;
+  }
+
+  .ios-liquid-canvas main input:not([type="checkbox"]):not([type="radio"]):focus,
+  .ios-liquid-canvas main select:focus,
+  .ios-liquid-canvas main textarea:focus {
+    background-color: #ffffff;
+  }
+
+  .ios-liquid-canvas button {
+    transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .ios-liquid-canvas div.fixed.inset-0 > div.bg-white,
+  .ios-liquid-canvas div.fixed.z-\[9999\].bg-white {
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.94) 0%, rgba(249, 251, 255, 0.88) 100%);
+    -webkit-backdrop-filter: blur(28px) saturate(190%);
+    backdrop-filter: blur(28px) saturate(190%);
+    border-color: rgba(255, 255, 255, 0.9);
+    border-radius: 22px;
+    box-shadow:
+      inset 0 1.5px 0 rgba(255, 255, 255, 0.98),
+      0 26px 60px -16px rgba(15, 23, 42, 0.28);
+  }
+
+  .ios-liquid-canvas .print-portrait-sheet,
+  .ios-liquid-canvas .print-landscape-sheet {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-radius: 10px !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ios-liquid-canvas button,
+  .ios-glass-dock *,
+  .macos-gg-dock *,
+  .ios-glass-toast {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 @media print {
@@ -54,6 +375,18 @@
 
   .no-print {
     display: none !important;
+  }
+
+  .ios-liquid-canvas,
+  .macos-gg-window,
+  .macos-gg-window-body {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
   }
 
   .print-only {

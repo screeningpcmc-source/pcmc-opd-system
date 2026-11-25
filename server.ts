@@ -774,15 +774,151 @@ async function createAppServer(): Promise<void> {
     ].join('|');
   }
 
+  function normalizeStaffNameServer(name: any): string {
+    return String(name || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isTrainingLeaveServer(leaveType: any): boolean {
+    const lt = String(leaveType || '').trim();
+    return lt.includes('อบรม') || lt.includes('ประชุม');
+  }
+
+  function parseLeavePeriodServer(note: any): string {
+    const text = String(note || '');
+    if (text.includes('ครึ่งวันเช้า')) return 'ครึ่งวันเช้า';
+    if (text.includes('ครึ่งวันบ่าย')) return 'ครึ่งวันบ่าย';
+    return '';
+  }
+
+  function normalizeLeaveRangeServer(startRaw: any, endRaw: any): { start: string; end: string } {
+    const s = normalizeDateYmdServer(startRaw);
+    const e = normalizeDateYmdServer(endRaw || startRaw) || s;
+    if (!s) return { start: '', end: '' };
+    return s <= e ? { start: s, end: e } : { start: e, end: s };
+  }
+
+  function isServerLeaveConflict(existing: any, candidate: any, excludeId?: string): boolean {
+    if (!existing || !candidate) return false;
+    if (excludeId && String(existing.id || '').trim() === excludeId) return false;
+    const exName = normalizeStaffNameServer(existing.staffName);
+    const caName = normalizeStaffNameServer(candidate.staffName);
+    if (!exName || !caName || exName !== caName) return false;
+
+    const exRange = normalizeLeaveRangeServer(existing.startDate, existing.endDate);
+    const caRange = normalizeLeaveRangeServer(candidate.startDate, candidate.endDate);
+    if (!exRange.start || !caRange.start) return false;
+    if (!(exRange.start <= caRange.end && exRange.end >= caRange.start)) return false;
+
+    const exIsTrain = isTrainingLeaveServer(existing.leaveType);
+    const caIsTrain = isTrainingLeaveServer(candidate.leaveType);
+    if (exIsTrain === caIsTrain) return true;
+
+    const exDays = Number(existing.days) || 1;
+    const caDays = Number(candidate.days) || 1;
+    const exPeriod = parseLeavePeriodServer(existing.note);
+    const caPeriod = parseLeavePeriodServer(candidate.note);
+    if (
+      exRange.start === exRange.end &&
+      caRange.start === caRange.end &&
+      exDays === 0.5 &&
+      caDays === 0.5 &&
+      exPeriod &&
+      caPeriod &&
+      exPeriod !== caPeriod
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  function scoreServerLeaveQuality(l: any): number {
+    let score = 0;
+    if (l?.lastEditedAt) score += 2000;
+    if (l?.lastEditReason) score += 200;
+    const cleanNote = String(l?.note || '')
+      .replace(/^\s*\[(?:ครึ่งวันเช้า|ครึ่งวันบ่าย)\]\s*/, '')
+      .replace(/\s*\((?:ครึ่งวันเช้า|ครึ่งวันบ่าย)\)\s*$/, '')
+      .trim();
+    if (cleanNote) {
+      const isAutoNote =
+        /^บันทึกอัตโนมัติจากห้องตรวจ/.test(cleanNote) ||
+        /^ไปอบรม\/ประชุม\s*\(บันทึกจาก/.test(cleanNote);
+      score += isAutoNote ? 10 : 300;
+    }
+    const id = String(l?.id || '').trim();
+    if (id && !/^(LV-AUTO-|TRN-AUTO-|LV-GS-|LV-CHK-)/.test(id)) {
+      score += 50;
+    } else if (/^(LV-AUTO-|TRN-AUTO-)/.test(id)) {
+      score += 20;
+    }
+    score += Math.min(30, Number(l?.days || 0));
+    if (String(l?.clinic || '').trim()) score += 5;
+    return score;
+  }
+
+  function deduplicateServerLeaves(items: any[]): any[] {
+    if (!Array.isArray(items) || items.length === 0) return [];
+    const seenIds = new Set<string>();
+    const keptByStaff = new Map<string, number[]>();
+    const result: any[] = [];
+
+    for (const rawItem of items) {
+      if (!rawItem || typeof rawItem !== 'object') continue;
+      const staffName = normalizeStaffNameServer(rawItem.staffName);
+      const range = normalizeLeaveRangeServer(rawItem.startDate, rawItem.endDate);
+      if (!staffName || !range.start) continue;
+
+      const item = {
+        ...rawItem,
+        staffName,
+        startDate: range.start,
+        endDate: range.end,
+        clinic: String(rawItem.clinic || '').trim(),
+        leaveType: String(rawItem.leaveType || 'ลาป่วย').trim(),
+        days: Number(rawItem.days) > 0 ? Number(rawItem.days) : 1,
+        note: String(rawItem.note || '').trim(),
+      };
+
+      const cleanId = String(item.id || '').trim();
+      if (cleanId && seenIds.has(cleanId)) continue;
+
+      const indices = keptByStaff.get(staffName) || [];
+      const conflictIdx = indices.find((idx) => isServerLeaveConflict(result[idx], item));
+
+      if (conflictIdx !== undefined) {
+        const existing = result[conflictIdx];
+        const itemScore = scoreServerLeaveQuality(item);
+        const exScore = scoreServerLeaveQuality(existing);
+        const itemEdited = String(item.lastEditedAt || '');
+        const exEdited = String(existing.lastEditedAt || '');
+        if (itemScore > exScore || (itemScore === exScore && itemEdited > exEdited)) {
+          result[conflictIdx] = item;
+        }
+        if (cleanId) seenIds.add(cleanId);
+        continue;
+      }
+
+      if (cleanId) seenIds.add(cleanId);
+      const newIdx = result.length;
+      result.push(item);
+      indices.push(newIdx);
+      keptByStaff.set(staffName, indices);
+    }
+
+    return result;
+  }
+
   function serverLeaveKey(l: any): string {
+    const range = normalizeLeaveRangeServer(l?.startDate, l?.endDate);
+    const isTrain = isTrainingLeaveServer(l?.leaveType);
+    const daysNum = Number(l?.days || 1);
+    const period = daysNum === 0.5 ? parseLeavePeriodServer(l?.note) : '';
     return [
-      normalizeDateYmdServer(l?.startDate),
-      normalizeDateYmdServer(l?.endDate || l?.startDate),
-      String(l?.staffName || '').trim(),
-      String(l?.clinic || '').trim(),
-      String(l?.leaveType || '').trim(),
-      Number(l?.days || 1),
-      String(l?.note || '').trim(),
+      range.start,
+      range.end,
+      normalizeStaffNameServer(l?.staffName),
+      isTrain ? 'TRAIN' : 'LEAVE',
+      ...(period ? [period] : []),
     ].join('|');
   }
 
@@ -852,9 +988,10 @@ async function createAppServer(): Promise<void> {
     const rawVer = Number(raw?.version);
     const rawWorkloads = Array.isArray(raw?.workloads) ? raw.workloads : [];
     const dedupedWorkloads = deduplicateServerWorkloads(rawWorkloads);
+    const dedupedLeaves = deduplicateServerLeaves(Array.isArray(raw?.leaves) ? raw.leaves : []);
     const hasSeedData =
       dedupedWorkloads.length > 0 ||
-      (Array.isArray(raw?.leaves) && raw.leaves.length > 0) ||
+      dedupedLeaves.length > 0 ||
       (Array.isArray(raw?.ot) && raw.ot.length > 0) ||
       (Array.isArray(raw?.staff) && raw.staff.length > 0);
     return {
@@ -862,7 +999,7 @@ async function createAppServer(): Promise<void> {
       updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : new Date().toISOString(),
       staff: Array.isArray(raw?.staff) ? raw.staff : [],
       workloads: dedupedWorkloads,
-      leaves: Array.isArray(raw?.leaves) ? raw.leaves : [],
+      leaves: dedupedLeaves,
       ot: Array.isArray(raw?.ot) ? raw.ot : [],
       auditLogs: Array.isArray(raw?.auditLogs) ? raw.auditLogs.slice(0, 500) : [],
       settings: raw?.settings && typeof raw.settings === 'object' ? raw.settings : {},
@@ -1076,23 +1213,50 @@ async function createAppServer(): Promise<void> {
         }
       };
 
-      const addUniqueLeaves = (items: any[]) => {
+      const addUniqueLeaves = (items: any[]): { added: any[]; conflicts: any[] } => {
         const added: any[] = [];
-        for (const item of items) {
-          if (!item || !item.staffName || !item.startDate) continue;
+        const conflicts: any[] = [];
+        for (const rawItem of items) {
+          if (!rawItem || !rawItem.staffName || !rawItem.startDate) continue;
+          const range = normalizeLeaveRangeServer(rawItem.startDate, rawItem.endDate);
+          if (!range.start) continue;
+          const item = {
+            ...rawItem,
+            staffName: normalizeStaffNameServer(rawItem.staffName),
+            startDate: range.start,
+            endDate: range.end,
+            clinic: String(rawItem.clinic || '').trim(),
+            leaveType: String(rawItem.leaveType || 'ลาป่วย').trim(),
+            days: Number(rawItem.days) > 0 ? Number(rawItem.days) : 1,
+            note: String(rawItem.note || '').trim(),
+          };
           const lKey = serverLeaveKey(item);
-          const dup = next.leaves.some(
-            (ex) => (ex.id && item.id && ex.id === item.id) || serverLeaveKey(ex) === lKey
-          );
-          if (!dup) {
+          const cleanId = String(item.id || '').trim();
+          const conflictItem =
+            next.leaves.find(
+              (ex) =>
+                (cleanId && ex.id && String(ex.id).trim() === cleanId) ||
+                serverLeaveKey(ex) === lKey ||
+                isServerLeaveConflict(ex, item)
+            ) ||
+            added.find(
+              (ex) =>
+                (cleanId && ex.id && String(ex.id).trim() === cleanId) ||
+                serverLeaveKey(ex) === lKey ||
+                isServerLeaveConflict(ex, item)
+            );
+          if (!conflictItem) {
             added.push(item);
             delete next.tombstones.leaves[lKey];
-            if (item.id) delete next.tombstones.leaves[`id:${item.id}`];
+            if (cleanId) delete next.tombstones.leaves[`id:${cleanId}`];
+          } else {
+            conflicts.push(conflictItem);
           }
         }
         if (added.length > 0) {
-          next.leaves = [...added, ...next.leaves];
+          next.leaves = deduplicateServerLeaves([...added, ...next.leaves]);
         }
+        return { added, conflicts };
       };
 
       const addUniqueOt = (items: any[]) => {
@@ -1164,18 +1328,49 @@ async function createAppServer(): Promise<void> {
           break;
         }
         case 'addLeave': {
-          if (payload.leave) addUniqueLeaves([payload.leave]);
+          if (payload.leave) {
+            const { added, conflicts } = addUniqueLeaves([payload.leave]);
+            if (added.length === 0 && conflicts.length > 0) {
+              res.json({
+                ok: true,
+                duplicateRejected: true,
+                conflict: conflicts[0],
+                ...buildPublicDbResponse(cur),
+              });
+              return;
+            }
+          }
           break;
         }
         case 'updateLeave': {
-          const updated = payload.updated;
+          const updatedRaw = payload.updated;
           const target = payload.target;
-          if (updated) {
+          if (updatedRaw) {
+            const range = normalizeLeaveRangeServer(updatedRaw.startDate, updatedRaw.endDate);
+            const updated = {
+              ...updatedRaw,
+              staffName: normalizeStaffNameServer(updatedRaw.staffName),
+              startDate: range.start || updatedRaw.startDate,
+              endDate: range.end || updatedRaw.endDate || updatedRaw.startDate,
+            };
             const idx = next.leaves.findIndex(
               (l) => (updated.id && l.id === updated.id) || (target && serverLeaveKey(l) === serverLeaveKey(target))
             );
+            const otherConflict = next.leaves.find(
+              (l, i) => i !== idx && isServerLeaveConflict(l, updated, updated.id ? String(updated.id) : undefined)
+            );
+            if (otherConflict) {
+              res.json({
+                ok: true,
+                duplicateRejected: true,
+                conflict: otherConflict,
+                ...buildPublicDbResponse(cur),
+              });
+              return;
+            }
             if (idx >= 0) next.leaves[idx] = updated;
             else next.leaves.unshift(updated);
+            next.leaves = deduplicateServerLeaves(next.leaves);
             if (target) {
               const oldKey = serverLeaveKey(target);
               if (oldKey !== serverLeaveKey(updated)) {
@@ -1346,8 +1541,10 @@ async function createAppServer(): Promise<void> {
           (w: any) => !mergedTombstones.workloads[serverWorkloadKey(w)] && !(w?.id && mergedTombstones.workloads[`id:${w.id}`])
         )
       );
-      const incomingLeaves = (Array.isArray(incomingDb.leaves) ? incomingDb.leaves : cur.leaves).filter(
-        (l: any) => !mergedTombstones.leaves[serverLeaveKey(l)] && !(l?.id && mergedTombstones.leaves[`id:${l.id}`])
+      const incomingLeaves = deduplicateServerLeaves(
+        (Array.isArray(incomingDb.leaves) ? incomingDb.leaves : cur.leaves).filter(
+          (l: any) => !mergedTombstones.leaves[serverLeaveKey(l)] && !(l?.id && mergedTombstones.leaves[`id:${l.id}`])
+        )
       );
       const incomingOt = (Array.isArray(incomingDb.ot) ? incomingDb.ot : cur.ot).filter(
         (o: any) => !mergedTombstones.ot[serverOtKey(o)] && !(o?.id && mergedTombstones.ot[`id:${o.id}`])

@@ -354,7 +354,7 @@ function doPost(e) {
       'addStaff', 'updateStaff', 'deleteStaff',
       'updateSettingsKeys',
       'updateWorkload', 'deleteWorkload',
-      'updateLeave', 'deleteLeave',
+      'updateLeave', 'deleteLeave', 'deduplicateLeaves',
       'updateOT', 'deleteOT',
       'configureLineAutomation', 'sendLineReportNow', 'getLineAutomationStatus'
     ];
@@ -391,6 +391,9 @@ function doPost(e) {
       }
       if (action === 'deleteLeave') {
         return jsonResponse_(deleteLeaveRowFromApi_(payload || {}));
+      }
+      if (action === 'deduplicateLeaves') {
+        return jsonResponse_(deduplicateLeaveSheetRows_());
       }
       if (action === 'updateOT') {
         return jsonResponse_(updateOtRowFromApi_(payload || {}));
@@ -763,6 +766,180 @@ function appendWorkloadFromApi_(payload) {
   return { success: true, appended: rowsToAppend.length, skippedDuplicates: skippedDuplicates };
 }
 
+function normalizeStaffNameGas_(name) {
+  return String(name || '').replace(/\s+/g, ' ').trim();
+}
+
+function isTrainingLeaveGas_(leaveType) {
+  var lt = String(leaveType || '').trim();
+  return lt.indexOf('อบรม') !== -1 || lt.indexOf('ประชุม') !== -1;
+}
+
+function parseLeavePeriodGas_(note) {
+  var text = String(note || '');
+  if (text.indexOf('ครึ่งวันเช้า') !== -1) return 'ครึ่งวันเช้า';
+  if (text.indexOf('ครึ่งวันบ่าย') !== -1) return 'ครึ่งวันบ่าย';
+  return '';
+}
+
+function normalizeLeaveRangeGas_(startRaw, endRaw) {
+  var s = normalizeSheetDateGas_(startRaw);
+  var e = normalizeSheetDateGas_(endRaw || startRaw) || s;
+  if (!s) return { start: '', end: '' };
+  return s <= e ? { start: s, end: e } : { start: e, end: s };
+}
+
+function isLeaveConflictGas_(existing, candidate, excludeId) {
+  if (!existing || !candidate) return false;
+  if (excludeId && String(existing.id || '').trim() === String(excludeId).trim()) return false;
+  var exName = normalizeStaffNameGas_(existing.staffName);
+  var caName = normalizeStaffNameGas_(candidate.staffName);
+  if (!exName || !caName || exName !== caName) return false;
+
+  var exRange = normalizeLeaveRangeGas_(existing.startDate, existing.endDate);
+  var caRange = normalizeLeaveRangeGas_(candidate.startDate, candidate.endDate);
+  if (!exRange.start || !caRange.start) return false;
+  if (!(exRange.start <= caRange.end && exRange.end >= caRange.start)) return false;
+
+  var exIsTrain = isTrainingLeaveGas_(existing.leaveType);
+  var caIsTrain = isTrainingLeaveGas_(candidate.leaveType);
+  if (exIsTrain === caIsTrain) return true;
+
+  var exDays = Number(existing.days || 1) || 1;
+  var caDays = Number(candidate.days || 1) || 1;
+  var exPeriod = parseLeavePeriodGas_(existing.note);
+  var caPeriod = parseLeavePeriodGas_(candidate.note);
+  if (
+    exRange.start === exRange.end &&
+    caRange.start === caRange.end &&
+    exDays === 0.5 &&
+    caDays === 0.5 &&
+    exPeriod &&
+    caPeriod &&
+    exPeriod !== caPeriod
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function scoreLeaveObjGas_(leave) {
+  var score = 0;
+  var noteText = String((leave && leave.note) || '')
+    .replace(/^\s*\[(?:ครึ่งวันเช้า|ครึ่งวันบ่าย)\]\s*/, '')
+    .replace(/\s*\((?:ครึ่งวันเช้า|ครึ่งวันบ่าย)\)\s*$/, '')
+    .trim();
+  if (noteText) {
+    var isAuto =
+      /^บันทึกอัตโนมัติจากห้องตรวจ/.test(noteText) ||
+      /^ไปอบรม\/ประชุม\s*\(บันทึกจาก/.test(noteText);
+    score += isAuto ? 10 : 300;
+  }
+  var id = String((leave && leave.id) || '').trim();
+  if (id && !/^(LV-AUTO-|TRN-AUTO-|LV-GS-|LV-CHK-)/.test(id)) {
+    score += 50;
+  } else if (/^(LV-AUTO-|TRN-AUTO-)/.test(id)) {
+    score += 20;
+  }
+  score += Math.min(30, Number((leave && leave.days) || 0));
+  if (String((leave && leave.clinic) || '').trim()) score += 5;
+  return score;
+}
+
+function deduplicateLeaveObjectsGas_(leaves) {
+  var list = Array.isArray(leaves) ? leaves : [];
+  var seenIds = {};
+  var byStaff = {};
+  var result = [];
+
+  for (var i = 0; i < list.length; i++) {
+    var raw = list[i];
+    if (!raw) continue;
+    var staffName = normalizeStaffNameGas_(raw.staffName);
+    var range = normalizeLeaveRangeGas_(raw.startDate, raw.endDate);
+    if (!staffName || !range.start) continue;
+
+    var item = {
+      id: String(raw.id || '').trim(),
+      startDate: range.start,
+      endDate: range.end,
+      staffName: staffName,
+      position: String(raw.position || 'RN').trim() || 'RN',
+      clinic: String(raw.clinic || '').trim(),
+      leaveType: String(raw.leaveType || 'ลาป่วย').trim(),
+      days: Number(raw.days) > 0 ? Number(raw.days) : 1,
+      note: String(raw.note || '').trim()
+    };
+
+    if (item.id && seenIds[item.id]) continue;
+
+    var indices = byStaff[staffName] || [];
+    var conflictIdx = -1;
+    for (var j = 0; j < indices.length; j++) {
+      if (isLeaveConflictGas_(result[indices[j]], item)) {
+        conflictIdx = indices[j];
+        break;
+      }
+    }
+
+    if (conflictIdx !== -1) {
+      if (scoreLeaveObjGas_(item) > scoreLeaveObjGas_(result[conflictIdx])) {
+        result[conflictIdx] = item;
+      }
+      if (item.id) seenIds[item.id] = true;
+      continue;
+    }
+
+    if (item.id) seenIds[item.id] = true;
+    byStaff[staffName] = indices.concat([result.length]);
+    result.push(item);
+  }
+  return result;
+}
+
+function deduplicateLeaveSheetRows_() {
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
+    'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
+  ]);
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 2) {
+    var okRes = buildPublicReadAllPayload_();
+    okRes.removedDuplicates = 0;
+    return okRes;
+  }
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = (firstHeader === 'Leave_ID');
+  var off = hasId ? 1 : 0;
+  var colCount = Math.min(Math.max(sheet.getLastColumn(), off + 8), off + 8);
+  var rawRows = sheet.getRange(2, 1, lastRow - 1, colCount).getValues();
+  var objs = [];
+  for (var i = 0; i < rawRows.length; i++) {
+    var r = rawRows[i];
+    var sDate = normalizeSheetDateGas_(r[off]);
+    var sName = normalizeStaffNameGas_(r[off + 2]);
+    if (!sDate || !sName) continue;
+    objs.push({
+      id: hasId ? String(r[0] || '').trim() : '',
+      startDate: sDate,
+      endDate: normalizeSheetDateGas_(r[off + 1] || r[off]) || sDate,
+      staffName: sName,
+      position: String(r[off + 3] || 'RN').trim(),
+      clinic: String(r[off + 4] || '').trim(),
+      leaveType: String(r[off + 5] || 'ลาป่วย').trim(),
+      days: Number(r[off + 6] || 1),
+      note: String(r[off + 7] || '').trim()
+    });
+  }
+  var deduped = deduplicateLeaveObjectsGas_(objs);
+  var removed = Math.max(0, objs.length - deduped.length);
+  if (removed > 0) {
+    writeLeaveRowsToSheet_(deduped);
+  }
+  var res = buildPublicReadAllPayload_();
+  res.removedDuplicates = removed;
+  return res;
+}
+
 function appendLeaveFromApi_(payload) {
   var list = Array.isArray(payload) ? payload : [payload];
   var sheet = ensureSheetWithHeaders_(SHEET_NAMES.LEAVE, [
@@ -773,25 +950,28 @@ function appendLeaveFromApi_(payload) {
   var off = hasId ? 1 : 0;
 
   var existingIds = {};
-  var existingKeys = {};
+  var existingItems = [];
   var lastRow = sheet.getLastRow();
   if (lastRow > 1) {
     var colCount = Math.min(sheet.getLastColumn(), off + 8);
     var existingRows = sheet.getRange(2, 1, lastRow - 1, colCount).getValues();
     for (var i = 0; i < existingRows.length; i++) {
       var r = existingRows[i];
-      if (hasId) {
-        var exId = String(r[0] || '').trim();
-        if (exId) existingIds[exId] = true;
+      var exId = hasId ? String(r[0] || '').trim() : '';
+      if (exId) existingIds[exId] = true;
+      var exRange = normalizeLeaveRangeGas_(r[off], r[off + 1] || r[off]);
+      var exName = normalizeStaffNameGas_(r[off + 2]);
+      if (exRange.start && exName) {
+        existingItems.push({
+          id: exId,
+          startDate: exRange.start,
+          endDate: exRange.end,
+          staffName: exName,
+          leaveType: String(r[off + 5] || '').trim(),
+          days: Number(r[off + 6] || 1),
+          note: String(r[off + 7] || '').trim()
+        });
       }
-      var lKey = [
-        normalizeSheetDateGas_(r[off]),
-        normalizeSheetDateGas_(r[off + 1] || r[off]),
-        String(r[off + 2] || '').replace(/\s+/g, ' ').trim(),
-        String(r[off + 5] || '').trim(),
-        Number(r[off + 6] || 1)
-      ].join('|');
-      existingKeys[lKey] = true;
     }
   }
 
@@ -801,38 +981,49 @@ function appendLeaveFromApi_(payload) {
 
   list.forEach(function(leave) {
     if (!leave || !leave.startDate || !leave.staffName) return;
+    var normName = normalizeStaffNameGas_(leave.staffName);
+    var range = normalizeLeaveRangeGas_(leave.startDate, leave.endDate || leave.startDate);
+    if (!normName || !range.start) return;
     validInputCount += 1;
+
     var leaveId = String(leave.id || '').trim();
-    var lKey = [
-      normalizeSheetDateGas_(leave.startDate),
-      normalizeSheetDateGas_(leave.endDate || leave.startDate),
-      String(leave.staffName || '').replace(/\s+/g, ' ').trim(),
-      String(leave.leaveType || 'ลาป่วย').trim(),
-      Number(leave.days || 1)
-    ].join('|');
-    if ((leaveId && existingIds[leaveId]) || existingKeys[lKey]) {
+    var candidate = {
+      id: leaveId,
+      startDate: range.start,
+      endDate: range.end,
+      staffName: normName,
+      leaveType: String(leave.leaveType || 'ลาป่วย').trim(),
+      days: Number(leave.days || 1),
+      note: String(leave.note || '').trim()
+    };
+
+    var hasConflict = (leaveId && existingIds[leaveId]) || existingItems.some(function(ex) {
+      return isLeaveConflictGas_(ex, candidate);
+    });
+    if (hasConflict) {
       skippedDuplicates += 1;
       return;
     }
 
     var baseRow = [
-      String(leave.startDate || ''),
-      String(leave.endDate || leave.startDate || ''),
-      String(leave.staffName || ''),
+      range.start,
+      range.end,
+      normName,
       String(leave.position || 'RN'),
       String(leave.clinic || ''),
-      String(leave.leaveType || 'ลาป่วย'),
+      candidate.leaveType,
       Number(leave.days || 1),
-      String(leave.note || '')
+      candidate.note
     ];
     if (hasId) {
       var lvId = leaveId || ('LV-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd-HHmmss') + '-' + Math.floor(Math.random() * 1000));
       existingIds[lvId] = true;
+      candidate.id = lvId;
       rowsToAppend.push([lvId].concat(baseRow));
     } else {
       rowsToAppend.push(baseRow);
     }
-    existingKeys[lKey] = true;
+    existingItems.push(candidate);
   });
 
   if (validInputCount === 0) {
@@ -1081,7 +1272,8 @@ function writeLeaveRowsToSheet_(leaves) {
     'Start_Date', 'End_Date', 'Staff_Name', 'Position', 'Clinic', 'Leave_Type', 'Days', 'Note'
   ]);
   var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
-  var rows = (leaves || []).map(function(leave, idx) {
+  var cleanLeaves = deduplicateLeaveObjectsGas_(leaves || []);
+  var rows = cleanLeaves.map(function(leave, idx) {
     var baseRow = [
       String(leave.startDate || ''),
       String(leave.endDate || leave.startDate || ''),
@@ -1561,15 +1753,13 @@ function updateLeaveRowFromApi_(payload) {
 
   if (rowIdx === -1) {
     if (payload.insertIfMissing) {
-      var newRowValues = hasId ? [String(updated.id || ('LV-' + Date.now()))].concat(baseRow) : baseRow;
-      sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRowValues.length).setValues([newRowValues]);
-      SpreadsheetApp.flush();
-      if (auditEntry) {
+      var insertRes = appendLeaveFromApi_(updated);
+      if (insertRes && insertRes.appended > 0 && auditEntry) {
         appendAuditRowsToSheet_([auditEntry]);
       }
       var insRes = buildPublicReadAllPayload_();
       insRes.targeted = true;
-      insRes.inserted = true;
+      insRes.inserted = Boolean(insertRes && insertRes.appended > 0);
       return insRes;
     }
     var notFoundRes = buildPublicReadAllPayload_();
@@ -2129,6 +2319,8 @@ function syncAdminAllFromApi_(payload) {
   }
   if (dirty.leaves && Array.isArray(payload.leaves)) {
     writeLeaveRowsToSheet_(payload.leaves);
+  } else {
+    deduplicateLeaveSheetRows_();
   }
   if (dirty.ot && Array.isArray(payload.ot)) {
     writeOtRowsToSheet_(payload.ot);

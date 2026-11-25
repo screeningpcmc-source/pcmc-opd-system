@@ -4251,12 +4251,72 @@ export default function App() {
     showToast('ล้างข้อมูลทั้งหมดเรียบร้อยแล้ว พร้อมเริ่มต้นใช้งานจริง', 'info');
   };
 
+  const activeTabTitle =
+    activeTab === 'workload'
+      ? '1. บันทึกภาระงานประจำวัน'
+      : activeTab === 'leave_ot'
+      ? '2. บันทึกเวรนอกเวลา & วันลา'
+      : activeTab === 'census'
+      ? '3. รายงานผู้ป่วยประจำวัน'
+      : activeTab === 'productivity'
+      ? '4. สรุป Productivity & FTC'
+      : '5. จัดการบุคลากร & ตั้งค่า';
+
+  const macOsDockApps = [
+    {
+      id: 'workload' as const,
+      label: 'บันทึกภาระงานประจำวัน',
+      shortLabel: 'ภาระงาน',
+      icon: ClipboardPen,
+      iconGradient: 'from-emerald-500 to-teal-600',
+      activeRing: 'ring-emerald-400/70 shadow-emerald-600/25',
+      segmentedActive: 'bg-white/95 text-emerald-800 shadow-xs ring-1 ring-emerald-500/25',
+    },
+    {
+      id: 'leave_ot' as const,
+      label: 'บันทึกเวรนอกเวลา & วันลา',
+      shortLabel: 'เวร & ลา',
+      icon: CalendarClock,
+      iconGradient: 'from-teal-500 to-cyan-600',
+      activeRing: 'ring-teal-400/70 shadow-teal-600/25',
+      segmentedActive: 'bg-white/95 text-teal-800 shadow-xs ring-1 ring-teal-500/25',
+    },
+    {
+      id: 'census' as const,
+      label: 'รายงานผู้ป่วยประจำวัน',
+      shortLabel: 'รายงานผู้ป่วย',
+      icon: FileText,
+      iconGradient: 'from-sky-500 to-blue-600',
+      activeRing: 'ring-sky-400/70 shadow-sky-600/25',
+      segmentedActive: 'bg-white/95 text-blue-800 shadow-xs ring-1 ring-blue-500/25',
+    },
+    {
+      id: 'productivity' as const,
+      label: 'สรุป Productivity & FTC',
+      shortLabel: 'Productivity',
+      icon: Calculator,
+      iconGradient: 'from-amber-500 to-orange-600',
+      activeRing: 'ring-amber-400/70 shadow-amber-600/25',
+      segmentedActive: 'bg-white/95 text-amber-800 shadow-xs ring-1 ring-amber-500/25',
+    },
+    {
+      id: 'admin' as const,
+      label: 'จัดการบุคลากร & ตั้งค่า',
+      shortLabel: 'ตั้งค่า & บุคลากร',
+      icon: UsersRound,
+      iconGradient: 'from-rose-500 to-red-600',
+      activeRing: 'ring-rose-400/70 shadow-rose-600/25',
+      segmentedActive: 'bg-white/95 text-red-800 shadow-xs ring-1 ring-red-500/25',
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-100/70 text-slate-800 flex flex-col font-sans">
-      {/* Top Navbar (Clean without Auto Sync & Sync Sheet buttons per Image 1; Auto Sync still runs silently) */}
+    <div className="ios-liquid-canvas min-h-screen bg-slate-100/70 text-slate-800 flex flex-col font-sans print:bg-white">
+      {/* Top Bar: Mobile/Tablet (iOS/iPadOS 27 Glass Bar) | PC (macOS 27 Golden Gate Menu Bar) */}
       <Navbar
         isAdmin={isAdmin}
         adminOwnerName={adminOwnerName}
+        activeTabLabel={activeTabTitle}
         onLockAdmin={handleLockAdmin}
         onOpenCqi={() => setShowCqiModal(true)}
       />
@@ -4266,27 +4326,28 @@ export default function App() {
         onClose={() => setShowCqiModal(false)}
       />
 
-      {/* Floating Toast Message */}
+      {/* Floating Toast Message (Mobile/Tablet: above dock; PC: top-right macOS Banner) */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 max-w-md animate-bounce">
-          <div className={`px-4 py-3 rounded-2xl shadow-xl border flex items-center gap-2.5 text-xs font-semibold ${
+        <div className="fixed ui-toast-anchor z-50 sm:max-w-md no-print">
+          <div className={`ios-glass-toast px-4 py-3 rounded-[20px] border flex items-center gap-2.5 text-xs font-semibold transition-all duration-200 ${
             toastMessage.type === 'success' 
-              ? 'bg-emerald-900 text-white border-emerald-700' 
+              ? 'bg-emerald-900/90 text-white border-emerald-400/40' 
               : toastMessage.type === 'error'
-              ? 'bg-red-900 text-white border-red-700'
-              : 'bg-slate-900 text-white border-cyan-700/70'
+              ? 'bg-red-900/92 text-white border-red-400/40'
+              : 'bg-slate-900/88 text-white border-cyan-400/40'
           }`}>
             {toastMessage.type === 'success' ? (
-              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
             ) : toastMessage.type === 'error' ? (
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-red-300 shrink-0" />
             ) : (
-              <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+              <Info className="w-4 h-4 text-cyan-300 shrink-0" />
             )}
-            <span>{toastMessage.text}</span>
+            <span className="flex-1 leading-snug">{toastMessage.text}</span>
             <button 
+              type="button"
               onClick={() => setToastMessage(null)}
-              className="ml-2 hover:opacity-75 cursor-pointer"
+              className="ml-1 min-w-[28px] min-h-[28px] flex items-center justify-center rounded-full hover:bg-white/15 cursor-pointer shrink-0"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -4294,195 +4355,353 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Container */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex-1 w-full space-y-5 print:max-w-none print:px-0 print:py-0">
-        {/* 5 Main Tabs Navigation Bar */}
-        <div className="no-print bg-white p-1.5 rounded-2xl shadow-xs border border-gray-200/90 flex flex-wrap gap-1">
-          <button
-            onClick={() => setActiveTab('workload')}
-            className={`flex-1 min-w-[170px] py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'workload'
-                ? 'bg-emerald-700 text-white shadow-xs'
-                : 'text-gray-600 hover:text-emerald-800 hover:bg-emerald-50/50'
-            }`}
-          >
-            <ClipboardPen className="w-4 h-4" />
-            <span>1. บันทึกภาระงานประจำวัน</span>
-          </button>
+      {/* Main Workspace Container */}
+      <main className="max-w-[1380px] mx-auto px-3 sm:px-5 md:px-6 pt-3.5 pb-28 sm:pt-5 flex-1 w-full print:max-w-none print:px-0 print:py-0">
+        {/* Mobile & Tablet (Portrait + Landscape): iOS / iPadOS 27 Section Title + Top Command Strip */}
+        <div className="no-print ui-mobile-tablet mb-4 space-y-2.5">
+          <div className="px-1">
+            <h2 className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 truncate">
+              {activeTabTitle}
+            </h2>
+          </div>
 
-          <button
-            onClick={() => setActiveTab('leave_ot')}
-            className={`flex-1 min-w-[170px] py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'leave_ot'
-                ? 'bg-teal-700 text-white shadow-xs'
-                : 'text-gray-600 hover:text-teal-800 hover:bg-teal-50/50'
-            }`}
+          <div
+            role="tablist"
+            aria-label="คำสั่งหลักแท็บเล็ตและมือถือ"
+            className="ios-glass-bar rounded-[18px] p-1.5 flex flex-nowrap md:grid md:grid-cols-5 items-center gap-1 overflow-x-auto no-scrollbar"
           >
-            <CalendarClock className="w-4 h-4" />
-            <span>2. บันทึกเวรนอกเวลา & วันลา</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('census')}
-            className={`flex-1 min-w-[170px] py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'census'
-                ? 'bg-blue-700 text-white shadow-xs'
-                : 'text-gray-600 hover:text-blue-800 hover:bg-blue-50/50'
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            <span>3. รายงานผู้ป่วยประจำวัน</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('productivity')}
-            className={`flex-1 min-w-[170px] py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'productivity'
-                ? 'bg-amber-600 text-white shadow-xs'
-                : 'text-gray-600 hover:text-amber-800 hover:bg-amber-50/50'
-            }`}
-          >
-            <Calculator className="w-4 h-4" />
-            <span>4. สรุป Productivity & FTC</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('admin')}
-            className={`flex-1 min-w-[170px] py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'admin'
-                ? 'bg-red-700 text-white shadow-xs'
-                : 'text-gray-600 hover:text-red-800 hover:bg-red-50/50'
-            }`}
-          >
-            <UsersRound className="w-4 h-4" />
-            <span>5. จัดการบุคลากร & ตั้งค่า</span>
-          </button>
+            {macOsDockApps.map((tab, idx) => {
+              const TabIcon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`min-h-[42px] px-3 md:px-2 py-2 rounded-[13px] text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0 md:shrink md:min-w-0 ${
+                    isActive
+                      ? tab.segmentedActive
+                      : 'text-slate-700 hover:text-slate-950 hover:bg-white/55'
+                  }`}
+                >
+                  <TabIcon className="w-3.5 h-3.5 shrink-0" />
+                  <span className="md:truncate">{idx + 1}. {tab.shortLabel}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Tab 1: Daily Workload Entry */}
-        {activeTab === 'workload' && (
-          <DailyWorkloadTab
-            workloads={db.workloads}
-            staffList={db.staff}
-            leaves={db.leaves}
-            otRecords={db.ot}
-            inTimeClinics={inTimeClinics}
-            outTimeClinics={outTimeClinics}
-            premiumSubClinics={premiumSubClinics}
-            leaveTypes={leaveTypes}
-            onSaveWorkload={handleSaveWorkload}
-            onSaveBatchWorkloads={handleSaveBatchWorkloads}
-            onUpdateWorkload={handleUpdateWorkload}
-            onDeleteWorkload={handleDeleteWorkload}
-            defaultReporter=""
-            isAdmin={isAdmin}
-            onPromptAdminUnlock={() => setActiveTab('admin')}
-          />
-        )}
+        {/* PC / MacBook Desktop Window Frame (transparent pass-through on mobile/tablet & print) */}
+        <div className="macos-gg-window print:overflow-visible">
+          {/* macOS 27 Golden Gate Unified Window Titlebar & Segmented Toolbar */}
+          <div className="no-print ui-pc-desktop macos-gg-window-toolbar rounded-t-[25px] px-5 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-4 min-w-0">
+              {/* macOS Window Traffic Lights (Static Architectural Chrome) */}
+              <div className="flex items-center gap-2 shrink-0" aria-hidden="true">
+                <span className="w-3 h-3 rounded-full bg-[#ff5f57] ring-1 ring-black/15 shadow-inner" />
+                <span className="w-3 h-3 rounded-full bg-[#febc2e] ring-1 ring-black/15 shadow-inner" />
+                <span className="w-3 h-3 rounded-full bg-[#28c840] ring-1 ring-black/15 shadow-inner" />
+              </div>
 
-        {/* Tab 2: Leave & OT Tracker */}
-        {activeTab === 'leave_ot' && (
-          <LeaveAndOTTab
-            staffList={db.staff}
-            leaves={db.leaves}
-            otRecords={db.ot}
-            auditLogs={db.auditLogs || []}
-            workloads={db.workloads}
-            inTimeClinics={inTimeClinics}
-            outTimeClinics={outTimeClinics}
-            leaveTypes={leaveTypes}
-            customHolidays={db.settings.customHolidays || []}
-            settings={db.settings}
-            isAdmin={isAdmin}
-            onSaveLeave={handleSaveLeave}
-            onSaveBatchOT={handleSaveBatchOT}
-            onUpdateLeave={handleUpdateLeave}
-            onDeleteLeave={handleDeleteLeave}
-            onUpdateOT={handleUpdateOT}
-            onDeleteOT={handleDeleteOT}
-            onSaveUnitCostCenter={handleSaveUnitCostCenter}
-          />
-        )}
+              <div className="min-w-0">
+                <h2 className="text-[15px] font-bold tracking-tight text-slate-900 truncate leading-tight">
+                  {activeTabTitle}
+                </h2>
+                <p className="text-[11.5px] text-slate-600 truncate leading-tight">
+                  กลุ่มงานการพยาบาลผู้ป่วยนอก · ระบบบริหารจัดการภาระงานและ Productivity
+                </p>
+              </div>
+            </div>
 
-        {/* Tab 3: Daily OPD Census Report */}
-        {activeTab === 'census' && (
-          <DailyCensusTab
-            workloads={db.workloads}
-            staffList={db.staff}
-            premiumSubClinics={premiumSubClinics}
-            settings={db.settings}
-            isAdmin={isAdmin}
-            onUpdateWorkload={handleUpdateWorkload}
-            onDeleteWorkload={handleDeleteWorkload}
-            onSendLineReportNow={handleSendLineReportNow}
-          />
-        )}
+            {/* macOS 27 Liquid Glass Segmented Tab Switcher */}
+            <div
+              role="tablist"
+              aria-label="เมนูหลัก"
+              className="macos-gg-segmented p-1 rounded-[14px] flex items-center gap-1 shrink-0"
+            >
+              {macOsDockApps.map((tab) => {
+                const TabIcon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`px-3 py-1.5 rounded-[10px] text-[12px] font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                      isActive
+                        ? tab.segmentedActive
+                        : 'text-slate-700 hover:text-slate-950 hover:bg-white/55'
+                    }`}
+                  >
+                    <TabIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span>{tab.shortLabel}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-        {/* Tab 4: Monthly Productivity & Skill Mix */}
-        {activeTab === 'productivity' && (
-          <ProductivityTab
-            workloads={db.workloads}
-            staffList={db.staff}
-            leaves={db.leaves}
-            otRecords={db.ot}
-            settings={db.settings}
-            inTimeClinics={inTimeClinics}
-            outTimeClinics={outTimeClinics}
-            premiumSubClinics={premiumSubClinics}
-          />
-        )}
+          {/* Active Workspace Content */}
+          <div className="macos-gg-window-body space-y-4">
+            {/* Tab 1: Daily Workload Entry */}
+            {activeTab === 'workload' && (
+              <DailyWorkloadTab
+                workloads={db.workloads}
+                staffList={db.staff}
+                leaves={db.leaves}
+                otRecords={db.ot}
+                inTimeClinics={inTimeClinics}
+                outTimeClinics={outTimeClinics}
+                premiumSubClinics={premiumSubClinics}
+                leaveTypes={leaveTypes}
+                onSaveWorkload={handleSaveWorkload}
+                onSaveBatchWorkloads={handleSaveBatchWorkloads}
+                onUpdateWorkload={handleUpdateWorkload}
+                onDeleteWorkload={handleDeleteWorkload}
+                defaultReporter=""
+                isAdmin={isAdmin}
+                onPromptAdminUnlock={() => setActiveTab('admin')}
+              />
+            )}
 
-        {/* Tab 5: Admin Panel & Staff Master */}
-        {activeTab === 'admin' && (
-          <AdminPanelTab
-            staffList={db.staff}
-            workloads={db.workloads}
-            settings={db.settings}
-            inTimeClinics={inTimeClinics}
-            outTimeClinics={outTimeClinics}
-            premiumSubClinics={premiumSubClinics}
-            leaveTypes={leaveTypes}
-            isAdmin={isAdmin}
-            isAdminUnlocked={isAdminUnlocked}
-            adminOwnerName={adminOwnerName}
-            user={user}
-            onLogin={handleLogin}
-            onLogout={handleLogout}
-            isLoggingIn={isLoggingIn}
-            onAddStaff={handleAddStaff}
-            onUpdateStaff={handleUpdateStaff}
-            onDeleteStaff={handleDeleteStaff}
-            onUpdateStaffStatus={handleUpdateStaffStatus}
-            onSaveSettings={handleSaveSettings}
-            onResetData={handleResetData}
-            onSetupSpreadsheet={handleSetupSpreadsheet}
-            onSyncSpreadsheet={() => handleSyncSpreadsheet()}
-            onExportAllToGoogleSheet={() => handleExportAllToGoogleSheet()}
-            onTestSheetConnection={handleTestSheetConnection}
-            onSaveSheetLinkConfig={handleSaveSheetLinkConfig}
-            sheetConnectionStatus={sheetConnectionStatus}
-            isExportingToSheet={isExportingToSheet}
-            isSettingUpSheet={isSettingUpSheet}
-            isSyncingSheet={isSyncingSheet}
-            onCopyShareLink={handleCopyShareLink}
-            onUnlockAdmin={handleUnlockAdmin}
-            onLockAdmin={handleLockAdmin}
-            lastSyncedAt={lastSyncedAt}
-            onToggleAutoSync={handleToggleAutoSync}
-            onConfigureLineAutomation={handleConfigureLineAutomation}
-            onSendLineReportNow={handleSendLineReportNow}
-            onFetchLineStatus={handleFetchLineStatus}
-          />
-        )}
+            {/* Tab 2: Leave & OT Tracker */}
+            {activeTab === 'leave_ot' && (
+              <LeaveAndOTTab
+                staffList={db.staff}
+                leaves={db.leaves}
+                otRecords={db.ot}
+                auditLogs={db.auditLogs || []}
+                workloads={db.workloads}
+                inTimeClinics={inTimeClinics}
+                outTimeClinics={outTimeClinics}
+                leaveTypes={leaveTypes}
+                customHolidays={db.settings.customHolidays || []}
+                settings={db.settings}
+                isAdmin={isAdmin}
+                onSaveLeave={handleSaveLeave}
+                onSaveBatchOT={handleSaveBatchOT}
+                onUpdateLeave={handleUpdateLeave}
+                onDeleteLeave={handleDeleteLeave}
+                onUpdateOT={handleUpdateOT}
+                onDeleteOT={handleDeleteOT}
+                onSaveUnitCostCenter={handleSaveUnitCostCenter}
+              />
+            )}
+
+            {/* Tab 3: Daily OPD Census Report */}
+            {activeTab === 'census' && (
+              <DailyCensusTab
+                workloads={db.workloads}
+                staffList={db.staff}
+                premiumSubClinics={premiumSubClinics}
+                settings={db.settings}
+                isAdmin={isAdmin}
+                onUpdateWorkload={handleUpdateWorkload}
+                onDeleteWorkload={handleDeleteWorkload}
+                onSendLineReportNow={handleSendLineReportNow}
+              />
+            )}
+
+            {/* Tab 4: Monthly Productivity & Skill Mix */}
+            {activeTab === 'productivity' && (
+              <ProductivityTab
+                workloads={db.workloads}
+                staffList={db.staff}
+                leaves={db.leaves}
+                otRecords={db.ot}
+                settings={db.settings}
+                inTimeClinics={inTimeClinics}
+                outTimeClinics={outTimeClinics}
+                premiumSubClinics={premiumSubClinics}
+              />
+            )}
+
+            {/* Tab 5: Admin Panel & Staff Master */}
+            {activeTab === 'admin' && (
+              <AdminPanelTab
+                staffList={db.staff}
+                workloads={db.workloads}
+                settings={db.settings}
+                inTimeClinics={inTimeClinics}
+                outTimeClinics={outTimeClinics}
+                premiumSubClinics={premiumSubClinics}
+                leaveTypes={leaveTypes}
+                isAdmin={isAdmin}
+                isAdminUnlocked={isAdminUnlocked}
+                adminOwnerName={adminOwnerName}
+                user={user}
+                onLogin={handleLogin}
+                onLogout={handleLogout}
+                isLoggingIn={isLoggingIn}
+                onAddStaff={handleAddStaff}
+                onUpdateStaff={handleUpdateStaff}
+                onDeleteStaff={handleDeleteStaff}
+                onUpdateStaffStatus={handleUpdateStaffStatus}
+                onSaveSettings={handleSaveSettings}
+                onResetData={handleResetData}
+                onSetupSpreadsheet={handleSetupSpreadsheet}
+                onSyncSpreadsheet={() => handleSyncSpreadsheet()}
+                onExportAllToGoogleSheet={() => handleExportAllToGoogleSheet()}
+                onTestSheetConnection={handleTestSheetConnection}
+                onSaveSheetLinkConfig={handleSaveSheetLinkConfig}
+                sheetConnectionStatus={sheetConnectionStatus}
+                isExportingToSheet={isExportingToSheet}
+                isSettingUpSheet={isSettingUpSheet}
+                isSyncingSheet={isSyncingSheet}
+                onCopyShareLink={handleCopyShareLink}
+                onUnlockAdmin={handleUnlockAdmin}
+                onLockAdmin={handleLockAdmin}
+                lastSyncedAt={lastSyncedAt}
+                onToggleAutoSync={handleToggleAutoSync}
+                onConfigureLineAutomation={handleConfigureLineAutomation}
+                onSendLineReportNow={handleSendLineReportNow}
+                onFetchLineStatus={handleFetchLineStatus}
+              />
+            )}
+          </div>
+        </div>
       </main>
 
+      {/* Mobile & Tablet (Portrait + Landscape): iOS / iPadOS 27 Floating Liquid Glass Bottom Dock */}
+      <nav
+        aria-label="เมนูหลักมือถือและแท็บเล็ต"
+        className="no-print ui-mobile-tablet fixed bottom-2.5 left-3 right-3 sm:left-6 sm:right-6 z-40"
+      >
+        <div className="ios-glass-dock rounded-[26px] p-1.5 grid grid-cols-5 items-center gap-1 max-w-2xl mx-auto">
+          {(
+            [
+              {
+                id: 'workload',
+                label: 'ภาระงาน',
+                icon: ClipboardPen,
+                activeClass:
+                  'bg-gradient-to-b from-emerald-500/20 to-emerald-600/15 text-emerald-800 ring-1 ring-emerald-500/35 shadow-xs',
+              },
+              {
+                id: 'leave_ot',
+                label: 'เวร & ลา',
+                icon: CalendarClock,
+                activeClass:
+                  'bg-gradient-to-b from-teal-500/20 to-teal-600/15 text-teal-800 ring-1 ring-teal-500/35 shadow-xs',
+              },
+              {
+                id: 'census',
+                label: 'รายงาน',
+                icon: FileText,
+                activeClass:
+                  'bg-gradient-to-b from-sky-500/20 to-blue-600/15 text-blue-800 ring-1 ring-blue-500/35 shadow-xs',
+              },
+              {
+                id: 'productivity',
+                label: 'สรุปผล',
+                icon: Calculator,
+                activeClass:
+                  'bg-gradient-to-b from-amber-500/22 to-amber-600/15 text-amber-800 ring-1 ring-amber-500/35 shadow-xs',
+              },
+              {
+                id: 'admin',
+                label: 'ตั้งค่า',
+                icon: UsersRound,
+                activeClass:
+                  'bg-gradient-to-b from-rose-500/20 to-red-600/15 text-red-800 ring-1 ring-red-500/35 shadow-xs',
+              },
+            ] as const
+          ).map((item) => {
+            const IconComp = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setActiveTab(item.id);
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className={`min-h-[48px] py-1.5 px-1 rounded-[20px] flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-all ${
+                  isActive
+                    ? `${item.activeClass} backdrop-blur-md`
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                }`}
+              >
+                <IconComp className={`w-[19px] h-[19px] shrink-0 ${isActive ? 'stroke-[2.3]' : 'stroke-[1.9]'}`} />
+                <span className="text-[10.5px] sm:text-[11px] font-bold tracking-tight whitespace-nowrap truncate max-w-full">
+                  {item.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+
+      {/* PC / MacBook Desktop: macOS 27 Golden Gate Floating Liquid Glass Dock */}
+      <nav
+        aria-label="macOS Dock"
+        className="no-print ui-pc-desktop fixed bottom-3 left-1/2 -translate-x-1/2 z-40"
+      >
+        <div className="macos-gg-dock rounded-[22px] px-3 pt-2 pb-1.5 flex items-end gap-2.5">
+          {macOsDockApps.map((item) => {
+            const IconComp = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <div key={item.id} className="relative group flex flex-col items-center gap-1">
+                <span className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-y-1 group-hover:-translate-y-2 transition-all duration-150 absolute -top-9 px-2.5 py-1 rounded-lg bg-slate-900/88 text-white text-[11px] font-semibold whitespace-nowrap shadow-md backdrop-blur-md">
+                  {item.label}
+                </span>
+                <button
+                  type="button"
+                  aria-label={item.label}
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className={`w-11 h-11 rounded-[13px] bg-gradient-to-br ${item.iconGradient} text-white flex items-center justify-center shadow-md ring-1 ring-white/75 cursor-pointer transition-transform duration-150 hover:-translate-y-1.5 hover:scale-110 active:scale-95 ${
+                    isActive ? `ring-2 ${item.activeRing}` : 'opacity-90 hover:opacity-100'
+                  }`}
+                >
+                  <IconComp className="w-5 h-5 drop-shadow-xs" />
+                </button>
+                <span
+                  aria-hidden="true"
+                  className={`w-1.5 h-1.5 rounded-full transition-opacity duration-150 ${
+                    isActive ? 'bg-slate-800/80 opacity-100' : 'opacity-0'
+                  }`}
+                />
+              </div>
+            );
+          })}
+
+          <div className="w-px h-9 bg-slate-400/35 self-center mx-0.5 mb-1.5" aria-hidden="true" />
+
+          {/* Quick-launch CQI Report App in Dock */}
+          <div className="relative group flex flex-col items-center gap-1">
+            <span className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-y-1 group-hover:-translate-y-2 transition-all duration-150 absolute -top-9 px-2.5 py-1 rounded-lg bg-slate-900/88 text-white text-[11px] font-semibold whitespace-nowrap shadow-md backdrop-blur-md">
+              รายงานพัฒนาคุณภาพ (CQI)
+            </span>
+            <button
+              type="button"
+              aria-label="รายงานพัฒนาคุณภาพ (CQI)"
+              onClick={() => setShowCqiModal(true)}
+              className="w-11 h-11 rounded-[13px] bg-gradient-to-br from-amber-400 to-amber-600 text-white flex items-center justify-center shadow-md ring-1 ring-white/75 cursor-pointer transition-transform duration-150 hover:-translate-y-1.5 hover:scale-110 active:scale-95 opacity-95 hover:opacity-100"
+            >
+              <FileText className="w-5 h-5 drop-shadow-xs" />
+            </button>
+            <span className="w-1.5 h-1.5 rounded-full opacity-0" aria-hidden="true" />
+          </div>
+        </div>
+      </nav>
+
       {/* Footer */}
-      <footer className="no-print bg-white border-t border-gray-200 mt-12 py-5 text-center text-xs text-gray-500">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+      <footer className="no-print bg-white/65 backdrop-blur-md border-t border-white/80 mt-6 pt-5 pb-24 text-center text-xs text-slate-500">
+        <div className="max-w-[1380px] mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <div>
             © 2026 โรงพยาบาลศูนย์การแพทย์ปัญญานันทภิกขุ ชลประทาน (PCMC) • กลุ่มงานการพยาบาลผู้ป่วยนอก
           </div>
-          <div className="text-[11px] text-gray-400">
+          <div className="text-[11px] text-slate-400">
             ระบบบริหารจัดการภาระงานและ Productivity OPD • เชื่อมต่อ Google Sheets
           </div>
         </div>
