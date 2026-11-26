@@ -53,8 +53,16 @@ import {
   normalizeLeaveDateStr,
   normalizeStaffNameKey,
   hasValidLeaveReason,
-  DEFAULT_BOOBY_OWNER_NAME
+  DEFAULT_BOOBY_OWNER_NAME,
+  isPremiumPoolClinicName,
+  isReferralWorkload,
+  getReferralTotalCount,
+  getReferralAdmitCount,
+  normalizeReferralData,
+  formatWorkloadNoteForSheet,
+  stripAllWorkloadTagsFromNote,
 } from './types';
+import type { AdjustPatientPatch } from './components/AdjustPatientModal';
 import { 
   loadLocalDatabase, 
   saveLocalDatabase, 
@@ -96,12 +104,14 @@ import {
   computeChangedSettingsEntries,
   pushAdminTableViaAppsScript,
   pushTargetedAdminRowMutationViaAppsScript,
+  pushPublicWorkloadPatientAdjustmentViaAppsScript,
   pushTargetedAdminStaffMutationViaAppsScript,
   pushTargetedSettingsKeysViaAppsScript,
   pushAdminTableViaOAuth,
   pushTargetedAdminRowViaOAuth,
   pushTargetedStaffViaOAuth,
   pushTargetedSettingsKeysViaOAuth,
+  waitForInFlightWorkloadAppends,
   appendDailyWorkloadToSheet,
   appendLeaveToSheet,
   appendOTToSheet,
@@ -2424,6 +2434,270 @@ export default function App() {
     );
   };
 
+  // Handler: Adjust Saved Patient Counts (Accessible by General Users & Admins — staffing/metadata locked)
+  const handleAdjustWorkloadPatients = (
+    target: DailyWorkload,
+    patch: AdjustPatientPatch,
+    adjusterName: string,
+    reason: string
+  ) => {
+    const cleanAdjuster = adjusterName.trim();
+    const cleanReason = reason.trim();
+    if (!cleanAdjuster) {
+      showToast('กรุณาระบุชื่อผู้ปรับยอดผู้ป่วย', 'error');
+      return;
+    }
+    if (!cleanReason) {
+      showToast('กรุณาระบุเหตุผลการปรับยอดผู้ป่วย', 'error');
+      return;
+    }
+
+    const baseDb = dbRef.current;
+    const prevItem =
+      baseDb.workloads.find(
+        (w) =>
+          w.id === target.id ||
+          getWorkloadKey(w) === getWorkloadKey(target) ||
+          getWorkloadSlotKey(w) === getWorkloadSlotKey(target)
+      ) || target;
+
+    if (
+      isOffDutyWorkload(prevItem) ||
+      prevItem.recordType === 'PREMIUM_POOL' ||
+      isPremiumPoolClinicName(prevItem.clinic)
+    ) {
+      showToast('รายการ Off เวร หรือแถวกำลังคนรวม ไม่อนุญาตให้ปรับยอดผู้ป่วยทั่วไป', 'error');
+      return;
+    }
+
+    const isRef = isReferralWorkload(prevItem);
+    const nextRefData =
+      isRef && patch.referralData ? normalizeReferralData(patch.referralData) : prevItem.referralData;
+    const nextAdult = isRef && nextRefData
+      ? getReferralTotalCount(nextRefData)
+      : Math.max(0, Math.round(Number(patch.adultPt || 0)));
+    const nextChild = isRef
+      ? 0
+      : Math.max(0, Math.round(Number(patch.childPt || 0)));
+    const nextTotal = isRef && nextRefData
+      ? getReferralTotalCount(nextRefData)
+      : Math.max(Math.round(Number(patch.totalPt || 0)), nextAdult + nextChild);
+    const nextAdmit = isRef && nextRefData
+      ? getReferralAdmitCount(nextRefData)
+      : Math.max(0, Math.round(Number(patch.admit || 0)));
+
+    const existingOffStaff = getWorkloadOffDutyStaff(prevItem);
+    const nextNote =
+      isRef && nextRefData
+        ? formatWorkloadNoteForSheet(
+            stripAllWorkloadTagsFromNote(prevItem.note),
+            nextRefData,
+            existingOffStaff.length > 0 ? { offDutyStaff: existingOffStaff } : undefined
+          )
+        : prevItem.note;
+
+    const nowIso = new Date().toISOString();
+    const stamped: DailyWorkload = {
+      ...prevItem,
+      adultPt: nextAdult,
+      childPt: nextChild,
+      totalPt: nextTotal,
+      admit: nextAdmit,
+      ...(isRef && nextRefData ? { referralData: nextRefData, note: nextNote } : {}),
+      lastEditedAt: nowIso,
+      lastEditReason: cleanReason,
+      lastEditedBy: cleanAdjuster,
+    };
+
+    const oldTotal = getEffectiveTotalPt(prevItem);
+    const oldAdmit = Number(prevItem.admit || 0);
+    const deltaPt = nextTotal - oldTotal;
+    const deltaLabel = deltaPt > 0 ? `+${deltaPt}` : deltaPt < 0 ? `${deltaPt}` : '±0';
+    const summary = `${prevItem.clinic} (${formatThaiShortDate(prevItem.date)} • ${prevItem.shift}) ผู้ป่วย ${oldTotal} → ${nextTotal} คน (${deltaLabel})${
+      oldAdmit !== nextAdmit ? `, Admit ${oldAdmit} → ${nextAdmit}` : ''
+    }`;
+
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: nowIso,
+      action: 'ปรับยอดผู้ป่วย',
+      targetName: stamped.clinic,
+      summary,
+      reason: cleanReason,
+      editedBy: cleanAdjuster,
+    };
+    enqueuePendingOutboxAuditLogs([auditEntry]);
+
+    const nextWorkloads = baseDb.workloads.some((w) => w.id === prevItem.id)
+      ? baseDb.workloads.map((w) => (w.id === prevItem.id ? stamped : w))
+      : [stamped, ...baseDb.workloads];
+
+    const prevWasInOutbox = getPendingOutboxWorkloads().some(
+      (w) => w.id === prevItem.id || getWorkloadKey(w) === getWorkloadKey(prevItem)
+    );
+    removeWorkloadRecentlySaved(prevItem);
+    if (prevWasInOutbox) {
+      markWorkloadOutboxSynced([prevItem]);
+      enqueuePendingOutboxWorkloads([stamped]);
+    }
+    const oldKey = getWorkloadKey(prevItem);
+    const newKey = getWorkloadKey(stamped);
+    if (oldKey !== newKey && !nextWorkloads.some((w) => getWorkloadKey(w) === oldKey)) {
+      recordDeletedWorkloadTombstone(prevItem);
+    }
+    clearWorkloadTombstone(stamped);
+    markWorkloadsRecentlySaved([stamped]);
+
+    mutationSeqRef.current += 1;
+    const opSeq = mutationSeqRef.current;
+    const dirtyVer = markWorkloadsDirty();
+    const nextDb: AppDatabase = {
+      ...baseDb,
+      workloads: nextWorkloads,
+      auditLogs: [auditEntry, ...(baseDb.auditLogs || [])],
+    };
+    dbRef.current = nextDb;
+    setDb(nextDb);
+
+    void propagateServerMutation('adjustWorkloadPatients', {
+      target: prevItem,
+      updated: stamped,
+      auditEntry,
+    });
+
+    showToast(
+      `ปรับยอดผู้ป่วย ${stamped.clinic} เป็น ${nextTotal} คน (${deltaLabel}) พร้อมซิงค์ระบบแล้ว`,
+      'success'
+    );
+
+    void enqueueSheetOperation(async () => {
+      await waitForInFlightWorkloadAppends();
+      const latestDb = dbRef.current;
+      const targetGasUrl = (latestDb.settings.gasUrl || '').trim();
+      const targetSheetId = (latestDb.settings.spreadsheetId || '').trim();
+      const pin = unlockedAdminPinRef.current;
+
+      if (targetGasUrl) {
+        const adjRes = await pushPublicWorkloadPatientAdjustmentViaAppsScript({
+          gasUrl: targetGasUrl,
+          target: prevItem,
+          updated: stamped,
+          db: latestDb,
+          auditEntry,
+          expectedDirtyVersion: dirtyVer,
+        });
+
+        if (
+          adjRes.syncedDb &&
+          mutationSeqRef.current === opSeq &&
+          (adjRes.ok || adjRes.notFound)
+        ) {
+          dbRef.current = adjRes.syncedDb;
+          setDb(adjRes.syncedDb);
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          await broadcastSyncedSnapshot(adjRes.syncedDb);
+        }
+
+        if (adjRes.ok) {
+          lastSyncEpochRef.current = Date.now();
+          setLastSyncedAt(formatSyncTime());
+          return;
+        }
+
+        if (adjRes.notFound) {
+          showToast(
+            adjRes.error || 'ไม่พบรายการเดิมใน Google Sheets ระบบซิงค์ข้อมูลล่าสุดให้แล้ว',
+            'info'
+          );
+          return;
+        }
+
+        if (adjRes.unsupportedAction && isAdmin && pin) {
+          const adminFallbackRes = await pushTargetedAdminRowMutationViaAppsScript({
+            gasUrl: targetGasUrl,
+            adminPin: pin,
+            action: 'updateWorkload',
+            table: 'workloads',
+            target: prevItem,
+            updated: stamped,
+            db: latestDb,
+            auditEntry,
+            expectedDirtyVersion: dirtyVer,
+            insertIfMissing: false,
+          });
+          if (
+            adminFallbackRes.syncedDb &&
+            mutationSeqRef.current === opSeq &&
+            adminFallbackRes.ok
+          ) {
+            dbRef.current = adminFallbackRes.syncedDb;
+            setDb(adminFallbackRes.syncedDb);
+            lastSyncEpochRef.current = Date.now();
+            setLastSyncedAt(formatSyncTime());
+            await broadcastSyncedSnapshot(adminFallbackRes.syncedDb);
+          }
+          if (adminFallbackRes.ok) {
+            return;
+          }
+        }
+
+        const token = await getAccessToken();
+        if (token && targetSheetId) {
+          const oauthRes = await pushTargetedAdminRowViaOAuth({
+            accessToken: token,
+            spreadsheetId: targetSheetId,
+            action: 'updateWorkload',
+            table: 'workloads',
+            target: prevItem,
+            updated: stamped,
+            insertIfMissing: false,
+            auditEntry,
+            expectedDirtyVersion: dirtyVer,
+          });
+          if (oauthRes.ok) {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            return;
+          }
+        }
+
+        showToast(
+          `ปรับยอดบนหน้าเว็บแล้ว แต่บันทึกลง Google Sheet ไม่สำเร็จ: ${adjRes.error || 'กรุณาตรวจสอบ Web App URL / Code.gs'}`,
+          'error'
+        );
+        return;
+      }
+
+      if (targetSheetId) {
+        const token = await getAccessToken();
+        if (token) {
+          const oauthRes = await pushTargetedAdminRowViaOAuth({
+            accessToken: token,
+            spreadsheetId: targetSheetId,
+            action: 'updateWorkload',
+            table: 'workloads',
+            target: prevItem,
+            updated: stamped,
+            insertIfMissing: false,
+            auditEntry,
+            expectedDirtyVersion: dirtyVer,
+          });
+          if (oauthRes.ok) {
+            await executeSheetSyncNow({ reason: 'save', ignoreSeqGuard: true });
+            return;
+          }
+          showToast(
+            `ปรับยอดบนหน้าเว็บแล้ว แต่เขียนทับ Google Sheet ไม่สำเร็จ: ${oauthRes.error || 'OAuth error'}`,
+            'error'
+          );
+          return;
+        }
+      }
+
+      await recordAuditToSheet(auditEntry);
+    });
+  };
+
   // Handler: Delete Daily Workload (Admin, mandatory reason + timestamp)
   const handleDeleteWorkload = (id: string, reason: string) => {
     if (!isAdmin) {
@@ -4487,6 +4761,7 @@ export default function App() {
                 onSaveWorkload={handleSaveWorkload}
                 onSaveBatchWorkloads={handleSaveBatchWorkloads}
                 onUpdateWorkload={handleUpdateWorkload}
+                onAdjustWorkloadPatients={handleAdjustWorkloadPatients}
                 onDeleteWorkload={handleDeleteWorkload}
                 defaultReporter=""
                 isAdmin={isAdmin}
@@ -4527,6 +4802,7 @@ export default function App() {
                 settings={db.settings}
                 isAdmin={isAdmin}
                 onUpdateWorkload={handleUpdateWorkload}
+                onAdjustWorkloadPatients={handleAdjustWorkloadPatients}
                 onDeleteWorkload={handleDeleteWorkload}
                 onSendLineReportNow={handleSendLineReportNow}
               />

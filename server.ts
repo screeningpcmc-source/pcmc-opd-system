@@ -739,7 +739,15 @@ async function createAppServer(): Promise<void> {
       const slot = serverWorkloadSlotKey(item);
       if (bySlot.has(slot)) {
         const idx = bySlot.get(slot)!;
-        if (score(item) > score(result[idx])) {
+        const existingEdited = String(result[idx]?.lastEditedAt || '').trim();
+        const itemEdited = String(item.lastEditedAt || '').trim();
+        const itemIsNewerEdit =
+          (Boolean(itemEdited) && !existingEdited) ||
+          (Boolean(itemEdited) && Boolean(existingEdited) && itemEdited > existingEdited);
+        const existingIsNewerEdit =
+          (Boolean(existingEdited) && !itemEdited) ||
+          (Boolean(itemEdited) && Boolean(existingEdited) && existingEdited > itemEdited);
+        if (itemIsNewerEdit || (!existingIsNewerEdit && score(item) > score(result[idx]))) {
           result[idx] = item;
         }
         if (cleanId) seenIds.add(cleanId);
@@ -1312,8 +1320,12 @@ async function createAppServer(): Promise<void> {
           const updated = payload.updated;
           const target = payload.target;
           if (updated) {
+            const targetSlot = serverWorkloadSlotKey(target || updated);
             const idx = next.workloads.findIndex(
-              (w) => (updated.id && w.id === updated.id) || (target && serverWorkloadKey(w) === serverWorkloadKey(target))
+              (w) =>
+                (updated.id && w.id === updated.id) ||
+                (target && serverWorkloadKey(w) === serverWorkloadKey(target)) ||
+                serverWorkloadSlotKey(w) === targetSlot
             );
             if (idx >= 0) next.workloads[idx] = updated;
             else next.workloads.unshift(updated);
@@ -1325,6 +1337,101 @@ async function createAppServer(): Promise<void> {
             }
             delete next.tombstones.workloads[serverWorkloadKey(updated)];
             if (updated.id) delete next.tombstones.workloads[`id:${updated.id}`];
+          }
+          appendAuditIfNew(payload.auditEntry);
+          break;
+        }
+        case 'adjustWorkloadPatients': {
+          const updated = payload.updated;
+          const target = payload.target;
+          if (updated) {
+            const targetSlot = serverWorkloadSlotKey(target || updated);
+            const idx = next.workloads.findIndex(
+              (w) =>
+                (target?.id && w.id === target.id) ||
+                (updated.id && w.id === updated.id) ||
+                (target && serverWorkloadKey(w) === serverWorkloadKey(target)) ||
+                serverWorkloadSlotKey(w) === targetSlot
+            );
+            const existing = idx >= 0 ? next.workloads[idx] : null;
+            const refObj = existing || target || updated;
+            const isPool =
+              String(refObj?.recordType || '').toUpperCase() === 'PREMIUM_POOL' ||
+              String(refObj?.clinic || '').includes('รวมทั้งศูนย์');
+            const isOffDuty =
+              Boolean(refObj?.isOffDuty) || String(refObj?.note || '').includes('[[OFF_DUTY_JSON:');
+            if (!isPool && !isOffDuty) {
+              const nextAdult = Math.max(0, Number(updated.adultPt || 0));
+              const nextChild = Math.max(0, Number(updated.childPt || 0));
+              const nextTotal = Math.max(Number(updated.totalPt || 0), nextAdult + nextChild);
+              const nextAdmit = Math.max(0, Number(updated.admit || 0));
+              const nextEditedAt = String(updated.lastEditedAt || new Date().toISOString());
+              const nextEditReason = String(
+                updated.lastEditReason || payload.auditEntry?.reason || ''
+              ).trim();
+              const nextEditedBy = String(
+                updated.lastEditedBy || payload.auditEntry?.editedBy || ''
+              ).trim();
+
+              if (existing) {
+                const isReferralExisting =
+                  String(existing.clinic || '').trim() === 'ศูนย์รับ - ส่งต่อผู้ป่วย' ||
+                  Boolean(existing.referralData) ||
+                  String(existing.note || '').includes('[[REFERRAL_JSON:');
+                let nextNote = existing.note || '';
+                if (isReferralExisting && typeof updated.note === 'string') {
+                  const refMatch = updated.note.match(/\[\[REFERRAL_JSON:[\s\S]*?\]\]/);
+                  if (refMatch) {
+                    if (/\[\[REFERRAL_JSON:[\s\S]*?\]\]/.test(nextNote)) {
+                      nextNote = nextNote.replace(/\[\[REFERRAL_JSON:[\s\S]*?\]\]/, refMatch[0]).trim();
+                    } else {
+                      nextNote = [nextNote.trim(), refMatch[0]].filter(Boolean).join(' ');
+                    }
+                  }
+                }
+                const patched = {
+                  ...existing,
+                  adultPt: nextAdult,
+                  childPt: nextChild,
+                  totalPt: nextTotal,
+                  admit: nextAdmit,
+                  ...(isReferralExisting && updated.referralData
+                    ? { referralData: updated.referralData, note: nextNote }
+                    : {}),
+                  lastEditedAt: nextEditedAt,
+                  lastEditReason: nextEditReason,
+                  lastEditedBy: nextEditedBy,
+                };
+                next.workloads[idx] = patched;
+                const oldKey = serverWorkloadKey(existing);
+                const newKey = serverWorkloadKey(patched);
+                if (oldKey !== newKey) {
+                  next.tombstones.workloads[oldKey] = Date.now();
+                }
+                delete next.tombstones.workloads[newKey];
+                if (patched.id) delete next.tombstones.workloads[`id:${patched.id}`];
+              } else {
+                const inserted = {
+                  ...updated,
+                  adultPt: nextAdult,
+                  childPt: nextChild,
+                  totalPt: nextTotal,
+                  admit: nextAdmit,
+                  lastEditedAt: nextEditedAt,
+                  lastEditReason: nextEditReason,
+                  lastEditedBy: nextEditedBy,
+                };
+                next.workloads.unshift(inserted);
+                if (target) {
+                  const oldKey = serverWorkloadKey(target);
+                  if (oldKey !== serverWorkloadKey(inserted)) {
+                    next.tombstones.workloads[oldKey] = Date.now();
+                  }
+                }
+                delete next.tombstones.workloads[serverWorkloadKey(inserted)];
+                if (inserted.id) delete next.tombstones.workloads[`id:${inserted.id}`];
+              }
+            }
           }
           appendAuditIfNew(payload.auditEntry);
           break;

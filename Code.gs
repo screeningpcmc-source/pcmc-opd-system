@@ -339,6 +339,9 @@ function doPost(e) {
     if (action === 'appendOT') {
       return jsonResponse_(appendOTFromApi_(payload));
     }
+    if (action === 'adjustWorkloadPatients') {
+      return jsonResponse_(adjustWorkloadPatientsFromApi_(payload || {}));
+    }
     if (action === 'saveUnitCostCenter') {
       return jsonResponse_(saveUnitCostCenterFromApi_(payload || {}));
     }
@@ -1649,6 +1652,129 @@ function updateWorkloadRowFromApi_(payload) {
   if (auditEntry) {
     appendAuditRowsToSheet_([auditEntry]);
   }
+  var res = buildPublicReadAllPayload_();
+  res.targeted = true;
+  return res;
+}
+
+function adjustWorkloadPatientsFromApi_(payload) {
+  var target = payload && payload.target;
+  var updated = payload && payload.updated;
+  var auditEntry = payload && payload.auditEntry;
+  if (!updated) {
+    return { success: false, targeted: true, error: 'ไม่มีข้อมูลยอดผู้ป่วยที่จะปรับปรุง' };
+  }
+
+  var reason = String((auditEntry && auditEntry.reason) || updated.lastEditReason || '').trim();
+  var adjustedBy = String((auditEntry && auditEntry.editedBy) || updated.lastEditedBy || '').trim();
+  if (!adjustedBy) {
+    return { success: false, targeted: true, error: 'กรุณาระบุชื่อผู้ปรับยอดผู้ป่วย' };
+  }
+  if (!reason) {
+    return { success: false, targeted: true, error: 'กรุณาระบุเหตุผลการปรับยอดผู้ป่วย' };
+  }
+
+  var sheet = ensureSheetWithHeaders_(SHEET_NAMES.WORKLOAD, WORKLOAD_BASE_HEADERS);
+  ensureWorkloadColumns_(sheet);
+  var firstHeader = String(sheet.getRange(1, 1).getValue() || '').trim();
+  var hasId = firstHeader === 'Record_ID';
+  var offset = hasId ? 1 : 0;
+  var rowIdx = findWorkloadSheetRowIndex_(sheet, target || updated);
+
+  if (rowIdx === -1) {
+    var notFoundRes = buildPublicReadAllPayload_();
+    notFoundRes.success = false;
+    notFoundRes.targeted = true;
+    notFoundRes.notFound = true;
+    notFoundRes.error = 'ไม่พบรายการเดิมใน Google Sheets (อาจถูกแก้ไขหรือลบจากเครื่องอื่นไปแล้ว)';
+    return notFoundRes;
+  }
+
+  var totalCols = Math.max(hasId ? 19 : 18, sheet.getLastColumn());
+  var rawRow = sheet.getRange(rowIdx, 1, 1, totalCols).getValues()[0];
+  var normRow = rawRow.map(formatCellValue_);
+
+  var existingClinic = String(normRow[offset + 2] || '').trim();
+  var existingRecordType = String(normRow[offset + 17] || 'STANDARD').trim() || 'STANDARD';
+  var existingNote = String(normRow[offset + 13] || '').trim();
+
+  if (
+    existingRecordType === 'PREMIUM_POOL' ||
+    existingClinic.indexOf('รวมทั้งศูนย์') !== -1 ||
+    existingNote.indexOf('[[OFF_DUTY_JSON:') !== -1
+  ) {
+    return {
+      success: false,
+      targeted: true,
+      error: 'รายการ Off เวร หรือแถวกำลังคนรวม ไม่อนุญาตให้ปรับยอดผู้ป่วยทั่วไป'
+    };
+  }
+
+  var oldAdult = Math.max(0, Number(normRow[offset + 4] || 0));
+  var oldChild = Math.max(0, Number(normRow[offset + 5] || 0));
+  var oldTotal = Math.max(Number(normRow[offset + 3] || 0), oldAdult + oldChild);
+  var oldAdmit = Math.max(0, Number(normRow[offset + 6] || 0));
+
+  var nextAdult = Math.max(0, Number(updated.adultPt || 0));
+  var nextChild = Math.max(0, Number(updated.childPt || 0));
+  var nextTotal = Math.max(Number(updated.totalPt || 0), nextAdult + nextChild);
+  var nextAdmit = Math.max(0, Number(updated.admit || 0));
+
+  var nextNote = existingNote;
+  var incomingNote = String(updated.note || '');
+  var incomingRefMatch = incomingNote.match(/\[\[REFERRAL_JSON:([\s\S]*?)\]\]/);
+  var isReferralClinic =
+    existingClinic === 'ศูนย์รับ - ส่งต่อผู้ป่วย' ||
+    existingNote.indexOf('[[REFERRAL_JSON:') !== -1;
+  if (isReferralClinic && incomingRefMatch) {
+    var refTag = '[[REFERRAL_JSON:' + incomingRefMatch[1] + ']]';
+    if (/\[\[REFERRAL_JSON:[\s\S]*?\]\]/.test(existingNote)) {
+      nextNote = existingNote.replace(/\[\[REFERRAL_JSON:[\s\S]*?\]\]/, refTag).trim();
+    } else {
+      nextNote = (existingNote ? existingNote + ' ' : '') + refTag;
+    }
+  }
+
+  var mergedEntry = {
+    id: hasId ? String(rawRow[0] || '').trim() : '',
+    date: normalizeSheetDateGas_(normRow[offset]),
+    shift: String(normRow[offset + 1] || '').trim(),
+    clinic: existingClinic,
+    totalPt: nextTotal,
+    adultPt: nextAdult,
+    childPt: nextChild,
+    admit: nextAdmit,
+    hn: Number(normRow[offset + 7] || 0),
+    rn: Number(normRow[offset + 8] || 0),
+    pn: Number(normRow[offset + 9] || 0),
+    na: Number(normRow[offset + 10] || 0),
+    clerk: Number(normRow[offset + 11] || 0),
+    serviceWorker: Number(normRow[offset + 12] || 0),
+    note: nextNote,
+    reporter: String(normRow[offset + 14] || '').trim(),
+    clinicGroup: String(normRow[offset + 15] || '').trim(),
+    poolId: String(normRow[offset + 16] || '').trim(),
+    recordType: existingRecordType
+  };
+
+  var existingId = hasId ? String(rawRow[0] || '').trim() : '';
+  var rowValues = workloadObjToRowArray_(mergedEntry, hasId, existingId);
+  sheet.getRange(rowIdx, 1, 1, rowValues.length).setValues([rowValues]);
+  SpreadsheetApp.flush();
+
+  var auditToAppend = {
+    timestamp: String((auditEntry && auditEntry.timestamp) || new Date().toISOString()),
+    action: 'ปรับยอดผู้ป่วย',
+    targetName: existingClinic || String((auditEntry && auditEntry.targetName) || ''),
+    summary: String(
+      (auditEntry && auditEntry.summary) ||
+      (existingClinic + ' (' + mergedEntry.date + ' • ' + mergedEntry.shift + ') ผู้ป่วย ' + oldTotal + ' → ' + nextTotal + ' คน, Admit ' + oldAdmit + ' → ' + nextAdmit)
+    ),
+    reason: reason,
+    editedBy: adjustedBy
+  };
+  appendAuditRowsToSheet_([auditToAppend]);
+
   var res = buildPublicReadAllPayload_();
   res.targeted = true;
   return res;

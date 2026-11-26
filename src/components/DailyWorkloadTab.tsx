@@ -92,8 +92,10 @@ import {
   CalendarOff,
   AlertCircle,
   UserPlus,
-  PauseCircle
+  PauseCircle,
+  SlidersHorizontal
 } from 'lucide-react';
+import { AdjustPatientModal, AdjustPatientPatch } from './AdjustPatientModal';
 
 interface LeaveSelectionDraft {
   staffId: string;
@@ -149,6 +151,12 @@ interface DailyWorkloadTabProps {
     trainingData?: WorkloadTrainingPayload[] | null
   ) => void;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
+  onAdjustWorkloadPatients?: (
+    target: DailyWorkload,
+    patch: AdjustPatientPatch,
+    adjusterName: string,
+    reason: string
+  ) => void;
   onDeleteWorkload: (id: string, reason: string) => void;
   defaultReporter?: string;
   isAdmin?: boolean;
@@ -167,6 +175,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   onSaveWorkload,
   onSaveBatchWorkloads,
   onUpdateWorkload,
+  onAdjustWorkloadPatients,
   onDeleteWorkload,
   defaultReporter = '',
   isAdmin = false,
@@ -178,8 +187,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
   const [shift, setShift] = useState<WorkShift>('ในเวลา 08:00-16:00');
   const [clinic, setClinic] = useState<string>(inTimeClinics[0] || IN_TIME_CLINICS[0]);
 
-  // Admin Editing / Deleting Modal & Form Error State
+  // Admin Editing / Deleting Modal, General Patient Adjust Modal & Form Error State
   const [formError, setFormError] = useState<string>('');
+  const [adjustingPatientWorkload, setAdjustingPatientWorkload] = useState<DailyWorkload | null>(null);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
   const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
   const [editWorkloadReasonError, setEditWorkloadReasonError] = useState<string>('');
@@ -362,22 +372,29 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
     );
   }, [workloads, date, shift]);
 
-  const existingPremiumSubClinics = useMemo(() => {
+  const existingPremiumSubMap = useMemo(() => {
     const normDate = normalizeWorkloadDateStr(date);
     const normShift = normalizeWorkloadShiftStr(shift);
-    return new Set(
-      workloads
-        .filter(
-          w =>
-            normalizeWorkloadDateStr(w.date) === normDate &&
-            normalizeWorkloadShiftStr(w.shift) === normShift &&
-            (w.recordType === 'PREMIUM_SUB' ||
-              ((isPremiumGroupName(w.clinicGroup) || /-Premium$/i.test(w.clinic)) &&
-                !isPremiumPoolClinicName(w.clinic)))
-        )
-        .map(w => w.clinic)
-    );
+    const map = new Map<string, DailyWorkload>();
+    workloads
+      .filter(
+        w =>
+          normalizeWorkloadDateStr(w.date) === normDate &&
+          normalizeWorkloadShiftStr(w.shift) === normShift &&
+          (w.recordType === 'PREMIUM_SUB' ||
+            ((isPremiumGroupName(w.clinicGroup) || /-Premium$/i.test(w.clinic)) &&
+              !isPremiumPoolClinicName(w.clinic)))
+      )
+      .forEach(w => {
+        if (!map.has(w.clinic)) map.set(w.clinic, w);
+      });
+    return map;
   }, [workloads, date, shift]);
+
+  const existingPremiumSubClinics = useMemo(
+    () => new Set(existingPremiumSubMap.keys()),
+    [existingPremiumSubMap]
+  );
 
   const existingDuplicateWorkload = useMemo(() => {
     if (isPremiumClinic) return null;
@@ -1700,7 +1717,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
             {existingDuplicateWorkload && (
               <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-xs text-red-950 flex items-start gap-2.5 shadow-2xs">
                 <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <div className="space-y-0.5">
+                <div className="space-y-1 flex-1 min-w-0">
                   <div className="font-bold text-red-800">
                     ตรวจพบข้อมูลภาระงานซ้ำในวันและกะเวลาเดียวกัน (ห้ามบันทึกซ้ำ)
                   </div>
@@ -1710,9 +1727,23 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                     <strong>{getEffectiveTotalPt(existingDuplicateWorkload)}</strong> ราย • รายงานโดย{' '}
                     <strong>{existingDuplicateWorkload.reporter || '-'}</strong>)
                   </div>
-                  <div className="text-[11px] text-red-700">
-                    หากต้องการแก้ไขตัวเลข กรุณาใช้ปุ่มแก้ไขหรือลบรายการเดิมในตารางด้านขวา (เฉพาะ Admin)
+                  <div className="text-[11px] text-red-800">
+                    {isOffDutyWorkload(existingDuplicateWorkload)
+                      ? 'รายการนี้บันทึกเป็น Off เวรไว้แล้ว หากต้องการแก้ไขหรือลบรายการ กรุณาให้ผู้ดูแลระบบ (Admin) ดำเนินการในตารางด้านขวา'
+                      : 'หากมีผู้ป่วยเพิ่มจากการส่งตรวจ/Consult หรือต้องการลดยอดผู้ป่วย สามารถกดปุ่ม "ปรับเพิ่ม / ลดยอดผู้ป่วยรายการนี้" ได้ทันที (ไม่ต้องใช้สิทธิ์ Admin)'}
                   </div>
+                  {onAdjustWorkloadPatients && !isOffDutyWorkload(existingDuplicateWorkload) && (
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setAdjustingPatientWorkload(existingDuplicateWorkload)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold shadow-xs transition-colors cursor-pointer"
+                      >
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                        <span>ปรับเพิ่ม / ลดยอดผู้ป่วยรายการนี้</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1884,6 +1915,7 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                           const rowTotal = rowVal.adultPt + rowVal.childPt;
                           const isRowActive = rowTotal > 0 || rowVal.admit > 0;
                           const alreadySaved = existingPremiumSubClinics.has(sub);
+                          const savedSubRecord = alreadySaved ? existingPremiumSubMap.get(sub) : undefined;
                           return (
                             <tr
                               key={sub}
@@ -1902,6 +1934,19 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                                       บันทึกแล้วในกะนี้ (ห้ามบันทึกซ้ำ)
                                     </span>
                                   )}
+                                  {alreadySaved &&
+                                    savedSubRecord &&
+                                    onAdjustWorkloadPatients &&
+                                    !isOffDutyWorkload(savedSubRecord) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setAdjustingPatientWorkload(savedSubRecord)}
+                                        className="text-[10px] px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1 shadow-2xs cursor-pointer"
+                                      >
+                                        <SlidersHorizontal className="w-2.5 h-2.5" />
+                                        <span>ปรับยอด ({getEffectiveTotalPt(savedSubRecord)})</span>
+                                      </button>
+                                    )}
                                 </div>
                               </td>
                               <td className="py-1.5 px-2">
@@ -3801,48 +3846,61 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                         </div>
                         <div className="text-[11px] text-gray-500">{item.shift}</div>
                       </div>
-                      {isAdmin && (
-                        <div className="flex items-center gap-1">
-                          {onUpdateWorkload && (
+                      <div className="flex items-center gap-1 flex-wrap justify-end shrink-0">
+                        {onAdjustWorkloadPatients && !isPoolRow && !itemIsOffDuty && (
+                          <button
+                            type="button"
+                            onClick={() => setAdjustingPatientWorkload(item)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10.5px] font-bold transition-colors cursor-pointer"
+                            title="ปรับเพิ่ม/ลดจำนวนผู้ป่วย (ไม่ต้องใช้รหัส Admin)"
+                          >
+                            <SlidersHorizontal className="w-3 h-3" />
+                            <span>ปรับยอดผู้ป่วย</span>
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <>
+                            {onUpdateWorkload && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingWorkload({
+                                    ...item,
+                                    totalPt: getEffectiveTotalPt(item),
+                                    ...(itemIsOffDuty
+                                      ? { isOffDuty: true, offDutyReason: itemOffReason }
+                                      : {}),
+                                    ...(itemOffStaff.length > 0 ? { offDutyStaff: itemOffStaff } : {}),
+                                    ...(isReferralWorkload(item) && !itemIsOffDuty
+                                      ? { referralData: normalizeReferralData(item.referralData) }
+                                      : {}),
+                                  });
+                                  setAdminAddOffDutyStaffId('');
+                                  setEditWorkloadReason('');
+                                  setEditWorkloadReasonError('');
+                                  setEditModalError('');
+                                }}
+                                className="text-gray-400 hover:text-blue-600 p-1 rounded transition-colors cursor-pointer"
+                                title="แก้ไขรายการนี้ (ผู้ดูแลระบบ Admin)"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => {
-                                setEditingWorkload({
-                                  ...item,
-                                  totalPt: getEffectiveTotalPt(item),
-                                  ...(itemIsOffDuty
-                                    ? { isOffDuty: true, offDutyReason: itemOffReason }
-                                    : {}),
-                                  ...(itemOffStaff.length > 0 ? { offDutyStaff: itemOffStaff } : {}),
-                                  ...(isReferralWorkload(item) && !itemIsOffDuty
-                                    ? { referralData: normalizeReferralData(item.referralData) }
-                                    : {}),
-                                });
-                                setAdminAddOffDutyStaffId('');
-                                setEditWorkloadReason('');
-                                setEditWorkloadReasonError('');
-                                setEditModalError('');
+                                setDeletingWorkload(item);
+                                setDeleteWorkloadReason('');
+                                setDeleteWorkloadReasonError('');
                               }}
-                              className="text-gray-400 hover:text-blue-600 p-1 rounded transition-colors cursor-pointer"
-                              title="แก้ไขรายการนี้ (ผู้ดูแลระบบ Admin)"
+                              className="text-gray-400 hover:text-red-500 p-1 rounded transition-colors cursor-pointer"
+                              title="ลบรายการนี้ (เฉพาะผู้ดูแลระบบ Admin)"
                             >
-                              <Pencil className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDeletingWorkload(item);
-                              setDeleteWorkloadReason('');
-                              setDeleteWorkloadReasonError('');
-                            }}
-                            className="text-gray-400 hover:text-red-500 p-1 rounded transition-colors cursor-pointer"
-                            title="ลบรายการนี้ (เฉพาะผู้ดูแลระบบ Admin)"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {itemIsOffDuty ? (
@@ -4662,6 +4720,16 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           </div>
         </div>
       )}
+
+      {/* General User / Staff Patient Count Adjustment Modal */}
+      <AdjustPatientModal
+        workload={adjustingPatientWorkload}
+        defaultAdjusterName={reporter}
+        onClose={() => setAdjustingPatientWorkload(null)}
+        onConfirm={(target, patch, adjusterName, reason) => {
+          onAdjustWorkloadPatients?.(target, patch, adjusterName, reason);
+        }}
+      />
     </div>
   );
 };

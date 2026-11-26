@@ -65,8 +65,10 @@ import {
   Loader2,
   Plus,
   PauseCircle,
-  Eye
+  Eye,
+  SlidersHorizontal
 } from 'lucide-react';
+import { AdjustPatientModal, AdjustPatientPatch } from './AdjustPatientModal';
 
 interface DailyCensusTabProps {
   workloads: DailyWorkload[];
@@ -75,6 +77,12 @@ interface DailyCensusTabProps {
   premiumSubClinics?: string[];
   settings?: SystemSettings;
   onUpdateWorkload?: (updated: DailyWorkload, reason: string) => void;
+  onAdjustWorkloadPatients?: (
+    target: DailyWorkload,
+    patch: AdjustPatientPatch,
+    adjusterName: string,
+    reason: string
+  ) => void;
   onDeleteWorkload?: (id: string, reason: string) => void;
   onSendLineReportNow?: (params: {
     date: string;
@@ -123,9 +131,11 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   premiumSubClinics = [...DEFAULT_PREMIUM_SUB_CLINICS],
   settings,
   onUpdateWorkload,
+  onAdjustWorkloadPatients,
   onDeleteWorkload,
   onSendLineReportNow,
 }) => {
+  const showManageColumn = isAdmin || Boolean(onAdjustWorkloadPatients);
   const todayStr = getLocalTodayIso();
 
   const [date, setDate] = useState<string>(todayStr);
@@ -142,6 +152,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
   useEffect(() => {
     setLineSendFormat(resolveLineSendFormat(settings?.lineSendFormat, settings?.lineSendAsImage));
   }, [settings?.lineSendFormat, settings?.lineSendAsImage]);
+  const [adjustingPatientWorkload, setAdjustingPatientWorkload] = useState<DailyWorkload | null>(null);
   const [editingWorkload, setEditingWorkload] = useState<DailyWorkload | null>(null);
   const [adminAddOffDutyStaffId, setAdminAddOffDutyStaffId] = useState<string>('');
   const [editWorkloadReason, setEditWorkloadReason] = useState<string>('');
@@ -895,7 +906,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                 <col className="w-[46px]" />
                 <col className="w-[116px]" />
                 <col />
-                {isAdmin && <col className="no-print w-[46px]" />}
+                {showManageColumn && <col className="no-print w-[64px]" />}
               </colgroup>
               <thead className="bg-slate-100 text-slate-800 font-bold border-b border-gray-300">
                 <tr>
@@ -914,13 +925,13 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <th className="py-2 px-1 text-center leading-tight print:px-0.5 print:py-1">พนักงานบริการ</th>
                   <th className="py-2 px-1.5 print:px-1 print:py-1">ผู้บันทึกรายงาน</th>
                   <th className="py-2 px-2 print:px-1 print:py-1">หมายเหตุ</th>
-                  {isAdmin && <th className="py-2 px-1 text-center no-print bg-slate-100">จัดการ</th>}
+                  {showManageColumn && <th className="py-2 px-1 text-center no-print bg-slate-100">จัดการ</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {filteredWorkloads.length === 0 ? (
                   <tr>
-                    <td colSpan={isAdmin ? 16 : 15} className="py-8 text-center text-gray-400">
+                    <td colSpan={showManageColumn ? 16 : 15} className="py-8 text-center text-gray-400">
                       ไม่มีรายการบันทึกภาระงานในวันที่และกะที่เลือก
                     </td>
                   </tr>
@@ -1043,10 +1054,21 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                 </div>
                               )}
                             </td>
-                            {isAdmin && (
+                            {showManageColumn && (
                               <td className="py-2 px-1 text-center no-print">
-                                <div className="flex items-center justify-center gap-0.5">
-                                  {onUpdateWorkload && (
+                                <div className="flex items-center justify-center gap-0.5 flex-wrap">
+                                  {onAdjustWorkloadPatients && !itemIsOffDuty && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setAdjustingPatientWorkload(w)}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold cursor-pointer"
+                                      title="ปรับเพิ่ม/ลดจำนวนผู้ป่วย (ไม่ต้องใช้รหัส Admin)"
+                                    >
+                                      <SlidersHorizontal className="w-3 h-3" />
+                                      <span>ปรับยอด</span>
+                                    </button>
+                                  )}
+                                  {isAdmin && onUpdateWorkload && (
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -1072,7 +1094,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                       <Pencil className="w-3.5 h-3.5" />
                                     </button>
                                   )}
-                                  {onDeleteWorkload && (
+                                  {isAdmin && onDeleteWorkload && (
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -1135,7 +1157,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                   <td className="py-1.5 px-2 text-gray-600 text-[10px] leading-tight break-words print:text-[8px] print:px-1 print:py-0.5">
                                     {item?.reason || '-'}
                                   </td>
-                                  {isAdmin && (
+                                  {showManageColumn && (
                                     <td className="py-1.5 px-1 text-center text-gray-300 text-[10px] no-print">
                                       -
                                     </td>
@@ -1266,9 +1288,9 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                 </div>
                               )}
                             </td>
-                            {isAdmin && (
+                            {showManageColumn && (
                               <td className="py-2 px-1 text-center no-print">
-                                {poolRec ? (
+                                {isAdmin && poolRec ? (
                                   <div className="flex items-center justify-center gap-0.5">
                                     {onUpdateWorkload && (
                                       <button
@@ -1356,10 +1378,21 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                   </div>
                                 )}
                               </td>
-                              {isAdmin && (
+                              {showManageColumn && (
                                 <td className="py-1.5 px-1 text-center no-print">
-                                  <div className="flex items-center justify-center gap-0.5">
-                                    {onUpdateWorkload && (
+                                  <div className="flex items-center justify-center gap-0.5 flex-wrap">
+                                    {onAdjustWorkloadPatients && !isOffDutyWorkload(sub) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setAdjustingPatientWorkload(sub)}
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold cursor-pointer"
+                                        title="ปรับเพิ่ม/ลดจำนวนผู้ป่วยแผนกย่อย"
+                                      >
+                                        <SlidersHorizontal className="w-3 h-3" />
+                                        <span>ปรับยอด</span>
+                                      </button>
+                                    )}
+                                    {isAdmin && onUpdateWorkload && (
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -1374,7 +1407,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                                         <Pencil className="w-3.5 h-3.5" />
                                       </button>
                                     )}
-                                    {onDeleteWorkload && (
+                                    {isAdmin && onDeleteWorkload && (
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -1428,7 +1461,7 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
                   <td colSpan={2} className="py-2 px-2 text-right text-[11px] print:text-[8.5px] print:px-1 whitespace-normal">
                     กำลังคนพยาบาลรวม: <span className="text-emerald-900 font-black">{totalNursingOnDuty.toFixed(1)}</span> แรง
                   </td>
-                  {isAdmin && <td className="no-print"></td>}
+                  {showManageColumn && <td className="no-print"></td>}
                 </tr>
               </tfoot>
             </table>
@@ -2599,6 +2632,15 @@ export const DailyCensusTab: React.FC<DailyCensusTabProps> = ({
           </div>
         </div>
       )}
+
+      {/* General User / Staff Patient Count Adjustment Modal */}
+      <AdjustPatientModal
+        workload={adjustingPatientWorkload}
+        onClose={() => setAdjustingPatientWorkload(null)}
+        onConfirm={(target, patch, adjusterName, reason) => {
+          onAdjustWorkloadPatients?.(target, patch, adjusterName, reason);
+        }}
+      />
     </div>
   );
 };

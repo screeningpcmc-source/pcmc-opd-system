@@ -585,7 +585,7 @@ export interface OTAttendance {
 export interface AuditLogEntry {
   id: string;
   timestamp: string;
-  action: 'แก้ไขวันลา' | 'ลบวันลา' | 'แก้ไขเวร OT' | 'ลบเวร OT' | 'แก้ไขภาระงาน' | 'ลบภาระงาน';
+  action: 'แก้ไขวันลา' | 'ลบวันลา' | 'แก้ไขเวร OT' | 'ลบเวร OT' | 'แก้ไขภาระงาน' | 'ลบภาระงาน' | 'ปรับยอดผู้ป่วย';
   targetName: string;
   summary: string;
   reason: string;

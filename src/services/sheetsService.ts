@@ -4584,6 +4584,118 @@ export const pushTargetedAdminRowMutationViaAppsScript = async (params: {
 };
 
 /**
+ * Public (non-Admin) targeted patient-count adjustment via Apps Script Web App URL.
+ * Code.gs updates ONLY Total_Pt, Adult_Pt, Child_Pt, Admit (and referral JSON if referral clinic)
+ * while preserving original staffing, date, shift, clinic, and off-duty metadata.
+ */
+export const pushPublicWorkloadPatientAdjustmentViaAppsScript = async (params: {
+  gasUrl: string;
+  target: DailyWorkload;
+  updated: DailyWorkload;
+  db: AppDatabase;
+  auditEntry: AuditLogEntry;
+  expectedDirtyVersion: number;
+}): Promise<{
+  ok: boolean;
+  notFound?: boolean;
+  unsupportedAction?: boolean;
+  error?: string;
+  syncedDb?: AppDatabase;
+}> => {
+  const { gasUrl, target, updated, db, auditEntry, expectedDirtyVersion } = params;
+  if (!gasUrl) {
+    return { ok: false, error: 'ไม่มี Web App URL' };
+  }
+
+  const buildSyncedDbFromPayload = (
+    data: any,
+    sourceDb: AppDatabase,
+    pendingAudits?: AuditLogEntry[]
+  ): AppDatabase => {
+    const merged = mergeRemoteDataRows(
+      {
+        staffRows: Array.isArray(data.staffRows) ? data.staffRows : [],
+        workloadRows: Array.isArray(data.workloadRows) ? data.workloadRows : [],
+        leaveRows: Array.isArray(data.leaveRows) ? data.leaveRows : [],
+        otRows: Array.isArray(data.otRows) ? data.otRows : [],
+        settingsRows: Array.isArray(data.settingsRows) ? data.settingsRows : [],
+        auditRows: Array.isArray(data.auditRows) ? data.auditRows : [],
+      },
+      sourceDb,
+      pendingAudits ? { justPushedAudits: pendingAudits } : undefined
+    );
+    const resolvedSheetId =
+      merged.settings.spreadsheetId || String(data.spreadsheetId || '').trim();
+    return {
+      ...merged,
+      settings: {
+        ...merged.settings,
+        spreadsheetId: resolvedSheetId || undefined,
+        spreadsheetUrl:
+          merged.settings.spreadsheetUrl ||
+          (resolvedSheetId ? `https://docs.google.com/spreadsheets/d/${resolvedSheetId}/edit` : undefined),
+        gasUrl: merged.settings.gasUrl || String(data.gasUrl || gasUrl).trim(),
+      },
+    };
+  };
+
+  try {
+    await waitForInFlightWorkloadAppends();
+    const gasRes = await requestGasEndpoint(gasUrl, {
+      method: 'POST',
+      body: {
+        action: 'adjustWorkloadPatients',
+        payload: {
+          target: prepareWorkloadForRemote(target),
+          updated: prepareWorkloadForRemote(updated),
+          auditEntry,
+        },
+      },
+    });
+
+    if (!gasRes.ok && !gasRes.data) {
+      return { ok: false, error: gasRes.error || `HTTP ${gasRes.httpStatus}` };
+    }
+    const data = gasRes.data;
+
+    if (data && data.targeted === true) {
+      if (data.notFound) {
+        clearWorkloadsDirty(expectedDirtyVersion);
+        clearWorkloadTombstone(target);
+        const syncedDb = buildSyncedDbFromPayload(data, db);
+        return {
+          ok: false,
+          notFound: true,
+          error: String(data.error || 'ไม่พบรายการเดิมใน Google Sheets'),
+          syncedDb,
+        };
+      }
+      if (data.success === false) {
+        return { ok: false, error: String(data.error || 'Apps Script ปฏิเสธการปรับยอดผู้ป่วย') };
+      }
+      clearWorkloadsDirty(expectedDirtyVersion);
+      if (getWorkloadsDirtyVersion() === 0) clearAllWorkloadTombstones();
+      markAuditOutboxSynced([auditEntry]);
+      const syncedDb = buildSyncedDbFromPayload(data, db, [auditEntry]);
+      return { ok: true, syncedDb };
+    }
+
+    const errText = String(data?.error || '');
+    if (data && data.success === false && errText.includes('สงวนสิทธิ์')) {
+      return {
+        ok: false,
+        unsupportedAction: true,
+        error: 'Apps Script เวอร์ชันที่ใช้งานยังไม่รองรับการปรับยอดผู้ป่วยทั่วไป กรุณาให้ผู้ดูแลระบบ Deploy Code.gs เวอร์ชันล่าสุด',
+      };
+    }
+
+    return { ok: false, error: errText || 'Apps Script ปฏิเสธการปรับยอดผู้ป่วย' };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err || 'Network error') };
+  }
+};
+
+/**
  * Targeted single-row Admin Staff mutation via Apps Script Web App URL.
  * Updates/inserts/deletes ONLY the affected Staff_Master row (and matching OT rows' name/code cells).
  */
