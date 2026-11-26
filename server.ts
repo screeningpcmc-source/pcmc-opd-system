@@ -790,6 +790,23 @@ async function createAppServer(): Promise<void> {
     return '';
   }
 
+  function isLeaveReasonRequiredServer(leaveType: any): boolean {
+    const lt = String(leaveType || '').trim();
+    if (!lt || lt === 'ลาพักผ่อน') return false;
+    return lt.includes('ลากิจ') || lt.includes('ลาป่วย');
+  }
+
+  function hasValidLeaveReasonServer(leaveType: any, note: any): boolean {
+    if (!isLeaveReasonRequiredServer(leaveType)) return true;
+    const clean = String(note || '')
+      .replace(/\[(ครึ่งวันเช้า|ครึ่งวันบ่าย)\]\s*/g, '')
+      .replace(/\((ครึ่งวันเช้า|ครึ่งวันบ่าย)\)\s*/g, '')
+      .trim();
+    if (!clean) return false;
+    if (/^บันทึกอัตโนมัติจากห้องตรวจ/.test(clean)) return false;
+    return true;
+  }
+
   function normalizeLeaveRangeServer(startRaw: any, endRaw: any): { start: string; end: string } {
     const s = normalizeDateYmdServer(startRaw);
     const e = normalizeDateYmdServer(endRaw || startRaw) || s;
@@ -1329,6 +1346,14 @@ async function createAppServer(): Promise<void> {
         }
         case 'addLeave': {
           if (payload.leave) {
+            if (!hasValidLeaveReasonServer(payload.leave.leaveType, payload.leave.note)) {
+              res.json({
+                ok: true,
+                missingReasonRejected: true,
+                ...buildPublicDbResponse(cur),
+              });
+              return;
+            }
             const { added, conflicts } = addUniqueLeaves([payload.leave]);
             if (added.length === 0 && conflicts.length > 0) {
               res.json({
@@ -1346,6 +1371,14 @@ async function createAppServer(): Promise<void> {
           const updatedRaw = payload.updated;
           const target = payload.target;
           if (updatedRaw) {
+            if (!hasValidLeaveReasonServer(updatedRaw.leaveType, updatedRaw.note)) {
+              res.json({
+                ok: true,
+                missingReasonRejected: true,
+                ...buildPublicDbResponse(cur),
+              });
+              return;
+            }
             const range = normalizeLeaveRangeServer(updatedRaw.startDate, updatedRaw.endDate);
             const updated = {
               ...updatedRaw,

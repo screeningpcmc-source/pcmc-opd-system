@@ -53,6 +53,8 @@ import {
   isLeaveDuplicateConflict,
   normalizeLeaveDateStr,
   normalizeStaffNameKey,
+  isLeaveReasonRequired,
+  hasValidLeaveReason,
 } from '../types';
 import {
   formatThaiShortDate,
@@ -1270,6 +1272,23 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
       return;
     }
 
+    if (!isOutTime && hasStaffLeave && selectedLeaveItems.length > 0) {
+      const missingReasonItems = selectedLeaveItems.filter(
+        item => !hasValidLeaveReason(item.leaveType, item.note)
+      );
+      if (missingReasonItems.length > 0) {
+        const missingDetails = missingReasonItems.map(item => {
+          const staff = staffList.find(s => s.staffId === item.staffId);
+          return `${staff?.name || item.staffId} (${item.leaveType})`;
+        });
+        setFormError(
+          `กรุณาระบุเหตุผลการลาให้ครบก่อนบันทึก (บังคับใส่เหตุผลทุกครั้งสำหรับ ลากิจ/ลาป่วย ยกเว้นลาพักผ่อน): ${missingDetails.join(', ')}`
+        );
+        scrollToFormError();
+        return;
+      }
+    }
+
     let leaveData: WorkloadLeavePayload[] | null = null;
     if (!isOutTime && hasStaffLeave && selectedLeaveItems.length > 0) {
       leaveData = selectedLeaveItems.map(item => {
@@ -1279,7 +1298,9 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
           leaveType: item.leaveType,
           days: item.days,
           periodLabel: item.days === 0.5 ? (item.periodLabel || 'ครึ่งวันเช้า') : '',
-          note: item.note.trim() || `บันทึกอัตโนมัติจากห้องตรวจ ${clinic}`,
+          note:
+            item.note.trim() ||
+            (isLeaveReasonRequired(item.leaveType) ? '' : `บันทึกอัตโนมัติจากห้องตรวจ ${clinic}`),
         };
       });
     }
@@ -2724,22 +2745,45 @@ export const DailyWorkloadTab: React.FC<DailyWorkloadTabProps> = ({
                               </div>
                               <div>
                                 <label className="block text-[10.5px] font-semibold text-gray-700 mb-0.5">
-                                  หมายเหตุเฉพาะบุคคล
+                                  {isLeaveReasonRequired(item.leaveType) ? (
+                                    <>
+                                      เหตุผลการลา <span className="text-red-500">*</span>{' '}
+                                      <span className="text-rose-700 font-medium">(บังคับระบุ)</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      หมายเหตุเฉพาะบุคคล{' '}
+                                      <span className="text-gray-400 font-normal">(ไม่บังคับ)</span>
+                                    </>
+                                  )}
                                 </label>
                                 <input
                                   type="text"
                                   value={item.note}
-                                  onChange={(e) =>
+                                  required={isLeaveReasonRequired(item.leaveType)}
+                                  onChange={(e) => {
                                     setSelectedLeaveItems(prev =>
                                       prev.map(x =>
                                         x.staffId === item.staffId
                                           ? { ...x, note: e.target.value }
                                           : x
                                       )
-                                    )
+                                    );
+                                    if (formError) setFormError('');
+                                  }}
+                                  placeholder={
+                                    isLeaveReasonRequired(item.leaveType)
+                                      ? item.leaveType.includes('ป่วย')
+                                        ? 'ระบุเหตุผล (บังคับ) เช่น เวียนศีรษะ, ท้องเสีย'
+                                        : 'ระบุเหตุผล (บังคับ) เช่น ไปทำใบขับขี่, ทำธุระ'
+                                      : 'เช่น ลาพักผ่อนประจำปี (ไม่บังคับ)'
                                   }
-                                  placeholder="เช่น มีไข้, กิจธุระส่วนตัว"
-                                  className="w-full rounded-lg border border-amber-200 py-1 px-2 text-xs bg-white"
+                                  className={`w-full rounded-lg border py-1 px-2 text-xs bg-white ${
+                                    isLeaveReasonRequired(item.leaveType) &&
+                                    !hasValidLeaveReason(item.leaveType, item.note)
+                                      ? 'border-rose-400 ring-1 ring-rose-300/70'
+                                      : 'border-amber-200'
+                                  }`}
                                 />
                               </div>
                             </div>

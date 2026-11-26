@@ -1415,4 +1415,23 @@ export function deduplicateLeaves(items: LeaveRecord[]): LeaveRecord[] {
   return result;
 }
 
+export function isLeaveReasonRequired(leaveType?: string | null): boolean {
+  const lt = String(leaveType || '').trim();
+  if (!lt || lt === 'ลาพักผ่อน') return false;
+  return lt.includes('ลากิจ') || lt.includes('ลาป่วย');
+}
+
+export function extractCleanLeaveReason(note?: string | null): string {
+  const clean = stripLeavePeriodFromNote(note || '');
+  if (!clean) return '';
+  if (/^บันทึกอัตโนมัติจากห้องตรวจ/.test(clean)) return '';
+  return clean;
+}
+
+export function hasValidLeaveReason(leaveType?: string | null, note?: string | null): boolean {
+  if (!isLeaveReasonRequired(leaveType)) return true;
+  return extractCleanLeaveReason(note).length > 0;
+}
+
+
 

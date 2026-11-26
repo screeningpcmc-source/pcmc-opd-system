@@ -42,6 +42,8 @@ import {
   isLeaveDuplicateConflict,
   normalizeLeaveDateStr,
   normalizeStaffNameKey,
+  isLeaveReasonRequired,
+  hasValidLeaveReason,
 } from '../types';
 import {
   CalendarClock,
@@ -316,6 +318,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
   const [editingLeave, setEditingLeave] = useState<LeaveRecord | null>(null);
   const [editLeaveReason, setEditLeaveReason] = useState<string>('');
   const [editLeaveReasonError, setEditLeaveReasonError] = useState<string>('');
+  const [editLeaveNoteError, setEditLeaveNoteError] = useState<string>('');
   const [editLeaveDuplicateError, setEditLeaveDuplicateError] = useState<string>('');
   const [deletingLeave, setDeletingLeave] = useState<LeaveRecord | null>(null);
   const [deleteLeaveReason, setDeleteLeaveReason] = useState<string>('');
@@ -693,6 +696,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
     const numericDays = Number(leaveDays) || 0;
     if (numericDays <= 0) {
       setLeaveFormError('ช่วงวันที่เลือกตรงกับวันหยุดราชการทั้งหมด (0 วัน) กรุณาเลือกวันทำการ หรือระบุจำนวนวันลาด้วยตนเอง');
+      scrollLeaveErr();
+      return;
+    }
+    if (!hasValidLeaveReason(leaveType, leaveNote)) {
+      setLeaveFormError(
+        `กรุณาระบุเหตุผลการลา สำหรับ "${leaveType}" ก่อนบันทึก (บังคับใส่เหตุผลทุกครั้ง ยกเว้นลาพักผ่อน)`
+      );
       scrollLeaveErr();
       return;
     }
@@ -2068,7 +2078,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                 </label>
                 <select
                   value={leaveType}
-                  onChange={(e) => setLeaveType(e.target.value as LeaveType)}
+                  onChange={(e) => {
+                    setLeaveType(e.target.value as LeaveType);
+                    setLeaveFormError('');
+                  }}
                   required
                   className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border bg-white font-medium text-amber-900"
                 >
@@ -2215,14 +2228,42 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  หมายเหตุ / เหตุผลการลา / หัวข้ออบรม
+                  {isLeaveReasonRequired(leaveType) ? (
+                    <>
+                      เหตุผลการลา <span className="text-red-500">*</span>{' '}
+                      <span className="text-[10.5px] font-medium text-rose-700">
+                        (บังคับระบุสำหรับ {leaveType})
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      หมายเหตุ / เหตุผลการลา / หัวข้ออบรม{' '}
+                      <span className="text-[10.5px] font-normal text-gray-500">
+                        (ไม่บังคับสำหรับลาพักผ่อน)
+                      </span>
+                    </>
+                  )}
                 </label>
                 <input
                   type="text"
                   value={leaveNote}
-                  onChange={(e) => setLeaveNote(e.target.value)}
-                  placeholder="เช่น ใบรับรองแพทย์, ลาพักผ่อนประจำปี, ประชุมวิชาการ"
-                  className="w-full text-xs rounded-lg border-gray-300 py-2 px-3 border"
+                  required={isLeaveReasonRequired(leaveType)}
+                  onChange={(e) => {
+                    setLeaveNote(e.target.value);
+                    if (leaveFormError) setLeaveFormError('');
+                  }}
+                  placeholder={
+                    isLeaveReasonRequired(leaveType)
+                      ? leaveType.includes('ป่วย')
+                        ? 'ระบุอาการ/เหตุผล (บังคับ) เช่น เวียนศีรษะ, ท้องเสีย, พบแพทย์'
+                        : 'ระบุเหตุผลการลากิจ (บังคับ) เช่น ไปทำใบขับขี่, ทำธุระส่วนตัว'
+                      : 'เช่น ลาพักผ่อนประจำปี, ประชุมวิชาการ (ไม่บังคับสำหรับลาพักผ่อน)'
+                  }
+                  className={`w-full text-xs rounded-lg py-2 px-3 border ${
+                    isLeaveReasonRequired(leaveType) && !hasValidLeaveReason(leaveType, leaveNote)
+                      ? 'border-amber-400 bg-amber-50/30 focus:border-amber-500'
+                      : 'border-gray-300'
+                  }`}
                 />
               </div>
 
@@ -2452,6 +2493,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       onClick={() => {
                                         setEditingLeave({ ...lv });
                                         setEditLeaveReason('');
+                                        setEditLeaveReasonError('');
+                                        setEditLeaveNoteError('');
+                                        setEditLeaveDuplicateError('');
                                         setEditLeaveReasonError('');
                                         setEditLeaveDuplicateError('');
                                       }}
@@ -2837,6 +2881,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                           setEditingLeave({ ...lv });
                                           setEditLeaveReason('');
                                           setEditLeaveReasonError('');
+                                          setEditLeaveNoteError('');
+                                          setEditLeaveDuplicateError('');
+                                          setEditLeaveReasonError('');
                                         }}
                                         className="p-1 text-gray-400 hover:text-blue-600 cursor-pointer"
                                         title="แก้ไข"
@@ -2995,6 +3042,9 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                                       onClick={() => {
                                         setEditingLeave({ ...lv });
                                         setEditLeaveReason('');
+                                        setEditLeaveReasonError('');
+                                        setEditLeaveNoteError('');
+                                        setEditLeaveDuplicateError('');
                                         setEditLeaveReasonError('');
                                         setEditLeaveDuplicateError('');
                                       }}
@@ -5505,9 +5555,10 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   <label className="block font-semibold text-gray-700 mb-1">ประเภทการลา</label>
                   <select
                     value={editingLeave.leaveType}
-                    onChange={(e) =>
-                      setEditingLeave({ ...editingLeave, leaveType: e.target.value as LeaveType })
-                    }
+                    onChange={(e) => {
+                      setEditingLeave({ ...editingLeave, leaveType: e.target.value as LeaveType });
+                      setEditLeaveNoteError('');
+                    }}
                     className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-medium"
                   >
                     {leaveTypes.map((lt) => (
@@ -5592,14 +5643,43 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
               )}
 
               <div>
-                <label className="block font-semibold text-gray-700 mb-1">หมายเหตุการลา</label>
+                <label className="block font-semibold text-gray-700 mb-1">
+                  {isLeaveReasonRequired(editingLeave.leaveType) ? (
+                    <>
+                      เหตุผลการลา / หมายเหตุ <span className="text-red-500">*</span>{' '}
+                      <span className="text-[10.5px] font-medium text-rose-700">
+                        (บังคับระบุสำหรับ {editingLeave.leaveType})
+                      </span>
+                    </>
+                  ) : (
+                    'หมายเหตุการลา'
+                  )}
+                </label>
                 <input
                   type="text"
                   value={editingLeave.note || ''}
-                  onChange={(e) => setEditingLeave({ ...editingLeave, note: e.target.value })}
-                  placeholder="เช่น ใบรับรองแพทย์, ลาพักผ่อนประจำปี"
-                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs"
+                  onChange={(e) => {
+                    setEditingLeave({ ...editingLeave, note: e.target.value });
+                    if (editLeaveNoteError) setEditLeaveNoteError('');
+                  }}
+                  placeholder={
+                    isLeaveReasonRequired(editingLeave.leaveType)
+                      ? 'ระบุเหตุผลการลา (บังคับ) เช่น เวียนศีรษะ, ท้องเสีย, ทำธุระส่วนตัว'
+                      : 'เช่น ใบรับรองแพทย์, ลาพักผ่อนประจำปี'
+                  }
+                  className={`w-full px-2.5 py-1.5 border rounded-lg text-xs ${
+                    isLeaveReasonRequired(editingLeave.leaveType) &&
+                    !hasValidLeaveReason(editingLeave.leaveType, editingLeave.note)
+                      ? 'border-rose-400 bg-rose-50/30'
+                      : 'border-gray-300'
+                  }`}
                 />
+                {editLeaveNoteError && (
+                  <p className="mt-1 text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{editLeaveNoteError}</span>
+                  </p>
+                )}
               </div>
 
               {/* Mandatory Edit Reason */}
@@ -5680,6 +5760,13 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                     startDate: normStart,
                     endDate: normEnd,
                   };
+                  if (!hasValidLeaveReason(normalizedEditing.leaveType, normalizedEditing.note)) {
+                    setEditLeaveNoteError(
+                      `กรุณาระบุเหตุผลการลา สำหรับ "${normalizedEditing.leaveType}" (บังคับใส่เหตุผลทุกครั้ง ยกเว้นลาพักผ่อน)`
+                    );
+                    return;
+                  }
+                  setEditLeaveNoteError('');
                   const conflict = findOverlappingLeaveConflict(
                     normalizedEditing.staffName,
                     normalizedEditing.leaveType,
@@ -5699,6 +5786,7 @@ export const LeaveAndOTTab: React.FC<LeaveAndOTTabProps> = ({
                   onUpdateLeave(normalizedEditing, editLeaveReason.trim());
                   setEditingLeave(null);
                   setEditLeaveReason('');
+                  setEditLeaveNoteError('');
                 }}
                 className="px-5 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
               >

@@ -52,6 +52,7 @@ import {
   isLeaveDuplicateConflict,
   normalizeLeaveDateStr,
   normalizeStaffNameKey,
+  hasValidLeaveReason,
   DEFAULT_BOOBY_OWNER_NAME
 } from './types';
 import { 
@@ -1533,6 +1534,10 @@ export default function App() {
           const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
           const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
+          if (!hasValidLeaveReason(ld.leaveType, formattedNote)) {
+            showToast(`ข้ามรายการ "${ld.leaveType}" ของ ${cleanName} เนื่องจากยังไม่ได้ระบุเหตุผลการลา`, 'error');
+            return;
+          }
           const candidate: LeaveRecord = {
             id: `LV-AUTO-${Date.now()}-${idx}-${cleanName}`,
             startDate: entryDateNorm,
@@ -1761,6 +1766,10 @@ export default function App() {
           const staff = db.staff.find(s => normalizeStaffNameKey(s.name) === cleanName);
           const numericDays = Number(ld.days) === 0.5 ? 0.5 : 1;
           const formattedNote = formatLeaveNoteWithPeriod(ld.note || '', numericDays, ld.periodLabel);
+          if (!hasValidLeaveReason(ld.leaveType, formattedNote)) {
+            showToast(`ข้ามรายการ "${ld.leaveType}" ของ ${cleanName} เนื่องจากยังไม่ได้ระบุเหตุผลการลา`, 'error');
+            return;
+          }
           const candidate: LeaveRecord = {
             id: `LV-AUTO-${Date.now()}-${idx}-${cleanName}`,
             startDate: primaryDateNorm,
@@ -2493,6 +2502,14 @@ export default function App() {
       return;
     }
 
+    if (!hasValidLeaveReason(normalizedLeave.leaveType, normalizedLeave.note)) {
+      showToast(
+        `กรุณาระบุเหตุผลการลา สำหรับ "${normalizedLeave.leaveType}" ก่อนบันทึก (บังคับใส่เหตุผลทุกครั้ง ยกเว้นลาพักผ่อน)`,
+        'error'
+      );
+      return;
+    }
+
     const conflict = dbRef.current.leaves.find(existing =>
       isLeaveDuplicateConflict(existing, normalizedLeave)
     );
@@ -2588,6 +2605,14 @@ export default function App() {
       lastEditReason: cleanReason,
       lastEditedBy: editedBy,
     };
+
+    if (!hasValidLeaveReason(stamped.leaveType, stamped.note)) {
+      showToast(
+        `กรุณาระบุเหตุผลการลา สำหรับ "${stamped.leaveType}" ก่อนบันทึกแก้ไข (บังคับใส่เหตุผลทุกครั้ง ยกเว้นลาพักผ่อน)`,
+        'error'
+      );
+      return;
+    }
 
     const updateConflict = baseDb.leaves.find((l) =>
       isLeaveDuplicateConflict(l, stamped, stamped.id)
